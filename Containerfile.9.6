@@ -1,0 +1,15 @@
+FROM registry.redhat.io/rhel9-6-els/rhel:latest
+RUN dnf update -y && \
+    dnf install -y git python3-pip && \
+    dnf clean all && \
+    python3 -m pip install -U pip && \
+    python3 -m pip install -U "transformers<4.58" && \
+    python3 -m pip cache purge
+WORKDIR /opt/app-root
+ENV HOME=/opt/app-root/src
+COPY .gitignore pyproject.toml .
+RUN VLLM_TARGET_DEVICE="empty" PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install --ignore-installed /opt/app-root && \
+    python3 -m pip uninstall -y triton && \
+    python3 -m pip cache purge
+COPY vllm_openvino ./vllm_openvino
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
