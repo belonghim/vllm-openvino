@@ -17,6 +17,6 @@ ENV VIRTUAL_ENV=/opt/vllm-env
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
-USER root
-RUN chmod -R 775 .
+RUN chgrp -R 0 /opt/app-root && chmod -R g+rwX /opt/app-root
+ENV HOME=/tmp
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
