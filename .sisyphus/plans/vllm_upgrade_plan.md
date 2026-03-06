@@ -99,7 +99,7 @@
 2. [x] Delete `vllm_openvino/worker/openvino_worker.py`.
 3. [x] Delete `vllm_openvino/worker/openvino_model_runner.py` (verify no remaining imports first).
 4. Clean up `vllm_openvino/worker/__init__.py` if empty.
-5. Optionally delete `vllm_openvino/worker/` directory if empty.
+5. [x] Optionally delete `vllm_openvino/worker/` directory if empty.
 
 **Acceptance Criteria**:
 - No imports from `vllm_openvino.worker.openvino_worker` or `vllm_openvino.worker.openvino_model_runner`.

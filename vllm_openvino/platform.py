@@ -75,12 +75,8 @@ class OpenVinoPlatform(Platform):
                 ), "OpenVINO only supports single CPU socket currently."
 
         if parallel_config.worker_cls == "auto":
-            if vllm_envs.VLLM_USE_V1:
-                parallel_config.worker_cls = \
-                    "vllm_openvino.worker_v1.openvino_worker_v1.OpenVINOWorkerV1"
-            else:
-                parallel_config.worker_cls = \
-                    "vllm_openvino.worker.openvino_worker.OpenVINOWorker"
+            parallel_config.worker_cls = \
+                "vllm_openvino.worker_v1.openvino_worker_v1.OpenVINOWorkerV1"
 
         # check and update model config
         model_config = vllm_config.model_config
