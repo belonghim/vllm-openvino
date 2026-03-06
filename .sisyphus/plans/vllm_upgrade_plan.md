@@ -64,7 +64,7 @@
 ## Phase 2: Refactor to V1-Only Architecture
 
 ### Task 2.1: Extract and Adapt Cache Engine to V1 KVCache Interface
-**Objective**: Convert `OpenVINOCacheEngine` into a proper `KVCache` implementation usable by V1.
+**Objective**: [x] Convert `OpenVINOCacheEngine` into a proper `KVCache` implementation usable by V1.
 
 **Actions**:
 1. Create new module: `vllm_openvino/kv_cache.py`.

@@ -26,7 +26,7 @@ from vllm.utils import (cdiv, is_pin_memory_available)
 
 import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
-from vllm_openvino.worker.openvino_worker import OpenVINOCacheEngine
+from vllm_openvino.kv_cache import OpenVINOCacheEngine
 from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu
 
 logger = init_logger(__name__)
