@@ -10,7 +10,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.multimodal import BatchedTensorInputs
-from vllm.sampling_params import SamplingType
+
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
