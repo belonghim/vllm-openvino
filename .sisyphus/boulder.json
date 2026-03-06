@@ -5,6 +5,16 @@
       "plan": ".sisyphus/plans/v1_protocol_fix_plan.md",
       "completed_at": "2026-03-06T11:00:00Z",
       "result": "success"
+    },
+    {
+      "plan": ".sisyphus/plans/vllm_upgrade_plan.md",
+      "completed_at": "2026-03-06T11:00:00Z",
+      "result": "success"
+    },
+    {
+      "plan": ".sisyphus/plans/cleanup_dead_code.md",
+      "completed_at": "2026-03-07T00:39:20Z",
+      "result": "success"
     }
   ],
   "worktree_path": "/home/user/project/vllm-openvino"
