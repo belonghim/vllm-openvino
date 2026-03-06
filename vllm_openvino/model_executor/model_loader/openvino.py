@@ -232,6 +232,8 @@ class OpenVINOCausalLM(nn.Module):
         logits = self.logits_processor(None, hidden_states, sampling_metadata)
         return logits
 
+
+    @torch._dynamo.disable
     def sample(
         self,
         logits: torch.Tensor,

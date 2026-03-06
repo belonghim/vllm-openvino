@@ -10,7 +10,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 import vllm_openvino.envs as envs  # not sure if this is a optimal solution!
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig, ModelConfig
+    from vllm.config import VllmConfig, ModelConfig, CompilationMode
 else:
     VllmConfig = None
     ModelConfig = None
@@ -145,6 +145,11 @@ class OpenVinoPlatform(Platform):
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE"
                 f" {kv_cache_space}, expect a positive integer value.")
+
+        # Disable torch compilation — OpenVINO compiles its own models
+        from vllm.config import CompilationMode
+        vllm_config.compilation_config.level = 0
+        vllm_config.compilation_config.mode = CompilationMode.NONE
 
         #assert vllm_config.device_config.device_type == "openvino" # see above, device_type!
         # assert vllm_config.device_config.device_type == "cpu"
