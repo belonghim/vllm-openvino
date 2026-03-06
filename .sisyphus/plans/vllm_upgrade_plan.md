@@ -77,14 +77,15 @@ End-to-end inference verified in containerized environment:
 
 ---
 
-## Remaining Cleanup (Not blocking — Low priority)
+## Remaining Cleanup — ✅ Resolved
 
-| Item | File(s) | Description |
-|------|---------|-------------|
-| Remove `VLLM_USE_V1` refs | model loader, Containerfile, README | Dead env var from v0.13.0+ |
-| Delete V0 class | `kv_cache.py` | `OpenVINOWorker` class (~391 lines) still present |
-| Fix metadata builder | `attention/backends/openvino.py` | `build()` passes wrong fields (never called at runtime) |
-| Dead imports | Various `.py` files | Stale V0 imports that don't affect runtime |
+All cleanup items have been addressed by `cleanup_dead_code` plan:
+- `VLLM_USE_V1` refs: Already absent from source (confirmed by grep)
+- V0 class in `kv_cache.py`: Does not exist (file is 239 lines of active `OpenVINOCacheEngine`)
+- Metadata builder: `build()` correctly raises `NotImplementedError` as V1 stub — no fix needed
+- Dead imports: `SamplingType` removed from `openvino_model_runner_v1.py`
+- Dead file: `model.py` deleted (unused `ModelInput` NamedTuple)
+- Stale artifacts: `assessment_v0_v1_inventory.md`, `v1_compatibility_gaps.md` deleted
 
 ---
 
