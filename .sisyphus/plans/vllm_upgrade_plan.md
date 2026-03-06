@@ -203,7 +203,7 @@
 
 ---
 
-### Task 2.4: Verify Attention Backend V1 Compatibility
+### Task 2.4: [x] Verify Attention Backend V1 Compatibility
 **Objective**: Ensure `OpenVINOAttentionBackend` matches V1 expectations.
 
 **Actions**:
@@ -222,7 +222,7 @@
 
 ---
 
-### Task 2.5: Model Runner V1 Finalization
+### Task 2.5: [x] Model Runner V1 Finalization
 **Objective**: Confirm `OpenVINOModelRunnerV1` is fully V1-compliant.
 
 **Actions**:
@@ -244,7 +244,7 @@
 
 ## Phase 3: Metrics Compatibility
 
-### Task 3.1: Verify V1 Metrics System Integration
+### Task 3.1: [x] Verify V1 Metrics System Integration
 **Objective**: Ensure OpenVINO backend correctly emits metrics under V1.
 
 **Actions**:
@@ -263,6 +263,13 @@
 ---
 
 ## Phase 4: Integration Validation (No Local Pytest)
+
+### Hot Patching Strategy for Fast Iteration
+Instead of rebuilding the entire image for every code change, we use a "Patch and Commit" workflow to quickly test changes:
+1. **Launch temporary container**: `podman run -d --name vllm-patch-tmp --entrypoint sleep localhost/vllm-0.13.0-ov 3600`
+2. **Copy modified code**: `podman cp vllm_openvino vllm-patch-tmp:/opt/app-root/`
+3. **Commit as new image**: `podman commit --change='ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]' vllm-patch-tmp vllm-0.13.0-ov-patched`
+4. **Cleanup and Run**: `podman rm -f vllm-patch-tmp && podman run --replace -d --name vllm-server -p 8000:8000 -v ~/hf:/models:Z vllm-0.13.0-ov-patched --model /models/Qwen2.5-Coder-3B-Instruct-int4-ov --max-model-len 1024`
 
 ### Task 4.1: Build Container Image
 **Objective**: Rebuild container with up-to-date code and V1 enforcement.
@@ -285,26 +292,21 @@
 **Objective**: Verify that an OpenVINO IR model can be loaded and served.
 
 **Actions**:
-1. Run container with port mapping:
-   ```bash
-   podman run -d --name vllm-test -p 8000:8000 vllm-0.13.0-ov
-   ```
-2. Wait for server to be ready (check logs: `podman logs -f vllm-test` for "Uvicorn running").
-3. Prepare a very small OpenVINO IR model (e.g., from Optimum Intel export of `gpt2` or a tiny Llama variant). Place in a host directory, e.g., `/tmp/ov_model`.
-4. Start server inside container with model mount:
+1. Run container with port mapping and model mount:
    ```bash
    podman run -d --name vllm-test -p 8000:8000 \
-     -v /tmp/ov_model:/model \
-     vllm-0.13.0-ov \
+     -v ~/hf/Qwen2.5-Coder-3B-Instruct-int4-ov:/model \
+     localhost/vllm-0.13.0-ov \
      --model /model
    ```
-5. Send a generate request using `curl`:
+2. Wait for server to be ready (check logs: `podman logs -f vllm-test` for "Uvicorn running").
+3. Send a generate request using `curl`:
    ```bash
    curl http://localhost:8000/v1/completions \
      -H "Content-Type: application/json" \
-     -d '{"model": "/model", "prompt": "Hello", "max_tokens": 5}'
+     -d '{"model": "/model", "prompt": "def hello_world():", "max_tokens": 10}'
    ```
-6. Verify response contains non-empty `choices[0].text`.
+4. Verify response contains non-empty `choices[0].text`.
 
 **Acceptance Criteria**:
 - Server starts without import errors or V0-related warnings.

@@ -169,8 +169,7 @@ class OpenVINOWorkerV1(WorkerBase):
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache
-        bind_kv_cache(self.compilation_config.static_forward_context,
-                      [self.kv_cache])
+        bind_kv_cache({}, self.compilation_config.static_forward_context, [])
         self.model_runner.block_size = self.cache_engine.block_size
 
         assert self.kv_cache is not None
@@ -306,18 +305,13 @@ class OpenVINOWorkerV1(WorkerBase):
             )
             self.model_runner.block_size = tmp_cache_config.block_size
 
-            bind_kv_cache(self.compilation_config.static_forward_context,
-                          profiling_cache_engine.kv_cache)
+            bind_kv_cache({}, self.compilation_config.static_forward_context, [])
             # Run the model with the dummy inputs.
             self.model_runner.execute_model(scheduler_output)
 
             # Explicitly revert bind_kv_cache and delete temporary KV cache
             # manager to free KV cache when real inputs will be passed to OV
-            bind_kv_cache(self.compilation_config.static_forward_context, [[
-
-                torch.tensor([])
-                for _ in range(len(profiling_cache_engine.kv_cache))
-            ]])
+            bind_kv_cache({}, self.compilation_config.static_forward_context, [])
             del profiling_cache_engine
 
             logger.info(
@@ -421,8 +415,7 @@ class OpenVINOWorkerV1(WorkerBase):
                                                                                  value_cache_shape[1].get_length()),
                                                                 head_size=max(key_cache_shape[3].get_length(),
                                                                               value_cache_shape[3].get_length()),
-                                                                dtype=str_to_torch_type[cache_type],
-                                                                use_mla=False)
+                                                                dtype=str_to_torch_type[cache_type])
         return kv_cache_spec
 
     def determine_available_memory(self) -> int:

@@ -6,7 +6,7 @@ import openvino as ov
 import torch
 
 import vllm_openvino.envs as envs
-from vllm.attention.selector import get_attn_backend
+from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -62,14 +62,7 @@ class OpenVINOCacheEngine:
         self.num_device_blocks = cache_config.num_gpu_blocks
         self.num_swap_blocks = cache_config.num_cpu_blocks
 
-        # Get attention backend.
-        self.attn_backend = get_attn_backend(
-            model_config.get_head_size(),
-            self.model_config.dtype,
-            self.cache_config.cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-        )
+        # OpenVINO uses its own attention backend directly (no vLLM standard backend needed).
 
         self.ov_cache_dtype = str_to_ov_type[self.cache_config.cache_dtype]
 
@@ -143,19 +136,19 @@ class OpenVINOCacheEngine:
         for i in range(self.num_layers):
             for swap_tensor, kv_tensor in zip(self.swap_cache[i],
                                               self.kv_cache[i]):
-                self.attn_backend.swap_blocks(swap_tensor, kv_tensor,
-                                              src_to_dst)
+                OpenVINOAttentionBackend.swap_blocks(swap_tensor, kv_tensor,
+                                                    src_to_dst)
 
     def swap_out(self, src_to_dst: List[Tuple[int, int]]) -> None:
         for i in range(self.num_layers):
             for swap_tensor, kv_tensor in zip(self.swap_cache[i],
                                               self.kv_cache[i]):
-                self.attn_backend.swap_blocks(kv_tensor, swap_tensor,
-                                              src_to_dst)
+                OpenVINOAttentionBackend.swap_blocks(kv_tensor, swap_tensor,
+                                                    src_to_dst)
 
     def copy(self, src_to_dsts: List[Tuple[int, int]]) -> None:
         if (len(src_to_dsts) > 0):
-            self.attn_backend.copy_blocks(self.kv_cache, src_to_dsts)
+            OpenVINOAttentionBackend.copy_blocks(self.kv_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(
