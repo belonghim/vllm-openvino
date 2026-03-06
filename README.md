@@ -54,7 +54,7 @@ Currently, there are no pre-built OpenVINO images.
 ### Build image from source
 
 ```console
-docker build . -t vllm-openvino-env .
+docker build -f Containerfile -t vllm-openvino-env .
 docker run -it --rm vllm-openvino-env
 ```
 
@@ -79,6 +79,7 @@ OpenVINO vLLM backend supports the following advanced vLLM features:
 
 - `VLLM_OPENVINO_DEVICE` to specify which device utilize for the inference. If there are multiple GPUs in the system, additional indexes can be used to choose the proper one (e.g, `VLLM_OPENVINO_DEVICE=GPU.1`). If the value is not specified, CPU device is used by default.
 - `VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON` to enable U8 weights compression during model loading stage. By default, compression is turned off. You can also export model with different compression techniques using `optimum-cli` and pass exported folder as `<model_id>`
+- `TORCH_COMPILE_DISABLE=1` to disable torch.compile/Inductor which is incompatible with OpenVINO. **Required** when running with vLLM v0.13.0+.
 
 
 ### CPU performance tips
@@ -117,3 +118,7 @@ $ VLLM_OPENVINO_DEVICE=GPU VLLM_OPENVINO_KV_CACHE_PRECISION=i8 VLLM_OPENVINO_ENA
 - LoRA serving is not supported.
 - Only LLM models are currently supported. LLaVa and encoder-decoder models are not currently enabled in vLLM OpenVINO integration.
 - Tensor and pipeline parallelism are not currently enabled in vLLM integration.
+
+## V1 Engine
+
+This backend uses vLLM'''s V1 engine exclusively (the only engine available in vLLM v0.13.0+). The V0 engine and associated worker classes have been removed.
