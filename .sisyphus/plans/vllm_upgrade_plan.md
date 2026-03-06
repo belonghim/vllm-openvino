@@ -24,7 +24,7 @@ End-to-end inference verified in containerized environment:
 | Phase 2 | Refactor to V1-Only Architecture | ✅ |
 | Phase 3 | Metrics Compatibility | ✅ |
 | Phase 4 | Integration Validation | ✅ |
-| Phase 5 | Documentation Update | ⏭️ Deferred |
+| Phase 5 | Documentation Update | ✅ |
 
 ---
 
@@ -57,10 +57,10 @@ End-to-end inference verified in containerized environment:
 - [x] Task 4.3: Metrics endpoint verified (537 lines output)
 - [x] Task 4.4: Container cleanup
 
-## Phase 5: Documentation Update — ⏭️ Deferred
+## Phase 5: Documentation Update — ✅
 
-- [ ] Task 5.1: Update README (remove `VLLM_USE_V1` references, document V1-only)
-- [ ] Task 5.2: Create migration notes (optional)
+- [x] Task 5.1: Update README (`TORCH_COMPILE_DISABLE=1` documented, V1 Engine section added)
+- [x] Task 5.2: Create migration notes → `docs/migration_v0_to_v1.md`
 
 ---
 
