@@ -98,7 +98,7 @@
    - Subtask 2.2.2: [x] Update `vllm_openvino/worker_v1/openvino_model_runner_v1.py` to import `ModelInput` from `vllm_openvino.model` instead of V0 module.
 2. [x] Delete `vllm_openvino/worker/openvino_worker.py`.
 3. [x] Delete `vllm_openvino/worker/openvino_model_runner.py` (verify no remaining imports first).
-4. Clean up `vllm_openvino/worker/__init__.py` if empty.
+4. [x] Clean up `vllm_openvino/worker/__init__.py` if empty.
 5. [x] Optionally delete `vllm_openvino/worker/` directory if empty.
 
 **Acceptance Criteria**:
@@ -179,7 +179,7 @@
 
 ---
 
-### Task 2.3: Update Platform to V1-Only
+### Task 2.3: [x] Update Platform to V1-Only
 **Objective**: Remove V0 fallback logic; enforce V1 worker selection.
 
 **Actions**:
