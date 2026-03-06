@@ -186,9 +186,9 @@ class OpenVINOWorkerV1(WorkerBase):
                 req_ids=[],
                 req_id_to_index={},
                 sampled_token_ids=[],
-                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
+                pooler_output=None,
             )
         return self.model_runner.execute_model(scheduler_output)
 
@@ -439,6 +439,9 @@ class OpenVINOWorkerV1(WorkerBase):
     def compile_or_warm_up_model(self) -> None:
         # Compile is performed on model loading stage
         pass
+
+    def get_supported_tasks(self) -> tuple[str, ...]:
+        return ('generate',)
 
     def list_loras(self) -> Set[int]:
         raise NotImplementedError("LoRA is not supported.")
