@@ -7,8 +7,12 @@ import openvino as ov
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata)
+                                              AttentionMetadata,
+                                              AttentionImpl,
+                                              AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.v1.attention.backends.utils import AttentionSpec, AttentionMetadataBuilder, CommonAttentionMetadata
+from vllm.config import VllmConfig
 from vllm.multimodal import MultiModalPlaceholderMap
 
 
@@ -44,10 +48,12 @@ class OpenVINOAttentionBackend(AttentionBackend):
         return "OPENVINO"
 
     @staticmethod
-    def get_impl_cls():
-        # OpenVINO implements PagedAttention as part of the Optimum
-        # exported model
-        raise NotImplementedError
+    def get_impl_cls() -> type["OpenVINOAttentionImpl"]:
+        return OpenVINOAttentionImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["OpenVINOAttentionMetadataBuilder"]:
+        return OpenVINOAttentionMetadataBuilder
 
     @staticmethod
     def make_metadata(*args, **kwargs) -> "AttentionMetadata":
@@ -147,3 +153,66 @@ class OpenVINOAttentionMetadata:
 
     # Indices of sampled tokens, used in V1 vLLM API only.
     sampled_token_indices: ov.Tensor
+
+
+class OpenVINOAttentionMetadataBuilder(
+    AttentionMetadataBuilder[OpenVINOAttentionMetadata]
+):
+    """Minimal builder stub for V1 compatibility."""
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> OpenVINOAttentionMetadata:
+        # OpenVINO builds attention metadata directly in _prepare_inputs,
+        # not via this builder. This path should not be reached.
+        raise NotImplementedError(
+            "OpenVINO builds attention metadata in _prepare_inputs, "
+            "not via AttentionMetadataBuilder.build()"
+        )
+
+
+class OpenVINOAttentionImpl(AttentionImpl[OpenVINOAttentionMetadata]):
+    """Minimal impl stub for V1 compatibility."""
+    can_return_lse_for_decode: bool = False
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None = None,
+        attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
+        sinks: torch.Tensor | None = None,
+    ) -> None:
+        # Store parameters but no action needed for stub.
+        pass
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: OpenVINOAttentionMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("OpenVINO attention is fused in the model")

@@ -12,15 +12,15 @@ from vllm.logger import init_logger
 from vllm.multimodal import (BatchedTensorInputs,
                              MultiModalKwargs)
 from vllm.sampling_params import SamplingType
-from vllm.utils import (cdiv,
-                        is_pin_memory_available)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.attention.backends.abstract import AttentionMetadata
 
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm_openvino.model_executor.model_loader.openvino import get_model
-from vllm_openvino.model import ModelInput
+
+from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -28,26 +28,38 @@ logger = init_logger(__name__)
 class OpenVINOModelRunnerV1:
     def __init__(
         self,
-        ov_core: ov.Core,
         vllm_config: VllmConfig,
+        device: torch.device,
+        ov_core: ov.Core = None,
         kv_cache_dtype: Optional[str] = "auto",
     ):
-        self.ov_core = ov_core
         self.vllm_config = vllm_config
-        self.device = vllm_config.device_config.device
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.parallel_config = vllm_config.parallel_config
+        self.compilation_config = vllm_config.compilation_config
+        self.device = device
+        self.ov_core = ov_core or ov.Core()
         self.kv_cache_dtype = kv_cache_dtype
         self.model: nn.Module  # Set after load_model()
 
+        # V1 state management
         self.requests: dict[str, CachedRequestState] = {}
-
         self.input_batch = InputBatch(
-            max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
-            max_model_len=vllm_config.model_config.max_model_len,
-            max_num_blocks_per_req=cdiv(vllm_config.model_config.max_model_len, vllm_config.cache_config.block_size),
+            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_model_len=self.model_config.max_model_len,
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             device=self.device,
-            pin_memory=is_pin_memory_available(),
-            vocab_size=vllm_config.model_config.get_vocab_size(),
+            pin_memory=False,  # OpenVINO/CPU — no pin memory
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[self.cache_config.block_size],
+            kernel_block_sizes=[self.cache_config.block_size],
         )
+
+        # KV cache — set by worker after initialize_cache
+        self.kv_caches: list = []
+        self.block_size: int = 0
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
@@ -57,111 +69,64 @@ class OpenVINOModelRunnerV1:
     def get_model(self) -> nn.Module:
         return self.model
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        removed_req_indices: list[int] = []
-
-        # Remove finished requests from the batch
+    def _update_states(self, scheduler_output: SchedulerOutput) -> None:
+        """Update cached request states from scheduler output."""
+        # Remove finished requests
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            req_index = self.input_batch.remove_request(req_id)
-            if req_index is not None:
-                removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
-        # Remove the unscheduled requests from the batch
+        # Remove unscheduled requests from batch (but keep cached state)
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
-        cached_req_ids = self.input_batch.req_id_to_index.keys()
-        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        cached_req_ids = set(self.input_batch.req_id_to_index.keys())
+        resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
         for req_id in unscheduled_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            assert req_index is not None
-            removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
-        req_ids_to_add: list[str] = []
-        # Add new requests to the cached states.
+        # Add new requests
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
-            sampling_params = new_req_data.sampling_params
-            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
-                generator = torch.Generator(device=self.device)
-                generator.manual_seed(sampling_params.seed)
-            else:
-                generator = None
-
-            self.requests[req_id] = CachedRequestState(
+            req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                prompt=new_req_data.prompt,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=generator,
+                mm_features=new_req_data.mm_features,
+                sampling_params=new_req_data.sampling_params,
+                pooling_params=new_req_data.pooling_params,
+                generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
-            req_ids_to_add.append(req_id)
+            self.requests[req_id] = req_state
+            self.input_batch.add_request(req_state)
 
-        # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
-            req_state = self.requests[req_id]
-
-            # Update the requests states.
-            num_computed_tokens = req_data.num_computed_tokens
-            req_state.num_computed_tokens = num_computed_tokens
-            # Add the sampled token(s) from the previous step (if any).
-            num_new_tokens = (num_computed_tokens +
-                              len(req_data.new_token_ids) -
-                              req_state.num_tokens)
-            if num_new_tokens == 1:
-                req_state.output_token_ids.append(req_data.new_token_ids[-1])
-            elif num_new_tokens > 0:
-                req_state.output_token_ids.extend(
-                    req_data.new_token_ids[-num_new_tokens:])
-            # Update the block IDs.
-            if not req_data.resumed_from_preemption:
-                # Append the new blocks to the existing block IDs.
-                req_state.block_ids.extend(req_data.new_block_ids)
-            else:
-                # The request is resumed from preemption.
-                # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
-
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            if req_index is None:
-                # The request is not in the batch.
-                # The request was either preempted and resumed later, or was not
-                # scheduled in the previous step and needs to be added again.
-                req_ids_to_add.append(req_id)
+        # Update cached (running) requests
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
+            if req_id not in self.requests:
                 continue
-
-            # Update block tables and number of computed tokens
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
-            end_token_index = num_computed_tokens + len(req_data.new_token_ids)
-            self.input_batch.num_tokens[req_index] = end_token_index
-
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
-
-        # Add the new or resumed requests to the batch.
-        removed_req_indices = sorted(removed_req_indices, reverse=True)
-        for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                req_index = removed_req_indices.pop()
-            else:
-                req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            num_computed_tokens = req_data.num_computed_tokens[i]
+            new_block_ids = req_data.new_block_ids[i]
+            if new_block_ids is not None:
+                if req_id in req_data.resumed_req_ids:
+                    req_state.block_ids = new_block_ids
+                else:
+                    req_state.block_ids = tuple(
+                        existing + new
+                        for existing, new in zip(req_state.block_ids, new_block_ids)
+                    )
+            req_state.num_computed_tokens = num_computed_tokens
+            if req_id not in self.input_batch.req_id_to_index:
+                self.input_batch.add_request(req_state)
 
-        # Process sampling params so they match V1 sampler format
-        if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
-
-        if batch_changed:
-            self.input_batch.refresh_sampling_metadata()
-
-    def _prepare_model_input(self, scheduler_output) -> ModelInput:
+    def _prepare_inputs(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
+               SamplingMetadata, BatchedTensorInputs]:
         """Prepare the model input based on scheduled requests.
         """
         input_tokens = []
@@ -178,11 +143,17 @@ class OpenVINOModelRunnerV1:
         block_indices_begins.append(0)
 
         if len(self.requests) == 0:
-            return ModelInput.empty(self.device)
+            return (
+                torch.empty(0, device=self.device),
+                torch.empty(0, device=self.device),
+                None,
+                SamplingMetadata.empty(),
+                {},
+            )
 
         for req_id in self.input_batch.req_ids:
             request = self.requests[req_id]
-            block_table = request.block_ids
+            block_table = request.block_ids[0]
 
             block_indices.extend(block_table)
             block_indices_begins.append(block_indices_begins[-1] +
@@ -229,45 +200,18 @@ class OpenVINOModelRunnerV1:
             sampled_token_indices=sampled_token_indices_tensor
         )
 
-        return ModelInput(
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            seq_lens,
-            query_lens,
-            multi_modal_kwargs=None,
-        )
-
-    def prepare_input_tensors(
-        self,
-        scheduler_output
-    ) -> Tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
-               SamplingMetadata, BatchedTensorInputs]:
-        # Prepare input tensors.
-        (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            seq_lens,
-            query_lens,
-            multi_modal_kwargs,
-        ) = self._prepare_model_input(scheduler_output)
-
-        sampling_metadata = self.input_batch.sampling_metadata
-
         return (
             input_tokens,
             input_positions,
             attn_metadata,
-            sampling_metadata,
-            multi_modal_kwargs,
+            self.input_batch.sampling_metadata,
+            {},
         )
 
     @torch.inference_mode()
     def execute_model(
         self,
-        scheduler_output,
-        kv_caches: List[Tuple["ov.Tensor", "ov.Tensor"]],
+        scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
@@ -277,7 +221,7 @@ class OpenVINOModelRunnerV1:
             attn_metadata,
             sampling_metadata,
             multi_modal_kwargs,
-        ) = self.prepare_input_tensors(scheduler_output)
+        ) = self._prepare_inputs(scheduler_output)
 
         model_executable = self.model
         execute_model_kwargs = {
@@ -286,7 +230,7 @@ class OpenVINOModelRunnerV1:
             "positions":
             input_positions,
             "kv_caches":
-            kv_caches,
+            self.kv_caches,
             **MultiModalKwargs.as_kwargs(multi_modal_kwargs or {},
                                          device=self.device),
         }

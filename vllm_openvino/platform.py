@@ -147,12 +147,13 @@ class OpenVinoPlatform(Platform):
                 f" {kv_cache_space}, expect a positive integer value.")
 
         #assert vllm_config.device_config.device_type == "openvino" # see above, device_type!
-        assert vllm_config.device_config.device_type == "cpu"
+        # assert vllm_config.device_config.device_type == "cpu"
         assert vllm_config.lora_config is None, \
             "OpenVINO backend doesn't support LoRA"
         assert cls.is_openvino_cpu() or \
-            cls.is_openvino_gpu(), \
-            "OpenVINO backend supports only CPU and GPU devices"
+            cls.is_openvino_gpu() or \
+            "empty" in envs.VLLM_OPENVINO_DEVICE, \
+            "OpenVINO backend supports only CPU, GPU and empty devices"
 
     @classmethod
     def supports_v1(cls, model_config: ModelConfig) -> bool:

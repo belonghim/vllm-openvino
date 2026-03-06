@@ -79,7 +79,7 @@ OpenVINO vLLM backend supports the following advanced vLLM features:
 
 - `VLLM_OPENVINO_DEVICE` to specify which device utilize for the inference. If there are multiple GPUs in the system, additional indexes can be used to choose the proper one (e.g, `VLLM_OPENVINO_DEVICE=GPU.1`). If the value is not specified, CPU device is used by default.
 - `VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON` to enable U8 weights compression during model loading stage. By default, compression is turned off. You can also export model with different compression techniques using `optimum-cli` and pass exported folder as `<model_id>`
-- `VLLM_USE_V1` to enable V1 vLLM API, e.g, `VLLM_USE_V1=1`
+
 
 ### CPU performance tips
 
