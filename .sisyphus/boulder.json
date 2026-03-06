@@ -1,9 +1,12 @@
 {
-  "active_plan": "/home/user/project/vllm-openvino/.sisyphus/plans/vllm_upgrade_plan.md",
+  "active_plan": "/home/user/project/vllm-openvino/.sisyphus/plans/v1_protocol_fix_plan.md",
   "started_at": "2026-03-06T08:31:42.478Z",
   "session_ids": [
+    "ses_33d94ae42ffeUn2zl7B0hf2ryO",
+    "ses_33d8d3801ffe2U8fDCUwfbfDGi",
     "ses_33f0c1201ffeJM9tK5G7FXVAOK"
   ],
-  "plan_name": "vllm_upgrade_plan",
+  "plan_name": "v1_protocol_fix_plan",
+  "worktree_path": "/home/user/project/vllm-openvino",
   "agent": "atlas"
 }
