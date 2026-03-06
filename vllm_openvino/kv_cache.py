@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.utils import bind_kv_cache
-from vllm_openvino.worker.openvino_model_runner import OpenVINOModelRunner
+from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
 from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu
 
@@ -294,7 +294,7 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
             from vllm.utils import init_cached_hf_modules
 
             init_cached_hf_modules()
-        self.model_runner = OpenVINOModelRunner(
+        self.model_runner = OpenVINOModelRunnerV1(
             self.ov_core,
             vllm_config=self.vllm_config,
             kv_cache_dtype=self.vllm_config.cache_config.cache_dtype,

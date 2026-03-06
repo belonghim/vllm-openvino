@@ -90,19 +90,92 @@
 ### Task 2.2: Remove V0 Worker Class and Associated Files
 **Objective**: Eliminate V0-only code to avoid accidental usage and simplify codebase.
 
+**Prerequisite**: kv_cache.py import already fixed (Task 2.1 follow-up).
+
 **Actions**:
-1. Delete `vllm_openvino/worker/openvino_worker.py` (after extracting cache engine to `kv_cache.py`).
-2. Delete `vllm_openvino/worker/openvino_model_runner.py` if it's V0-specific and not referenced anywhere else. Verify no imports of `OpenVINOModelRunner` exist before deletion.
-3. Clean up any other V0-only modules (e.g., `vllm_openvino/worker/__init__.py` if it only exported V0 classes).
-4. Optionally, delete the entire `vllm_openvino/worker/` directory if it becomes empty; keep `worker_v1/` as the sole worker package.
+1. **Resolve ModelInput dependency**:
+   - Subtask 2.2.1: Create `vllm_openvino/model.py` with `ModelInput` NamedTuple definition (copy from `worker/openvino_model_runner.py` lines 26-41).
+   - Subtask 2.2.2: Update `vllm_openvino/worker_v1/openvino_model_runner_v1.py` to import `ModelInput` from `vllm_openvino.model` instead of V0 module.
+2. Delete `vllm_openvino/worker/openvino_worker.py`.
+3. Delete `vllm_openvino/worker/openvino_model_runner.py` (verify no remaining imports first).
+4. Clean up `vllm_openvino/worker/__init__.py` if empty.
+5. Optionally delete `vllm_openvino/worker/` directory if empty.
 
 **Acceptance Criteria**:
-- No Python file imports from `vllm_openvino.worker.openvino_worker` (except maybe in tests, but no tests exist).
-- `vllm_openvino.worker` package can be removed or repurposed.
+- No imports from `vllm_openvino.worker.openvino_worker` or `vllm_openvino.worker.openvino_model_runner`.
+- `vllm_openvino` imports successfully.
 
 **QA**:
-- Run `grep -r "vllm_openvino.worker.openvino_worker" .` to confirm no references.
-- Import `vllm_openvino` without errors.
+- `grep -r "from vllm_openvino.worker.openvino_worker import" .` → no results
+- `grep -r "from vllm_openvino.worker.openvino_model_runner import" .` → no results except possibly in historical docs
+- `python3 -c "import vllm_openvino"` → no errors
+
+---
+
+### Subtask 2.2.1: Create vllm_openvino/model.py with ModelInput
+**Objective**: Move `ModelInput` NamedTuple to a shared module to break V0 dependency.
+
+**Actions**:
+1. Read `vllm_openvino/worker/openvino_model_runner.py` lines 26-41 to get exact `ModelInput` definition.
+2. Create `vllm_openvino/model.py` with:
+   - License header: `# SPDX-License-Identifier: Apache-2.0`
+   - Docstring: `"""Model-related data structures for OpenVINO backend."""`
+   - Imports: `from typing import List, NamedTuple, Optional`, `import torch`, and `from vllm_openvino.attention.backends.openvino import OpenVINOAttentionMetadata` (if used in ModelInput), `from vllm.multimodal import BatchedTensorInputs` (if used).
+   - Copy exact `ModelInput` class with `empty` classmethod.
+3. Verify file exists and contains correct content.
+
+**Acceptance**: `vllm_openvino/model.py` exists with proper `ModelInput` definition.
+
+---
+
+### Subtask 2.2.2: Update openvino_model_runner_v1.py import
+**Objective**: Remove V0 dependency by updating import path.
+
+**Actions**:
+1. In `vllm_openvino/worker_v1/openvino_model_runner_v1.py`, find line 23: `from vllm_openvino.worker.openvino_model_runner import ModelInput`
+2. Replace with: `from vllm_openvino.model import ModelInput`
+3. Verify: `grep "from vllm_openvino.worker.openvino_model_runner import ModelInput" vllm_openvino/worker_v1/openvino_model_runner_v1.py` returns nothing.
+4. Verify: `grep "from vllm_openvino.model import ModelInput" vllm_openvino/worker_v1/openvino_model_runner_v1.py` finds one line.
+5. Verify Python syntax: `python3 -m py_compile vllm_openvino/worker_v1/openvino_model_runner_v1.py`
+
+**Acceptance**: No V0 ModelInput import; file compiles.
+
+---
+
+### Subtask 2.2.3: Delete V0 Worker file
+**Objective**: Remove `vllm_openvino/worker/openvino_worker.py`.
+
+**Actions**:
+1. Verify no imports of `vllm_openvino.worker.openvino_worker` exist: `grep -r "from vllm_openvino.worker.openvino_worker import" .`
+2. Delete file: `rm vllm_openvino/worker/openvino_worker.py`
+3. Verify file is gone: `test ! -f vllm_openvino/worker/openvino_worker.py`
+
+**Acceptance**: File deleted; no import errors in other files.
+
+---
+
+### Subtask 2.2.4: Delete V0 Model Runner file
+**Objective**: Remove `vllm_openvino/worker/openvino_model_runner.py`.
+
+**Actions**:
+1. Verify no imports of `OpenVINOModelRunner` from V0: `grep -r "from vllm_openvino.worker.openvino_model_runner import OpenVINOModelRunner" .`
+2. Verify no imports of `ModelInput` from V0: `grep -r "from vllm_openvino.worker.openvino_model_runner import ModelInput" .`
+3. Delete file: `rm vllm_openvino/worker/openvino_model_runner.py`
+4. Verify file is gone: `test ! -f vllm_openvino/worker/openvino_model_runner.py`
+
+**Acceptance**: File deleted; no import errors.
+
+---
+
+### Subtask 2.2.5: Clean up worker package
+**Objective**: Remove empty worker directory.
+
+**Actions**:
+1. Check if `vllm_openvino/worker/` is empty or only contains `__init__.py`: `ls vllm_openvino/worker/`
+2. If empty or only `__init__.py`, delete entire directory: `rm -rf vllm_openvino/worker`
+3. Verify no references remain: `grep -r "vllm_openvino.worker" . --include="*.py" | grep -v "worker_v1"`
+
+**Acceptance**: V0 worker package removed; codebase cleaner.
 
 ---
 
