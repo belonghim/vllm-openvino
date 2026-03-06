@@ -20,7 +20,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm_openvino.model_executor.model_loader.openvino import get_model
-from vllm_openvino.worker.openvino_model_runner import ModelInput
+from vllm_openvino.model import ModelInput
 
 logger = init_logger(__name__)
 
