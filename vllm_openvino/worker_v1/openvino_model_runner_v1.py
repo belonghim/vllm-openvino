@@ -9,8 +9,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.multimodal import (BatchedTensorInputs,
-                             MultiModalKwargs)
+from vllm.multimodal import BatchedTensorInputs
 from vllm.sampling_params import SamplingType
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -152,25 +151,30 @@ class OpenVINOModelRunnerV1:
             )
 
         for req_id in self.input_batch.req_ids:
+            req_index = self.input_batch.req_id_to_index[req_id]
             request = self.requests[req_id]
             block_table = request.block_ids[0]
 
             block_indices.extend(block_table)
-            block_indices_begins.append(block_indices_begins[-1] +
-                                        len(block_table))
+            block_indices_begins.append(block_indices_begins[-1] + len(block_table))
+
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            last_token_position = num_scheduled_tokens + request.num_computed_tokens
-            tokens = [] if request.num_computed_tokens >= len(request.prompt_token_ids) else request.prompt_token_ids[request.num_computed_tokens:last_token_position]
-            tokens += request.output_token_ids[request.num_computed_tokens - len(request.prompt_token_ids): last_token_position - len(request.prompt_token_ids)]
-            seq_len = len(tokens) + request.num_computed_tokens
+            num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
+            num_tokens_total = num_computed + num_scheduled_tokens
+
+            tokens = self.input_batch.token_ids_cpu[
+                req_index, num_computed:num_tokens_total
+            ].tolist()
+
+            seq_len = num_tokens_total
             seq_lens.append(seq_len)
             query_len = len(tokens)
             query_lens.append(query_len)
             input_tokens.extend(tokens)
-            positions_range = range(request.num_computed_tokens, seq_len)
+            positions_range = range(num_computed, num_tokens_total)
             input_positions.extend(list(positions_range))
 
-            past_lens.append(request.num_computed_tokens)
+            past_lens.append(num_computed)
             subsequence_begins.append(subsequence_begins[-1] + query_len)
 
         sampled_token_indices = np.array(subsequence_begins[1:]) - 1
@@ -214,6 +218,7 @@ class OpenVINOModelRunnerV1:
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
+        self.input_batch.refresh_metadata()
 
         (
             input_tokens,
@@ -225,14 +230,9 @@ class OpenVINOModelRunnerV1:
 
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids":
-            input_tokens,
-            "positions":
-            input_positions,
-            "kv_caches":
-            self.kv_caches,
-            **MultiModalKwargs.as_kwargs(multi_modal_kwargs or {},
-                                         device=self.device),
+            "input_ids": input_tokens,
+            "positions": input_positions,
+            "kv_caches": self.kv_caches,
         }
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
@@ -257,17 +257,37 @@ class OpenVINOModelRunnerV1:
 
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
+            req_index = self.input_batch.req_id_to_index[req_id]
+            num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
+            num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+            seq_len = num_computed + num_scheduled
+
+            sampled_entry = sampled_tokens[i]
+            sampled_ids = (sampled_entry if isinstance(sampled_entry, list)
+                           else [sampled_entry])
+            if sampled_ids:
+                start_idx = seq_len
+                end_idx = start_idx + len(sampled_ids)
+                self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = sampled_ids
+                self.input_batch.num_tokens[req_index] = end_idx
+                req_state.output_token_ids.extend(sampled_ids)
+
+            self.input_batch.num_computed_tokens_cpu[req_index] = seq_len
+
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            # Ignore the sampled token for partial prefills.
-            if seq_len < req_state.num_tokens:
+            # Ignore the sampled token for partial prefills (chunked prefill).
+            # seq_len < num_prompt_tokens means we haven't finished the prompt.
+            if seq_len < req_state.num_prompt_tokens:
                 valid_sampled_tokens[i] = []
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_tokens,
-            spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
+            pooler_output=None,
         )
