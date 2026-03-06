@@ -94,7 +94,7 @@
 
 **Actions**:
 1. **Resolve ModelInput dependency**:
-   - Subtask 2.2.1: Create `vllm_openvino/model.py` with `ModelInput` NamedTuple definition (copy from `worker/openvino_model_runner.py` lines 26-41).
+   - Subtask 2.2.1: [x] Create `vllm_openvino/model.py` with `ModelInput` NamedTuple definition (copy from `worker/openvino_model_runner.py` lines 26-41).
    - Subtask 2.2.2: Update `vllm_openvino/worker_v1/openvino_model_runner_v1.py` to import `ModelInput` from `vllm_openvino.model` instead of V0 module.
 2. Delete `vllm_openvino/worker/openvino_worker.py`.
 3. Delete `vllm_openvino/worker/openvino_model_runner.py` (verify no remaining imports first).
