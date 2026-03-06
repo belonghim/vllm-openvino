@@ -41,4 +41,4 @@ namespaces = false  # to disable scanning PEP 420 namespaces (true by default)
 #]
 
 [tool.uv.sources]
-vllm = { git = "https://github.com/vllm-project/vllm", rev = "v0.1302" }
+vllm = { git = "https://github.com/vllm-project/vllm", rev = "v0.13.0" }
