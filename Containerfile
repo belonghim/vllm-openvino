@@ -20,5 +20,5 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
 RUN mkdir /tmp/huggingface && chgrp -R 0 . && chmod -R g+rwX .
-ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/huggingface VLLM_OPENVINO_DEVICE=empty 
+ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/huggingface VLLM_OPENVINO_DEVICE=empty TORCH_COMPILE_DISABLE=1
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
