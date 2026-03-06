@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -10,10 +10,9 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               AttentionImpl,
                                               AttentionType)
-from vllm.attention.backends.utils import CommonAttentionState
+
 from vllm.v1.attention.backends.utils import AttentionSpec, AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.config import VllmConfig
-from vllm.multimodal import MultiModalPlaceholderMap
 
 
 def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
@@ -59,9 +58,7 @@ class OpenVINOAttentionBackend(AttentionBackend):
     def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
 
-    @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
-        return CommonAttentionState
+
 
     @staticmethod
     def make_openvino_metadata(*args, **kwargs) -> "OpenVINOAttentionMetadata":
@@ -144,8 +141,7 @@ class OpenVINOAttentionMetadata:
     # N.B. These aren't really related to attention and don't belong on this
     # type -- this is just a temporary solution to make them available to
     # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
-        str, MultiModalPlaceholderMap.IndexMap]]
+    multi_modal_placeholder_index_maps: Optional[Dict[str, list]]
 
     # Enable/disable KV scales calculation. This is so that we can disable the
     # calculation until after prefill and cuda graph capture.

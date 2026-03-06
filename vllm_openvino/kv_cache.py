@@ -6,13 +6,13 @@ import openvino as ov
 import torch
 
 import vllm_openvino.envs as envs
-from vllm.attention import get_attn_backend
+from vllm.attention.selector import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 # Import V1 KVCache interface
-from vllm.v1.kv_cache_interface import KVCache, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -27,7 +27,7 @@ str_to_ov_type = {
     "dynamic": ov.Type.dynamic,
 }
 
-class OpenVINOCacheEngine(KVCache):
+class OpenVINOCacheEngine:
     """Manages the KV cache for OpenVINO backend, implementing the V1 KVCache interface.
 
     This class is responsible for initializing and managing CPU KV

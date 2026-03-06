@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.config import (CacheConfig, VllmConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.inputs import INPUT_REGISTRY
+
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -16,7 +16,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
-from vllm.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
@@ -236,9 +236,7 @@ class OpenVINOWorkerV1(WorkerBase):
         model_config = self.model_config
         parallel_config = self.parallel_config
         device_config = self.device_config
-        input_registry = INPUT_REGISTRY
         mm_registry = MULTIMODAL_REGISTRY
-        mm_registry.init_mm_limits_per_prompt(model_config)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -277,7 +275,7 @@ class OpenVINOWorkerV1(WorkerBase):
                            (group_id < max_num_batched_tokens % max_num_seqs))
                 seq_num_blocks = (seq_len + block_size - 1) // block_size
 
-                dummy_data = input_registry.dummy_data_for_profiling(model_config,seq_len,mm_registry)
+                dummy_data = mm_registry.get_decoder_dummy_data(model_config, seq_len)
 
                 block_table = list(range(num_blocks, num_blocks + seq_num_blocks))
                 num_blocks += seq_num_blocks
