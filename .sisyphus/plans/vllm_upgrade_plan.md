@@ -20,7 +20,7 @@
 ## Phase 1: Current State Assessment & Gap Analysis
 
 ### Task 1.1: Inventory V0 vs V1 Components
-**Objective**: Identify all V0-specific code that must be removed or refactored.
+**Objective**: [x] Identify all V0-specific code that must be removed or refactored.
 
 **Actions**:
 1. Read `vllm_openvino/platform.py` lines 77-83 to see the selection logic (if VLLM_USE_V1, use V1; else V0).

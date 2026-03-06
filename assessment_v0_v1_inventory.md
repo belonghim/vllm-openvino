@@ -1,26 +1,34 @@
-# V0/V1 Inventory Assessment
+# V0 vs V1 Components Inventory
 
-This document inventories files related to V0 and V1 OpenVINO workers and identifies V0-specific code that needs refactoring or removal.
+This document inventories components related to V0 and V1 versions within the vLLM OpenVINO integration.
 
-## File Categorization
+## V0/V1 Selection Logic
 
-### V0-Only Files:
-- `vllm_openvino/worker/openvino_worker.py`: Defines `OpenVINOWorker` and `OpenVINOCacheEngine`.
-- `vllm_openvino/worker/openvino_model_runner.py`: Defines `OpenVINOModelRunner`.
+The selection between V0 and V1 components is determined by the `VLLM_USE_V1` environment variable, as defined in `vllm_openvino/platform.py` (lines 77-83):
 
-### V1-Only Files:
-- `vllm_openvino/worker_v1/openvino_worker_v1.py`: Defines `OpenVINOWorkerV1`.
-- `vllm_openvino/worker_v1/openvino_model_runner_v1.py`: Defines `OpenVINOModelRunnerV1`.
+- If `VLLM_USE_V1` is true, `vllm_openvino.worker_v1.openvino_worker_v1.OpenVINOWorkerV1` is used.
+- If `VLLM_USE_V1` is false, `vllm_openvino.worker.openvino_worker.OpenVINOWorker` is used.
 
-### Shared / V1-Dependent Files:
-- `vllm_openvino/platform.py`: This file contains logic to select the worker class based on the `VLLM_USE_V1` environment variable, indicating it's used in a V1 context to choose between V0 and V1 workers.
-- `vllm_openvino/attention/backends/openvino.py`: Defines `OpenVINOAttentionBackend` and `OpenVINOAttentionMetadata`. These are likely used by both V0 and V1, or adapted for V1.
+## Component Files
+
+The following files have been identified as relevant to V0 and V1 components:
+
+-   **V0 Worker:** `/home/user/project/vllm-openvino/vllm_openvino/worker/openvino_worker.py`
+    -   Contains `OpenVINOWorker` and `OpenVINOCacheEngine`.
+-   **V1 Worker:** `/home/user/project/vllm-openvino/vllm_openvino/worker_v1/openvino_worker_v1.py`
+    -   Contains `OpenVINOWorkerV1`.
+-   **V0 Model Runner:** `/home/user/project/vllm-openvino/vllm_openvino/worker/openvino_model_runner.py`
+    -   This file exists and is likely associated with V0.
+-   **V1 Model Runner:** `/home/user/project/vllm-openvino/vllm_openvino/worker_v1/openvino_model_runner_v1.py`
+    -   This file exists and is likely associated with V1.
+-   **Attention Backend:** `/home/user/project/vllm-openvino/vllm_openvino/attention/backends/openvino.py`
+    -   This file exists and appears to be shared or V1-compatible.
 
 ## V0 Symbols Imported by V1 Code
 
-- **Imported Symbol**: `OpenVINOCacheEngine`
-- **Source File (V1)**: `vllm_openvino/worker_v1/openvino_worker_v1.py`
-- **Imported From**: `vllm_openvino.worker.openvino_worker`
+-   **Imported Symbol**: `OpenVINOCacheEngine`
+-   **Source File (V1)**: `vllm_openvino/worker_v1/openvino_worker_v1.py`
+-   **Imported From**: `vllm_openvino.worker.openvino_worker`
 
 This indicates a direct dependency of the V1 worker on a V0-specific component (`OpenVINOCacheEngine`). This component will need to be refactored or reimplemented within the V1 structure to remove the V0 dependency.
 
