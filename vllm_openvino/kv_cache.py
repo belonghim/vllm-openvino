@@ -100,8 +100,8 @@ class OpenVINOCacheEngine:
                 kv_cache.append((key_blocks, value_blocks))
             else:
                 remote_context = ov_core.get_default_context(ov_device)
-                key_blocks = remote_context.create_tensor(self.ov_cache_dtype, key_cache_shape, {{}})
-                value_blocks = remote_context.create_tensor(self.ov_cache_dtype, value_cache_shape, {{}})
+                key_blocks = remote_context.create_tensor(self.ov_cache_dtype, key_cache_shape, {})
+                value_blocks = remote_context.create_tensor(self.ov_cache_dtype, value_cache_shape, {})
                 kv_cache.append((key_blocks, value_blocks))
 
         return kv_cache
