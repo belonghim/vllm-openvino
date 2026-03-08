@@ -19,9 +19,6 @@ ENV VIRTUAL_ENV=/opt/vllm-env
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
-RUN mkdir /tmp/huggingface && chgrp -R 0 . && chmod -R g+rwX . && \
-    useradd -r -s /sbin/nologin vllm
-ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/huggingface VLLM_OPENVINO_DEVICE=CPU TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_KVCACHE_SPACE=8
-EXPOSE 8000
-USER vllm
+RUN mkdir /tmp/huggingface && chgrp -R 0 . && chmod -R g+rwX .
+ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU VLLM_OPENVINO_KVCACHE_SPACE=8
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

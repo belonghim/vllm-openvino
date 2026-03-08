@@ -1,21 +1,10 @@
 {
-  "active_plan": null,
-  "completed_plans": [
-    {
-      "plan": ".sisyphus/plans/v1_protocol_fix_plan.md",
-      "completed_at": "2026-03-06T11:00:00Z",
-      "result": "success"
-    },
-    {
-      "plan": ".sisyphus/plans/vllm_upgrade_plan.md",
-      "completed_at": "2026-03-06T11:00:00Z",
-      "result": "success"
-    },
-    {
-      "plan": ".sisyphus/plans/cleanup_dead_code.md",
-      "completed_at": "2026-03-07T00:39:20Z",
-      "result": "success"
-    }
+  "active_plan": "/home/user/project/vllm-openvino/.sisyphus/plans/vllm-openvino-improvement.md",
+  "started_at": "2026-03-08T05:16:02.561Z",
+  "session_ids": [
+    "ses_3349bad2affeSU0CTTe2V6TJJv"
   ],
-  "worktree_path": "/home/user/project/vllm-openvino"
+  "plan_name": "vllm-openvino-improvement",
+  "agent": "atlas",
+  "worktree_path": "/home/user/project/vllm-openvino-improvement"
 }
