@@ -29,7 +29,7 @@ pip install --upgrade pip
 Second, clone vllm-openvino and install prerequisites for the vLLM OpenVINO backend installation:
 
 ```console
-git clone https://github.com/vllm-project/vllm-openvino.git
+git clone https://github.com/belonghim/vllm-openvino.git
 cd vllm-openvino
 ```
 
