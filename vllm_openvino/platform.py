@@ -3,11 +3,10 @@
 from typing import TYPE_CHECKING, Optional, Any
 
 import torch
-import vllm.envs as vllm_envs
 from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
 
-import vllm_openvino.envs as envs  # not sure if this is a optimal solution!
+import vllm_openvino.envs as envs
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig, ModelConfig, CompilationMode
@@ -19,17 +18,16 @@ logger = init_logger(__name__)
 
 try:
     import openvino as ov
-    import openvino.properties.hint as hints
 except ImportError as e:
     logger.warning("Failed to import OpenVINO with %r", e)
 
 
 class OpenVinoPlatform(Platform):
-    #_enum = PlatformEnum.OPENVINO
-    _enum = PlatformEnum.CPU # Check! What is the right selection?
+    # PlatformEnum.CPU is used because PlatformEnum.OPENVINO may not exist in
+    # vLLM 0.13.0. See upstream-compatibility vault note before changing.
+    _enum = PlatformEnum.CPU
     device_name: str = "openvino"
-    device_type: str = "cpu" # in v0.8.1, config.py: if self.device_type in ["neuron", "openvino"]: ; self.device = torch.device("cpu")
-    #dispatch_key: str = "CPU" # Is this still required?
+    device_type: str = "cpu"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: Any, head_size: int,
@@ -63,7 +61,7 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.warning("Pin memory is not supported on OpenViNO.")
+        logger.warning("Pin memory is not supported on OpenVINO.")
         return False
 
     @classmethod
@@ -92,26 +90,18 @@ class OpenVinoPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        if envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "u8":
-            logger.info("KV cache type is overridden to u8 via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.")
-            cache_config.cache_dtype = "u8"
-        elif envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "i8":
-            logger.info("KV cache type is overridden to i8 via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.")
-            cache_config.cache_dtype = "i8"
-        elif envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "f16" or envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "fp16":
-            logger.info("KV cache type is overridden to fp16 via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.")
-            cache_config.cache_dtype = "f16"
-        elif envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "bf16":
-            logger.info("KV cache type is overridden to bp16 via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.")
-            cache_config.cache_dtype = "bf16"
-        elif envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "fp32" or envs.VLLM_OPENVINO_KV_CACHE_PRECISION == "f32":
-            logger.info("KV cache type is overridden to f16 via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.")
-            cache_config.cache_dtype = "f32"
+        _kv_precision_map = {
+            "u8": "u8", "i8": "i8",
+            "f16": "f16", "fp16": "f16",
+            "bf16": "bf16",
+            "f32": "f32", "fp32": "f32",
+        }
+        precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
+        cache_dtype = _kv_precision_map.get(precision_key)
+        if cache_dtype is not None:
+            logger.info("KV cache type is overridden to %s via "
+                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.", cache_dtype)
+            cache_config.cache_dtype = cache_dtype
         else:
             logger.info("KV cache type is not specified via "
                         "VLLM_OPENVINO_KV_CACHE_PRECISION env var. "
@@ -151,8 +141,6 @@ class OpenVinoPlatform(Platform):
         vllm_config.compilation_config.level = 0
         vllm_config.compilation_config.mode = CompilationMode.NONE
 
-        #assert vllm_config.device_config.device_type == "openvino" # see above, device_type!
-        # assert vllm_config.device_config.device_type == "cpu"
         assert vllm_config.lora_config is None, \
             "OpenVINO backend doesn't support LoRA"
         assert cls.is_openvino_cpu() or \
