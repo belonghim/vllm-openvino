@@ -314,10 +314,9 @@ class OpenVINOWorkerV1(WorkerBase):
             bind_kv_cache({}, self.compilation_config.static_forward_context, [])
             del profiling_cache_engine
 
-            logger.info(
-                "Start profiling run with dummy inputs to evaluate "
-                "memory usage for %s. It might take a while.", ov_device)
-
+        logger.info(
+            "Start profiling run with dummy inputs to evaluate "
+            "memory usage for %s. It might take a while.", ov_device)
         model_profile_run()
 
         gpu_device_type = ov_core.get_property(ov_device, device.type)
@@ -363,10 +362,8 @@ class OpenVINOWorkerV1(WorkerBase):
 
             return f"{size:.2f} {units[unit_index]}"
 
-        total_device_memory_str = \
-            format(format_memory_size(total_device_memory))
-        used_device_memory_str = \
-            format(format_memory_size(used_device_mem))
+        total_device_memory_str = format_memory_size(total_device_memory)
+        used_device_memory_str = format_memory_size(used_device_mem)
 
         logger.info(
             "Total %s memory: %s. "
@@ -456,4 +453,7 @@ class OpenVINOWorkerV1(WorkerBase):
         raise NotImplementedError("LoRA is not supported.")
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        return self.kv_cache_config.num_blocks
+        raise NotImplementedError(
+            "Use determine_available_memory() instead. "
+            "This method is not used in V1 engine."
+        )
