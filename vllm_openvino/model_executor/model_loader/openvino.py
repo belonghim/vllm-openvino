@@ -155,7 +155,7 @@ class OpenVINOCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.logits_processor = LogitsProcessor(
-            model_config.hf_config.vocab_size, logits_as_input=True)
+            model_config.get_vocab_size(), logits_as_input=True)
         self.sampler = SamplerV1()
 
         export = _require_model_export(model_config.model)
