@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "openvino >= 2025.4.1",
+    "openvino >= 2026.0.0",
     #optimum is in dependency list of optimum-intel
     "optimum-intel[nncf] @ git+https://github.com/huggingface/optimum-intel.git@v1.27.0",
     "vllm == 0.13.0",
