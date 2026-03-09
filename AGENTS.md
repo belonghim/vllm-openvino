@@ -7,7 +7,7 @@
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO를 LLM 추론 백엔드로 추가합니다.
 
 - **vLLM 버전**: 0.13.0 (V1 엔진 전용)
-- **OpenVINO 버전**: >= 2025.4.1
+- **OpenVINO 버전**: >= 2025.4.1 (2026.0.0 호환 확인 완료)
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
 
@@ -185,20 +185,35 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 **재평가 조건**: 기여자가 2명 이상으로 늘어나거나, 릴리즈 빈도가 증가하는 경우
 
-### 5. `openvino._offline_transformations` 교체 — 시기상조
+### 5. `openvino._offline_transformations` 교체 — 불필요 (2026.0.0 확인 완료)
 
 **현재 상태**: `model_loader/openvino.py`에서 private API 사용
 ```python
 from openvino._offline_transformations import paged_attention_transformation
 ```
 
-**왜 시기상조인가**:
+**왜 불필요한가**:
 - `paged_attention_transformation`은 모델을 PagedAttention으로 변환하는 **핵심 기능** — 대체 불가
-- 코드에 이미 버전 가드 존재: `if is_openvino_version("<", "2026.0.0"):` — OpenVINO 2026.0에서 API 변경 예상
-- **대체할 public API가 아직 존재하지 않을 수 있음** — OpenVINO 2026.0 릴리즈 후 확인 필요
+- OpenVINO 2026.0.0 릴리즈 후 확인 결과: `_offline_transformations.paged_attention_transformation`은 **여전히 존재하고 정상 동작**
+- 대체할 public API 없음 — 이전 버전 가드(`is_openvino_version("<", "2026.0.0")`)와 함께 있던 `_modify_cache_parameters()` 함수는 dead code로 판명되어 제거 완료
 - `_offline_transformations`는 OpenVINO 생태계에서 사실상 public처럼 널리 사용됨
 
-**재평가 조건**: OpenVINO 2026.0 릴리즈 시 public API 위치 확인 후 교체
+**재평가 조건**: OpenVINO 향후 버전에서 `paged_attention_transformation`의 public API 이동이 공식 발표되는 경우
+
+---
+
+## OpenVINO 2026.0.0 호환성 변경 이력
+
+OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응 내역 (2026-03-09 완료).
+
+| 변경 | 영향 파일 | 대응 |
+|---|---|---|
+| `ov.runtime.Coordinate` 삭제 (`ov.runtime` 모듈 전체 제거) | `attention/backends/openvino.py` | `ov.Coordinate`로 교체 (커밋 `0b6529a`) |
+| `ov.Type.undefined` 삭제 | `model_executor/model_loader/openvino.py` | 해당 코드가 dead code(`_modify_cache_parameters()`)임을 확인 후 함수 전체 제거 (커밋 `49f9587`) |
+| `paged_attention_transformation` (`_offline_transformations`) | `model_executor/model_loader/openvino.py` | 변경 없음 — private API 유지됨, 정상 동작 |
+| `compile_model` 시 KV 캐시 처리 | — | 2026.0에서 플러그인이 자동 처리 → `_modify_cache_parameters()` 불필요 확인 |
+
+> 향후 OpenVINO 버전 업그레이드 시 위 패턴을 참고할 것. 특히 `ov.runtime.*` 같은 하위 모듈 API는 삭제될 가능성이 있음.
 
 ---
 
