@@ -7,7 +7,7 @@
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO를 LLM 추론 백엔드로 추가합니다.
 
 - **vLLM 버전**: 0.13.0 (V1 엔진 전용)
-- **OpenVINO 버전**: >= 2025.4.1 (2026.0.0 호환 확인 완료)
+- **OpenVINO 버전**: >= 2026.0.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
 
