@@ -12,5 +12,4 @@ build/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
-.sisyphus/run-continuation/
-.sisyphus/notepads/
+.sisyphus/
