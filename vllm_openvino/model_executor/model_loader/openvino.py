@@ -74,8 +74,14 @@ def _require_model_export(model_id, revision=None, subfolder=None):
     if subfolder is not None:
         model_dir = model_dir / subfolder
     if model_dir.is_dir():
-        return (not (model_dir / "openvino_model.xml").exists()
-                or not (model_dir / "openvino_model.bin").exists())
+        # Standard text-only OV model
+        if ((model_dir / "openvino_model.xml").exists()
+                and (model_dir / "openvino_model.bin").exists()):
+            return False
+        # Multimodal OV model (e.g., Gemma 3) — uses language model suffix
+        if (model_dir / "openvino_language_model.xml").exists():
+            return False
+        return True
 
     hf_api = HfApi()
     try:
@@ -89,8 +95,14 @@ def _require_model_export(model_id, revision=None, subfolder=None):
         ]
         ov_model_path = ("openvino_model.xml" if normalized_subfolder is None
                          else f"{normalized_subfolder}/openvino_model.xml")
-        return (ov_model_path not in model_files
-                or ov_model_path.replace(".xml", ".bin") not in model_files)
+        ov_lang_model_path = ("openvino_language_model.xml"
+                              if normalized_subfolder is None
+                              else f"{normalized_subfolder}/openvino_language_model.xml")
+        # Check standard OV model OR multimodal OV model (e.g., Gemma 3)
+        has_standard = (ov_model_path in model_files
+                        and ov_model_path.replace(".xml", ".bin") in model_files)
+        has_language_model = ov_lang_model_path in model_files
+        return not (has_standard or has_language_model)
     except Exception:
         return True
 
