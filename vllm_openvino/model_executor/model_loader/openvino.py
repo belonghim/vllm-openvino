@@ -288,3 +288,5 @@ def get_model(
     with set_current_vllm_config(vllm_config):
         return OpenVINOCausalLM(ov_core, vllm_config.model_config,
                                 kv_cache_dtype)
+
+ 
