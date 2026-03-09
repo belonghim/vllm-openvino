@@ -187,12 +187,18 @@ class OpenVINOCausalLM(nn.Module):
 
         load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
                         if export else False)
+        ov_model_kwargs: dict = {}
+        if not export:
+            model_dir = Path(model_config.model)
+            if (model_dir / "openvino_language_model.xml").exists():
+                ov_model_kwargs["file_name"] = "openvino_language_model.xml"
         pt_model = OVModelForCausalLM.from_pretrained(
             model_config.model,
             export=export,
             compile=False,
             load_in_8bit=load_in_8bit,
             trust_remote_code=model_config.trust_remote_code,
+            **ov_model_kwargs,
         )
 
         # apply Paged Attention transformation
