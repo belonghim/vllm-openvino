@@ -11,7 +11,6 @@ import torch
 from huggingface_hub import HfApi
 from openvino._offline_transformations import paged_attention_transformation
 from optimum.intel import OVModelForCausalLM
-from optimum.intel.utils.import_utils import is_openvino_version
 from torch import nn
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context
@@ -43,31 +42,7 @@ def _flatten_inputs(inputs):
     return flatten_inputs
 
 
-def _modify_cache_parameters(model: ov.Model, kv_cache_dtype: ov.Type):
-    # set global KV cache precision if kv_cache_dtype is defined
-    if kv_cache_dtype != "dynamic":
-        model.set_rt_info(kv_cache_dtype, ["runtime_options", "KV_CACHE_PRECISION"])
-
-    for parameter in model.get_parameters():
-        input = parameter.get_output_tensor(0)
-        input_names = input.get_names()
-        if len(input_names) != 1:
-            continue
-        input_name = next(iter(input_names))
-        is_key_cache = input_name.startswith("key_cache.")
-        is_value_cache = input_name.startswith("value_cache.")
-
-        if is_key_cache or is_value_cache:
-            shape = parameter.get_partial_shape()
-            num_heads = shape[1].get_length()
-            head_size = shape[2].get_length()
-            # set parameters as dynamic to infer actual shape / type in plugin
-            parameter.set_partial_shape(ov.PartialShape.dynamic(4))
-            parameter.set_element_type(ov.Type.undefined)
-            # specify actual KV cache parameters via runtime information of PagedAttention operation
-            pa_op = next(iter(parameter.output(0).get_target_inputs())).get_node()
-            pa_op.get_rt_info()["num_k_heads" if is_key_cache else "num_v_heads"] = num_heads
-            pa_op.get_rt_info()["k_head_size" if is_key_cache else "v_head_size"] = head_size
+"""Removed dead _modify_cache_parameters for OpenVINO 2026.0+"""
 
 
 def _require_model_export(model_id, revision=None, subfolder=None):
@@ -212,10 +187,7 @@ class OpenVINOCausalLM(nn.Module):
         # apply Paged Attention transformation
         paged_attention_transformation(pt_model.model)
         apply_gather_before_matmul_transformation(pt_model.model)
-        if is_openvino_version("<", "2026.0.0"):
-            # then set dynamic shapes and precisions for KV cache, so plugins
-            # will automatically resolve them during compile_model
-            _modify_cache_parameters(pt_model.model, kv_cache_dtype)
+        # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
         pt_model.model.validate_nodes_and_infer_types()
 
         ov_device = envs.VLLM_OPENVINO_DEVICE

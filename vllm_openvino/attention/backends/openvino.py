@@ -16,14 +16,14 @@ from vllm.config import VllmConfig
 
 
 def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
-                     src_offset: int, dst_offset: int) -> None:
+                      src_offset: int, dst_offset: int) -> None:
 
     def create_roi_tensor(
         tensor: ov.Tensor,
         block_number: int,
     ) -> ov.Tensor:
-        roi_begin = ov.runtime.Coordinate([0, 0, 0, 0])
-        roi_end = ov.runtime.Coordinate(tensor.get_shape())
+        roi_begin = ov.Coordinate([0, 0, 0, 0])
+        roi_end = ov.Coordinate(tensor.get_shape())
 
         roi_begin[0] = block_number
         roi_end[0] = block_number + 1
