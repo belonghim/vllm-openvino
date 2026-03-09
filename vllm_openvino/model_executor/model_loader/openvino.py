@@ -4,6 +4,7 @@
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import openvino as ov
 import torch
 
@@ -188,10 +189,17 @@ class OpenVINOCausalLM(nn.Module):
         load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
                         if export else False)
         ov_model_kwargs: dict = {}
+        self.use_text_embeddings_model = False
         if not export:
             model_dir = Path(model_config.model)
             if (model_dir / "openvino_language_model.xml").exists():
                 ov_model_kwargs["file_name"] = "openvino_language_model.xml"
+                # Multimodal OV model (e.g. Gemma 3): language model takes
+                # inputs_embeds instead of input_ids, so we need a separate
+                # text embeddings model to convert token IDs → embeddings.
+                text_emb_path = model_dir / "openvino_text_embeddings_model.xml"
+                if text_emb_path.exists():
+                    self.use_text_embeddings_model = True
         pt_model = OVModelForCausalLM.from_pretrained(
             model_config.model,
             export=export,
@@ -214,6 +222,14 @@ class OpenVINOCausalLM(nn.Module):
         ov_compiled = ov_core.compile_model(pt_model.model, ov_device)
         self.ov_request = ov_compiled.create_infer_request()
 
+        # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
+        if self.use_text_embeddings_model:
+            text_emb_model = ov_core.read_model(
+                str(model_dir / "openvino_text_embeddings_model.xml"))
+            ov_text_emb_compiled = ov_core.compile_model(
+                text_emb_model, ov_device)
+            self.text_emb_request = ov_text_emb_compiled.create_infer_request()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -223,16 +239,38 @@ class OpenVINOCausalLM(nn.Module):
         flat_kv_caches = _flatten_inputs(kv_caches)
         attn_metadata = get_forward_context().attn_metadata
 
-        inputs = [
-            input_ids,
-            positions,
-            *flat_kv_caches,
-            attn_metadata.past_lens,
-            attn_metadata.subsequence_begins,
-            attn_metadata.block_indices,
-            attn_metadata.block_indices_begins,
-            attn_metadata.max_context_len,
-        ]
+        if self.use_text_embeddings_model:
+            # Gemma 3 style: language model takes inputs_embeds, not input_ids.
+            # Run text embeddings model first: input_ids (1D) → inputs_embeds.
+            input_ids_np = np.array(input_ids.data).reshape(1, -1)
+            self.text_emb_request.infer([input_ids_np])
+            inputs_embeds = self.text_emb_request.get_output_tensor(0)
+            # inputs_embeds shape: [1, seq_len, hidden] → flatten to [seq_len, hidden]
+            inputs_embeds_2d = inputs_embeds.data.reshape(-1, inputs_embeds.shape[-1])
+            token_type_ids = np.zeros(
+                (1, input_ids_np.shape[1]), dtype=np.int64)
+            inputs = [
+                positions,
+                token_type_ids,
+                inputs_embeds_2d,
+                *flat_kv_caches,
+                attn_metadata.past_lens,
+                attn_metadata.subsequence_begins,
+                attn_metadata.block_indices,
+                attn_metadata.block_indices_begins,
+                attn_metadata.max_context_len,
+            ]
+        else:
+            inputs = [
+                input_ids,
+                positions,
+                *flat_kv_caches,
+                attn_metadata.past_lens,
+                attn_metadata.subsequence_begins,
+                attn_metadata.block_indices,
+                attn_metadata.block_indices_begins,
+                attn_metadata.max_context_len,
+            ]
 
         inputs.append(attn_metadata.sampled_token_indices)
 
