@@ -218,6 +218,7 @@ class OpenVINOModelRunnerV1:
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
+        self.input_batch.condense()
         self.input_batch.refresh_metadata()
 
         (
