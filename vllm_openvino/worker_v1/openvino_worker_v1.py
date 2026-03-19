@@ -73,9 +73,9 @@ class OpenVINOWorkerV1(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from transformers.dynamic_module_utils import init_hf_modules
 
-            init_cached_hf_modules()
+            init_hf_modules()
         self.model_runner = OpenVINOModelRunnerV1(
             vllm_config=self.vllm_config,
             device=self.device,
