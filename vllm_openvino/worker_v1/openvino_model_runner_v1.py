@@ -14,7 +14,7 @@ from vllm.multimodal import BatchedTensorInputs
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm_openvino.model_executor.model_loader.openvino import get_model

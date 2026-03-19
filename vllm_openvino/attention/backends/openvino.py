@@ -6,10 +6,10 @@ from typing import Dict, List, Optional, Tuple
 import openvino as ov
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata,
-                                              AttentionImpl,
-                                              AttentionType)
+from vllm.v1.attention.backend import (AttentionBackend,
+                                       AttentionMetadata,
+                                       AttentionImpl,
+                                       AttentionType)
 
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
