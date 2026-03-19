@@ -146,7 +146,7 @@ class OpenVINOModelRunnerV1:
                 torch.empty(0, device=self.device),
                 torch.empty(0, device=self.device),
                 None,
-                SamplingMetadata.empty(),
+                self.input_batch.sampling_metadata,
                 {},
             )
 
@@ -251,7 +251,7 @@ class OpenVINOModelRunnerV1:
 
         sampled_tokens = sampler_output.sampled_token_ids.tolist()
 
-        logprobs_lists = sampler_output.logprobs_tensors.tolist() \
+        logprobs_lists = sampler_output.logprobs_tensors.tolists() \
             if sampler_output.logprobs_tensors is not None else None
 
         valid_sampled_tokens = sampled_tokens
@@ -270,7 +270,7 @@ class OpenVINOModelRunnerV1:
                 start_idx = seq_len
                 end_idx = start_idx + len(sampled_ids)
                 self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = sampled_ids
-                self.input_batch.num_tokens[req_index] = end_idx
+                self.input_batch.num_tokens_no_spec[req_index] = end_idx
                 req_state.output_token_ids.extend(sampled_ids)
 
             self.input_batch.num_computed_tokens_cpu[req_index] = seq_len
