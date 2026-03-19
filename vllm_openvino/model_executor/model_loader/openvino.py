@@ -163,35 +163,49 @@ class OpenVINOCausalLM(nn.Module):
 
         load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
                         if export else False)
-        ov_model_kwargs: dict = {}
+        model_dir = Path(model_config.model)
         self.use_text_embeddings_model = False
-        if not export:
-            model_dir = Path(model_config.model)
+
+        if export:
+            # Branch 1: PyTorch→OpenVINO conversion required
+            pt_model = OVModelForCausalLM.from_pretrained(
+                model_config.model,
+                export=True,
+                compile=False,
+                load_in_8bit=load_in_8bit,
+                trust_remote_code=model_config.trust_remote_code,
+            )
+            ov_model = pt_model.model
+        elif model_dir.is_dir():
+            # Branch 2: Local pre-exported IR — bypass optimum-intel's
+            # Path.resolve() to avoid KServe modelcar symlink issues
             if (model_dir / "openvino_language_model.xml").exists():
-                ov_model_kwargs["file_name"] = "openvino_language_model.xml"
-                # Multimodal OV model (e.g. Gemma 3): language model takes
-                # inputs_embeds instead of input_ids, so we need a separate
-                # text embeddings model to convert token IDs → embeddings.
+                ir_filename = "openvino_language_model.xml"
                 text_emb_path = model_dir / "openvino_text_embeddings_model.xml"
                 if text_emb_path.exists():
                     self.use_text_embeddings_model = True
-        pt_model = OVModelForCausalLM.from_pretrained(
-            model_config.model,
-            export=export,
-            compile=False,
-            load_in_8bit=load_in_8bit,
-            trust_remote_code=model_config.trust_remote_code,
-            **ov_model_kwargs,
-        )
+            else:
+                ir_filename = "openvino_model.xml"
+            ov_model = ov_core.read_model(str(model_dir / ir_filename))
+        else:
+            # Branch 3: HuggingFace Hub ID — download required
+            pt_model = OVModelForCausalLM.from_pretrained(
+                model_config.model,
+                export=False,
+                compile=False,
+                load_in_8bit=load_in_8bit,
+                trust_remote_code=model_config.trust_remote_code,
+            )
+            ov_model = pt_model.model
 
         # apply Paged Attention transformation
-        paged_attention_transformation(pt_model.model)
-        apply_gather_before_matmul_transformation(pt_model.model)
+        paged_attention_transformation(ov_model)
+        apply_gather_before_matmul_transformation(ov_model)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
-        pt_model.model.validate_nodes_and_infer_types()
+        ov_model.validate_nodes_and_infer_types()
 
         ov_device = envs.VLLM_OPENVINO_DEVICE
-        ov_compiled = ov_core.compile_model(pt_model.model, ov_device)
+        ov_compiled = ov_core.compile_model(ov_model, ov_device)
         self.ov_request = ov_compiled.create_infer_request()
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)

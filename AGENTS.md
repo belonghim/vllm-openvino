@@ -6,7 +6,7 @@
 
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO를 LLM 추론 백엔드로 추가합니다.
 
-- **vLLM 버전**: 0.13.0 (V1 엔진 전용)
+- **vLLM 버전**: 0.13.0+ (V1 엔진 전용, 0.14.1 컨테이너 이미지 테스트 완료)
 - **OpenVINO 버전**: >= 2026.0.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
@@ -224,3 +224,4 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 3. **LoRA 미지원** — `check_and_update_config()`에서 assert로 차단
 4. **단일 소켓만 지원** — `parallel_config.world_size == 1` 강제. Tensor/Pipeline 병렬 미지원
 5. **KV 캐시 블록 크기** — CPU: 32, GPU: 16 (자동 오버라이드)
+6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. optimum-intel의 `from_pretrained()` 내부에서 `Path.resolve()`를 호출해 symlink를 따라가 접근 불가 경로로 변환되는 문제가 있었음. `model_loader/openvino.py`에서 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 수정 완료 (2026-03-19). 3-branch 구조: export=True → `from_pretrained`, 로컬 dir + export=False → `read_model()`, Hub ID + export=False → `from_pretrained`
