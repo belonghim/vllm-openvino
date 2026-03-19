@@ -180,9 +180,9 @@ class OpenVINOWorkerV1(WorkerBase):
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> None:
+    ) -> ModelRunnerOutput | None:
         if scheduler_output.total_num_scheduled_tokens == 0:
-            self._pending_output = ModelRunnerOutput(
+            return ModelRunnerOutput(
                 req_ids=[],
                 req_id_to_index={},
                 sampled_token_ids=[],
@@ -190,8 +190,7 @@ class OpenVINOWorkerV1(WorkerBase):
                 prompt_logprobs_dict={},
                 pooler_output=None,
             )
-        else:
-            self._pending_output = self.model_runner.execute_model(scheduler_output)
+        self._pending_output = self.model_runner.execute_model(scheduler_output)
         return None
 
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
