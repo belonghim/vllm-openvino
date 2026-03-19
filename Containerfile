@@ -8,7 +8,7 @@ RUN pip install -U pip && pip install -U "transformers<4.58" setuptools wheel pa
     PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" \
     pip install --no-cache-dir "torch==2.9.1+cpu" "openvino==2026.0.0" "optimum-intel==1.27.0"
 WORKDIR /opt/vllm
-COPY . .
+COPY pyproject.toml ./
 RUN VLLM_TARGET_DEVICE="empty" PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" pip install --no-build-isolation --ignore-installed . && \
     pip uninstall -y triton && \
     pip cache purge
@@ -19,6 +19,6 @@ ENV VIRTUAL_ENV=/opt/vllm-env
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
-RUN mkdir /tmp/huggingface && chgrp -R 0 . && chmod -R g+rwX .
-ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU VLLM_OPENVINO_KVCACHE_SPACE=8
+RUN mkdir /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
+ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU VLLM_OPENVINO_KVCACHE_SPACE=8
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
