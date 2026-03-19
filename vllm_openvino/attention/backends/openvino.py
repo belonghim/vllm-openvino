@@ -11,7 +11,8 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionImpl,
                                               AttentionType)
 
-from vllm.v1.attention.backends.utils import AttentionSpec, AttentionMetadataBuilder, CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder, CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.config import VllmConfig
 
 
