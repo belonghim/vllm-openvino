@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Any
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import init_logger
@@ -9,10 +9,9 @@ from vllm.platforms.interface import Platform, PlatformEnum
 import vllm_openvino.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig, ModelConfig, CompilationMode
+    from vllm.config import VllmConfig, CompilationMode
 else:
     VllmConfig = None
-    ModelConfig = None
 
 logger = init_logger(__name__)
 
@@ -30,10 +29,7 @@ class OpenVinoPlatform(Platform):
     device_type: str = "cpu"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: Any, head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool, is_training: bool = False, config: Optional[dict] = None) -> str:
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config) -> str:
         #if selected_backend != _Backend.OPENVINO:
         #    logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
         logger.info("Using OpenVINO Attention backend.")
@@ -42,10 +38,6 @@ class OpenVinoPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "openvino"
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def inference_mode(cls):
@@ -147,10 +139,3 @@ class OpenVinoPlatform(Platform):
             cls.is_openvino_gpu() or \
             "empty" in envs.VLLM_OPENVINO_DEVICE, \
             "OpenVINO backend supports only CPU, GPU and empty devices"
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return True
