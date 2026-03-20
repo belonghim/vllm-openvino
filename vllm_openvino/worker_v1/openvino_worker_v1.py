@@ -381,10 +381,10 @@ class OpenVINOWorkerV1(WorkerBase):
         if used_device_mem >= total_device_memory:
             raise RuntimeError(
                 f"The required memory size {used_device_memory_str} for model "
-                "is higher than the total available device "
-                "memory {total_device_memory_str}. Please consider to "
-                "decrease `max_num_batched_tokens` or increase "
-                "`gpu_memory_utilization`")
+                f"is higher than the total available device "
+                f"memory {total_device_memory_str}. Please consider to "
+                f"decrease `max_num_batched_tokens` or increase "
+                f"`gpu_memory_utilization`")
 
         # Reset input batch
         self.model_runner.input_batch = InputBatch(
