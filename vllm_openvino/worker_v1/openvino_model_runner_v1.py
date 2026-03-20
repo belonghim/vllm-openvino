@@ -60,6 +60,13 @@ class OpenVINOModelRunnerV1:
         self.kv_caches: list = []
         self.block_size: int = 0
 
+        # Pre-allocated fixed-size buffers for _prepare_inputs (avoids per-call allocation)
+        max_seqs = self.scheduler_config.max_num_seqs
+        self._past_lens_buf = np.zeros(max_seqs, dtype=np.int32)
+        self._subseq_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
+        self._block_idx_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
+        self._sampled_idx_buf = np.zeros(max_seqs, dtype=np.int64)
+
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
                                kv_cache_dtype=self.kv_cache_dtype,
@@ -131,15 +138,8 @@ class OpenVINOModelRunnerV1:
         input_tokens = []
         input_positions = []
         seq_lens = []
-        past_lens = []
         query_lens = []
-
-        subsequence_begins = []
         block_indices = []
-        block_indices_begins = []
-
-        subsequence_begins.append(0)
-        block_indices_begins.append(0)
 
         if len(self.requests) == 0:
             return (
@@ -150,13 +150,17 @@ class OpenVINOModelRunnerV1:
                 {},
             )
 
+        n_reqs = 0
+        self._subseq_begins_buf[0] = 0
+        self._block_idx_begins_buf[0] = 0
+
         for req_id in self.input_batch.req_ids:
             req_index = self.input_batch.req_id_to_index[req_id]
             request = self.requests[req_id]
             block_table = request.block_ids[0]
 
             block_indices.extend(block_table)
-            block_indices_begins.append(block_indices_begins[-1] + len(block_table))
+            self._block_idx_begins_buf[n_reqs + 1] = self._block_idx_begins_buf[n_reqs] + len(block_table)
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
@@ -174,10 +178,11 @@ class OpenVINOModelRunnerV1:
             positions_range = range(num_computed, num_tokens_total)
             input_positions.extend(positions_range)
 
-            past_lens.append(num_computed)
-            subsequence_begins.append(subsequence_begins[-1] + query_len)
+            self._past_lens_buf[n_reqs] = num_computed
+            self._subseq_begins_buf[n_reqs + 1] = self._subseq_begins_buf[n_reqs] + query_len
+            n_reqs += 1
 
-        sampled_token_indices = np.array(subsequence_begins[1:]) - 1
+        self._sampled_idx_buf[:n_reqs] = self._subseq_begins_buf[1:n_reqs + 1] - 1
 
         max_query_len = max(query_lens)
         assert max_query_len > 0, "Invalid query_lens: {}".format(query_lens)
@@ -185,12 +190,12 @@ class OpenVINOModelRunnerV1:
         input_tokens = ov.Tensor(np.array(input_tokens), ov.Shape([len(input_tokens)]), ov.Type.i64)
 
         input_positions = ov.Tensor(np.array(input_positions, dtype=np.int64))
-        sampled_token_indices_tensor = ov.Tensor(np.array(sampled_token_indices, dtype=np.int64))
+        sampled_token_indices_tensor = ov.Tensor(self._sampled_idx_buf[:n_reqs].copy(), ov.Shape([n_reqs]), ov.Type.i64)
 
-        past_lens_tensor = ov.Tensor(np.array(past_lens, dtype=np.int32))
-        subsequence_begins_tensor = ov.Tensor(np.array(subsequence_begins, dtype=np.int32))
+        past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs].copy(), ov.Shape([n_reqs]), ov.Type.i32)
+        subsequence_begins_tensor = ov.Tensor(self._subseq_begins_buf[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
         block_indices_tensor = ov.Tensor(np.array(block_indices, dtype=np.int32))
-        block_indices_begins_tensor = ov.Tensor(np.array(block_indices_begins, dtype=np.int32))
+        block_indices_begins_tensor = ov.Tensor(self._block_idx_begins_buf[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
         max_context_len_tensor = ov.Tensor(np.array(max(seq_lens), dtype=np.int32))
 
         attn_metadata = OpenVINOAttentionMetadata(
