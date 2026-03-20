@@ -18,6 +18,7 @@ logger = init_logger(__name__)
 try:
     import openvino as ov
 except ImportError as e:
+    ov = None  # type: ignore[assignment]
     logger.warning("Failed to import OpenVINO with %r", e)
 
 
@@ -56,6 +57,10 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if ov is None:
+            raise ImportError(
+                "OpenVINO is required but not installed. "
+                "Install with: pip install openvino>=2026.0.0")
         GiB_bytes = 1024 * 1024 * 1024
 
         parallel_config = vllm_config.parallel_config
