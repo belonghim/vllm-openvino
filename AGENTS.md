@@ -216,7 +216,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 ### 4. CI/CD 파이프라인 — 현재 규모에서 과도
 
-**현재 상태**: `.github/` 디렉토리 없음, 단일 개발자, 46 커밋
+**현재 상태**: `.github/` 디렉토리 없음, 단일 개발자, 79 커밋
 
 **왜 과도한가**:
 - CI가 할 수 있는 것(lint, py_compile)은 로컬에서 10초면 충분
@@ -224,6 +224,39 @@ curl -s http://localhost:8080/v1/chat/completions \
 - GitHub Actions 세팅/유지 오버헤드 > 얻는 가치
 
 **재평가 조건**: 기여자가 2명 이상으로 늘어나거나, 릴리즈 빈도가 증가하는 경우
+
+### 6. `str_to_torch_type` / `str_to_ov_type` 통합 — 불필요
+
+**현재 상태**: `worker_v1/openvino_worker_v1.py`에 `str_to_torch_type`, `kv_cache.py`에 `str_to_ov_type` 각각 정의
+
+**왜 불필요한가**:
+- 두 매핑은 서로 **다른 타입 시스템**을 위한 것: 전자는 PyTorch dtype, 후자는 OpenVINO dtype
+- 같은 문자열(`"fp16"` 등)을 받지만 반환 타입이 완전히 다름 → 단일 모듈로 통합 불가
+- 실제 코드 경로에서 서로 교환하여 사용되지 않음
+
+**재평가 조건**: 두 타입 시스템 간 변환이 공통 모듈로 추상화될 필요가 생기는 경우
+
+### 7. 비동기 추론 파이프라인 — 실현 불가 (스케줄러 구조 제약)
+
+**현재 상태**: `OpenVINOCausalLM.forward()`에서 `ov_request.start_async()` + 즉시 `wait()` 패턴 사용
+
+**왜 실현 불가한가**:
+- 비동기 파이프라인(배치 N 추론 중 배치 N+1 준비)은 vLLM 스케줄러가 **배치 N이 완료되어 샘플링된 토큰을 받아야** 다음 배치를 생성 가능
+- 즉, 스케줄러가 순차적으로 동작하므로 플러그인 레벨의 비동기 파이프라이닝은 구조적으로 불가
+- `start_async + wait`는 OpenVINO의 추론 실행 메커니즘이며, 이를 바꾸려면 vLLM 엔진 자체를 수정해야 함
+
+**재평가 조건**: vLLM V2 엔진이 추론과 스케줄링을 분리하여 플러그인이 배치를 미리 요청할 수 있게 되는 경우
+
+### 8. Structured outputs (문법 유도 디코딩) 지원 — 수요 없음, upstream 통합 필요
+
+**현재 상태**: `sample_tokens()` 메서드에서 `grammar_output`을 무시하고 통과
+
+**왜 제외되었나**:
+- Structured outputs는 로짓 프로세서 레벨에서 마스킹이 필요하며, vLLM의 `outlines` 통합 경로를 거쳐야 함
+- 단순히 `sample_tokens()`를 수정하는 것으로는 구현 불가
+- 현재 사용자 수요 없음
+
+**재평가 조건**: 사용자 요구가 생기거나 vLLM이 backends용 structured output 플러그인 인터페이스를 공개하는 경우
 
 ### 5. `openvino._offline_transformations` 교체 — 불필요 (2026.0.0 확인 완료)
 
@@ -265,3 +298,4 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 4. **단일 소켓만 지원** — `parallel_config.world_size == 1` 강제. Tensor/Pipeline 병렬 미지원
 5. **KV 캐시 블록 크기** — CPU: 32, GPU: 16 (자동 오버라이드)
 6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. optimum-intel의 `from_pretrained()` 내부에서 `Path.resolve()`를 호출해 symlink를 따라가 접근 불가 경로로 변환되는 문제가 있었음. `model_loader/openvino.py`에서 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 수정 완료 (2026-03-19). 3-branch 구조: export=True → `from_pretrained`, 로컬 dir + export=False → `read_model()`, Hub ID + export=False → `from_pretrained`
+7. **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 `ov = None`으로 설정하고 warning만 출력. 실제 사용 시점인 `check_and_update_config()`에서 `ImportError`를 raise. **import 시점에서 raise하지 않는 이유**: vLLM 플러그인 디스커버리 메커니즘이 모든 플러그인을 import한 뒤 활성 플러그인을 선택하므로, import 시점 raise는 OpenVINO 플러그인이 아닌 다른 플러그인 사용 시에도 크래시를 유발함.
