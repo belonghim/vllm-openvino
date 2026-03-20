@@ -89,6 +89,8 @@ class OpenVINOAttentionBackend(AttentionBackend):
         src_to_dists: List[Tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
+            if src == dst:
+                continue
             for key_cache, value_cache in kv_caches:
                 copy_cache_block(key_cache, key_cache, src, dst)
                 copy_cache_block(value_cache, value_cache, src, dst)
