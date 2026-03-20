@@ -172,7 +172,7 @@ class OpenVINOModelRunnerV1:
             query_lens.append(query_len)
             input_tokens.extend(tokens)
             positions_range = range(num_computed, num_tokens_total)
-            input_positions.extend(list(positions_range))
+            input_positions.extend(positions_range)
 
             past_lens.append(num_computed)
             subsequence_begins.append(subsequence_begins[-1] + query_len)
