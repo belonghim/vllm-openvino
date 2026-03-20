@@ -80,6 +80,8 @@ def _require_model_export(model_id, revision=None, subfolder=None):
         has_language_model = ov_lang_model_path in model_files
         return not (has_standard or has_language_model)
     except Exception:
+        logger.debug("Failed to check HF Hub for model info, "
+                     "assuming export is required", exc_info=True)
         return True
 
 

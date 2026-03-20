@@ -30,8 +30,6 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config) -> str:
-        #if selected_backend != _Backend.OPENVINO:
-        #    logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
         logger.info("Using OpenVINO Attention backend.")
         return "vllm_openvino.attention.backends.openvino.OpenVINOAttentionBackend"
 
