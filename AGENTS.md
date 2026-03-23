@@ -239,7 +239,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 ### 4. CI/CD 파이프라인 — 현재 규모에서 과도
 
-**현재 상태**: `.github/` 디렉토리 없음, 단일 개발자, 79 커밋
+**현재 상태**: `.github/` 디렉토리 없음, 단일 개발자
 
 **왜 과도한가**:
 - CI가 할 수 있는 것(lint, py_compile)은 로컬에서 10초면 충분

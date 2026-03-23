@@ -1,6 +1,6 @@
 # vllm-openvino
 
-OpenVINO plugin for vLLM — run LLM inference on Intel CPUs and GPUs.
+[GitHub](https://github.com/belonghim/vllm-openvino) · OpenVINO plugin for vLLM — run LLM inference on Intel CPUs and GPUs.
 
 ## What is this?
 
@@ -40,7 +40,7 @@ docker build -f Containerfile -t vllm-openvino .
 Run the Docker container:
 
 ```bash
-docker run -d --name vllm-server -p 8080:8080 \
+docker run -d --name vllm-server -p 8000:8000 \
   -e VLLM_OPENVINO_DEVICE=CPU \
   -e TORCH_COMPILE_DISABLE=1 \
   -e VLLM_OPENVINO_KVCACHE_SPACE=8 \
@@ -56,15 +56,17 @@ For CPU:
 
 ```bash
 VLLM_OPENVINO_DEVICE=CPU TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_KVCACHE_SPACE=8 \
-  python -m vllm.entrypoints.openai.api_server --model <model_id>
+  python -m vllm.entrypoints.openai.api_server --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 For GPU:
 
 ```bash
 VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
-  python -m vllm.entrypoints.openai.api_server --model <model_id>
+  python -m vllm.entrypoints.openai.api_server --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
+
+Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with any Hugging Face Hub model ID or local path supported by optimum-intel.
 
 ## Environment Variables
 
@@ -76,7 +78,9 @@ VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
 | `VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS` | Enable U8 weight compression on load | `OFF` |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
-## Supported Features
+## Compatibility
+
+The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
 
