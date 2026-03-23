@@ -1,124 +1,88 @@
-## Installation
+# vllm-openvino
 
-vLLM powered by OpenVINO supports all LLM models from [vLLM supported models list](#supported-models) and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support, as well as on both integrated and discrete Intel® GPUs ([the list of supported GPUs](https://docs.openvino.ai/2024/about-openvino/release-notes-openvino/system-requirements.html#gpu)).
+OpenVINO plugin for vLLM — run LLM inference on Intel CPUs and GPUs.
 
-> [!NOTE]
-> There are no pre-built wheels or images for this device, so you must build vLLM from source.
+## What is this?
+
+This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's OpenAI-compatible API server on Intel CPUs and GPUs. It integrates OpenVINO as the inference execution layer, leveraging vLLM's scheduler, PagedAttention, and API server infrastructure. Models supported are those compatible with optimum-intel's OpenVINO export.
 
 ## Requirements
 
-- OS: Linux
-- Instruction set architecture (ISA) requirement: at least AVX2.
+- Python >= 3.9
+- vLLM 0.14.1
+- OpenVINO >= 2026.0.0
+- Linux (x86-64, AVX2+)
 
-## Set up using Python
+## Installation
 
-### Pre-built wheels
+### From source
 
-Currently, there are no pre-built OpenVINO wheels.
+Install vLLM with the OpenVINO backend:
 
-### Build wheel from source
-
-First, install Python and ensure you have the latest pip. For example, on Ubuntu 22.04, you can run:
-
-```console
-sudo apt-get update  -y
-sudo apt-get install python3-pip
-pip install --upgrade pip
+```bash
+VLLM_TARGET_DEVICE="empty" PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" pip install .
 ```
 
-Second, clone vllm-openvino and install prerequisites for the vLLM OpenVINO backend installation:
+Note: vLLM may install `triton` which is incompatible with OpenVINO. Uninstall it after installation:
 
-```console
-git clone https://github.com/belonghim/vllm-openvino.git
-cd vllm-openvino
+```bash
+pip uninstall -y triton
 ```
 
-Finally, install vLLM with OpenVINO backend:
+### Docker
 
-```console
-VLLM_TARGET_DEVICE="empty" PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python -m pip install -v .
+Build the Docker image:
+
+```bash
+docker build -f Containerfile -t vllm-openvino .
 ```
 
-> [!NOTE]
-> In x86, triton will be installed by vllm. But in OpenVINO, triton doesn't work correctly. we need to uninstall it via `python3 -m pip uninstall -y triton`
+Run the Docker container:
 
-> [!NOTE]
-To use vLLM OpenVINO backend with a GPU device, ensure your system is properly set up. Follow the instructions provided here: [https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html](https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html).
-
-## Set up using Docker
-
-### Pre-built images
-
-Currently, there are no pre-built OpenVINO images.
-
-### Build image from source
-
-```console
-docker build -f Containerfile -t vllm-openvino-env .
-docker run -it --rm vllm-openvino-env
+```bash
+docker run -d --name vllm-server -p 8080:8080 \
+  -e VLLM_OPENVINO_DEVICE=CPU \
+  -e TORCH_COMPILE_DISABLE=1 \
+  -e VLLM_OPENVINO_KVCACHE_SPACE=8 \
+  vllm-openvino \
+  --model <model_id>
 ```
 
-## Extra information
+## Quick Start
 
-## Supported features
+Run the vLLM API server with OpenVINO backend.
 
-OpenVINO vLLM backend supports the following advanced vLLM features:
+For CPU:
 
-- Prefix caching (`--enable-prefix-caching`)
+```bash
+VLLM_OPENVINO_DEVICE=CPU TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_KVCACHE_SPACE=8 \
+  python -m vllm.entrypoints.openai.api_server --model <model_id>
+```
+
+For GPU:
+
+```bash
+VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
+  python -m vllm.entrypoints.openai.api_server --model <model_id>
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VLLM_OPENVINO_DEVICE` | Device selection: CPU, GPU, GPU.1, etc. | `CPU` |
+| `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
+| `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: u8, i8, f16, bf16, f32 | `auto` |
+| `VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS` | Enable U8 weight compression on load | `OFF` |
+| `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
+
+## Supported Features
+
 - Chunked prefill (`--enable-chunked-prefill`)
-
-> [!NOTE]
-> Simultaneous usage of both --enable-prefix-caching and --enable-chunked-prefill is not yet implemented.
-
-> [!NOTE]
-> --enable-chunked-prefill is broken on openvino==2025.2, to use this feature update openvino to a nightly 2025.3 release or openvino==2025.1.
-
-## Performance tips
-
-### vLLM OpenVINO backend environment variables
-
-- `VLLM_OPENVINO_DEVICE` to specify which device utilize for the inference. If there are multiple GPUs in the system, additional indexes can be used to choose the proper one (e.g, `VLLM_OPENVINO_DEVICE=GPU.1`). If the value is not specified, CPU device is used by default.
-- `VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON` to enable U8 weights compression during model loading stage. By default, compression is turned off. You can also export model with different compression techniques using `optimum-cli` and pass exported folder as `<model_id>`
-- `TORCH_COMPILE_DISABLE=1` to disable torch.compile/Inductor which is incompatible with OpenVINO. **Required** when running with vLLM v0.13.0+.
-
-
-### CPU performance tips
-
-CPU uses the following environment variables to control behavior:
-
-- `VLLM_OPENVINO_KVCACHE_SPACE` to specify the KV Cache size (e.g, `VLLM_OPENVINO_KVCACHE_SPACE=40` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
-- `VLLM_OPENVINO_KV_CACHE_PRECISION=u8` to control KV cache precision. `u8` precision is used by default.
-
-To enable better TPOT / TTFT latency, you can use vLLM's chunked prefill feature (`--enable-chunked-prefill`). Based on the experiments, the recommended batch size is `256` (`--max-num-batched-tokens`)
-
-OpenVINO best known configuration for CPU is:
-
-```console
-$ VLLM_OPENVINO_KVCACHE_SPACE=100 VLLM_OPENVINO_KV_CACHE_PRECISION=u8 VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON \
-    python3 vllm/benchmarks/benchmark_throughput.py --model meta-llama/Llama-2-7b-chat-hf --dataset vllm/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json --enable-chunked-prefill --max-num-batched-tokens 256
-```
-
-### GPU performance tips
-
-GPU device implements the logic for automatic detection of available GPU memory and, by default, tries to reserve as much memory as possible for the KV cache (taking into account `gpu_memory_utilization` option). However, this behavior can be overridden by explicitly specifying the desired amount of memory for the KV cache using `VLLM_OPENVINO_KVCACHE_SPACE` environment variable (e.g, `VLLM_OPENVINO_KVCACHE_SPACE=8` means 8 GB space for KV cache).
-
-Additionally, GPU device supports `VLLM_OPENVINO_KV_CACHE_PRECISION` (e.g. `i8` or `fp16`) to control KV cache precision (default value is device-specific).
-
-Currently, the best performance using GPU can be achieved with the default vLLM execution parameters for models with quantized weights (8 and 4-bit integer data types are supported) and `preemption-mode=swap`.
-
-OpenVINO best known configuration for GPU is:
-
-```console
-$ VLLM_OPENVINO_DEVICE=GPU VLLM_OPENVINO_KV_CACHE_PRECISION=i8 VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON \
-    python3 vllm/benchmarks/benchmark_throughput.py --model meta-llama/Llama-2-7b-chat-hf --dataset vllm/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json
-```
 
 ## Limitations
 
 - LoRA serving is not supported.
-- Only LLM models are currently supported. LLaVa and encoder-decoder models are not currently enabled in vLLM OpenVINO integration.
-- Tensor and pipeline parallelism are not currently enabled in vLLM integration.
+- Single socket only; tensor/pipeline parallelism is not supported.
+- vLLM V1 engine only (vLLM 0.13.0+).
 
-## V1 Engine
-
-This backend uses vLLM'''s V1 engine exclusively (the only engine available in vLLM v0.13.0+). The V0 engine and associated worker classes have been removed.
