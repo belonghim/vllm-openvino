@@ -322,3 +322,29 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 5. **KV 캐시 블록 크기** — CPU: 32, GPU: 16 (자동 오버라이드)
 6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. optimum-intel의 `from_pretrained()` 내부에서 `Path.resolve()`를 호출해 symlink를 따라가 접근 불가 경로로 변환되는 문제가 있었음. `model_loader/openvino.py`에서 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 수정 완료 (2026-03-19). 3-branch 구조: export=True → `from_pretrained`, 로컬 dir + export=False → `read_model()`, Hub ID + export=False → `from_pretrained`
 7. **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 `ov = None`으로 설정하고 warning만 출력. 실제 사용 시점인 `check_and_update_config()`에서 `ImportError`를 raise. **import 시점에서 raise하지 않는 이유**: vLLM 플러그인 디스커버리 메커니즘이 모든 플러그인을 import한 뒤 활성 플러그인을 선택하므로, import 시점 raise는 OpenVINO 플러그인이 아닌 다른 플러그인 사용 시에도 크래시를 유발함.
+
+## vLLM 버전 업그레이드 체크리스트
+
+vLLM 버전 업그레이드 시 다음 사항을 확인하세요:
+
+1.  **업그레이드 전 준비**:
+    *   vLLM 릴리즈 노트를 확인하여 변경 사항을 파악합니다.
+    *   특히 `vllm.v1.*` 경로의 내부 API 변경 여부를 주의 깊게 살펴봅니다.
+
+2.  **🔴 높은 위험 import 확인**:
+    *   `vllm.v1.kv_cache_interface` — `KVCacheSpec`, `KVCacheConfig`, `FullAttentionSpec`, `AttentionSpec`
+    *   `vllm.v1.attention.backend` — `AttentionBackend`, `AttentionMetadata`
+    *   `vllm.v1.attention.backends.utils` — `AttentionMetadataBuilder`, `CommonAttentionMetadata`
+    *   `vllm.v1.outputs` — `SamplerOutput`, `ModelRunnerOutput`
+    *   `vllm.v1.sample.metadata` — `SamplingMetadata`
+    *   `vllm.v1.sample.sampler` — `Sampler`
+    *   `vllm.v1.worker.gpu_input_batch` — `CachedRequestState`, `InputBatch`
+    *   `vllm.v1.worker.worker_base` — `WorkerBase`
+    *   `vllm.v1.worker.utils` — `bind_kv_cache`
+    *   `vllm.v1.core.sched.output` — `SchedulerOutput`, `NewRequestData`, `CachedRequestData`
+    (자세한 내용은 "핵심 의존 관계" 섹션을 참조하세요.)
+
+3.  **검증 방법**:
+    *   `python3 -m py_compile vllm_openvino/**/*.py`를 실행하여 문법 오류를 확인합니다.
+    *   Podman 테스트 환경에서 실제 추론을 실행하여 기능적 회귀가 없는지 검증합니다.
+

@@ -46,6 +46,8 @@ class OpenVINOCacheEngine:
         ov_core: ov.Core,
         ov_device: str,
     ) -> None:
+        # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
+        # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
         assert device_config.device_type == "cpu"
         self.cache_config = cache_config
         self.model_config = model_config

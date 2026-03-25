@@ -61,7 +61,8 @@ def _require_model_export(model_id, revision=None, subfolder=None):
 
     hf_api = HfApi()
     try:
-        model_info = hf_api.model_info(model_id, revision=revision or "main")
+        model_info = hf_api.model_info(model_id, revision=revision or "main",
+                                       timeout=10)
         normalized_subfolder = (None if subfolder is None else
                                 Path(subfolder).as_posix())
         model_files = [
@@ -119,7 +120,13 @@ def find_llm_matmul(model: ov.Model):
             divide = tanh.input_value(0).node
             if divide.get_type_name() == "Divide":
                 matmul = divide.input_value(0).node
-    assert matmul.get_type_name() == "MatMul", "Could not find MatMul in the model output."
+    if matmul.get_type_name() != "MatMul":
+        raise ValueError(
+            f"Could not find MatMul in model output. "
+            f"Last node type: '{last_node_type}'. "
+            "Supported output patterns: MatMul, Add->MatMul, "
+            "Transpose->MatMul, Multiply->Tanh->Divide->MatMul."
+        )
     return matmul, slice_gather_dim
 
 
@@ -289,17 +296,8 @@ class OpenVINOCausalLM(nn.Module):
 
 def get_model(
     vllm_config: VllmConfig,
-    **kwargs,
+    ov_core: ov.Core,
 ) -> torch.nn.Module:
-    lora_config = kwargs.get("lora_config")
-    ov_core = kwargs.get("ov_core")
-    if lora_config:
-        raise ValueError(
-            "OpenVINO modeling does not support LoRA, "
-            "but LoRA is enabled. Support for this model may "
-            "be added in the future. If this is important to you, "
-            "please open an issue on github.")
-
     with set_current_vllm_config(vllm_config):
         return OpenVINOCausalLM(ov_core, vllm_config.model_config)
 
