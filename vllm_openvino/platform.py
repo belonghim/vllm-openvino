@@ -52,7 +52,7 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.warning("Pin memory is not supported on OpenVINO.")
+        logger.debug("Pin memory is not supported on OpenVINO.")
         return False
 
     @classmethod
@@ -80,7 +80,6 @@ class OpenVinoPlatform(Platform):
             model_config.enforce_eager = True
 
         # check and update cache config
-        ov_core = ov.Core()
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -126,6 +125,11 @@ class OpenVinoPlatform(Platform):
             else:
                 cache_config.openvino_kvcache_space_bytes = (  # type: ignore
                     kv_cache_space * GiB_bytes)
+                if kv_cache_space == 0 and not OpenVinoPlatform.is_openvino_cpu():
+                    logger.info(
+                        "VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU device. "
+                        "KV cache size will be determined automatically via "
+                        "profiling run.")
         else:
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE"
