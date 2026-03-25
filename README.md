@@ -88,5 +88,5 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - LoRA serving is not supported.
 - Single socket only; tensor/pipeline parallelism is not supported.
-- vLLM V1 engine only (vLLM 0.13.0+).
+- vLLM V1 engine only (vLLM 0.14.1).
 
