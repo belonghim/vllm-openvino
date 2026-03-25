@@ -30,7 +30,6 @@ class OpenVINOModelRunnerV1:
         vllm_config: VllmConfig,
         device: torch.device,
         ov_core: ov.Core = None,
-        kv_cache_dtype: Optional[str] = "auto",
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -40,7 +39,6 @@ class OpenVINOModelRunnerV1:
         self.compilation_config = vllm_config.compilation_config
         self.device = device
         self.ov_core = ov_core or ov.Core()
-        self.kv_cache_dtype = kv_cache_dtype
         self.model: nn.Module  # Set after load_model()
 
         # V1 state management
@@ -69,7 +67,6 @@ class OpenVINOModelRunnerV1:
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
-                               kv_cache_dtype=self.kv_cache_dtype,
                                ov_core=self.ov_core)
 
     def get_model(self) -> nn.Module:
@@ -280,10 +277,6 @@ class OpenVINOModelRunnerV1:
 
             self.input_batch.num_computed_tokens_cpu[req_index] = seq_len
 
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            req_state = self.requests[req_id]
-            seq_len = (req_state.num_computed_tokens +
-                       scheduler_output.num_scheduled_tokens[req_id])
             # Ignore the sampled token for partial prefills (chunked prefill).
             # seq_len < num_prompt_tokens means we haven't finished the prompt.
             if seq_len < req_state.num_prompt_tokens:

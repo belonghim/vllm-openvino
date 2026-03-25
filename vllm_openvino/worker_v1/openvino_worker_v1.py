@@ -80,7 +80,6 @@ class OpenVINOWorkerV1(WorkerBase):
             vllm_config=self.vllm_config,
             device=self.device,
             ov_core=self.ov_core,
-            kv_cache_dtype=self.vllm_config.cache_config.cache_dtype
         )
 
         # Uninitialized cache engine. Will be initialized by

@@ -42,7 +42,7 @@ def _flatten_inputs(inputs):
     return flatten_inputs
 
 
-"""Removed dead _modify_cache_parameters for OpenVINO 2026.0+"""
+# Removed dead _modify_cache_parameters for OpenVINO 2026.0+
 
 
 def _require_model_export(model_id, revision=None, subfolder=None):
@@ -141,7 +141,6 @@ class OpenVINOCausalLM(nn.Module):
         self,
         ov_core: ov.Core,
         model_config: ModelConfig,
-        kv_cache_dtype: ov.Type,
     ) -> None:
         super().__init__()
         self.logits_processor = LogitsProcessor(
@@ -267,7 +266,8 @@ class OpenVINOCausalLM(nn.Module):
 
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
 
-        # TODO: remove 'view' once OpenVINO PA will drop 'seq_len' dimension
+        # NOTE: view reshapes logits from [seq_len, vocab] to [-1, vocab].
+        # OpenVINO PA currently outputs with a seq_len dimension; remove view if/when that changes.
         return logits.view(-1, logits.shape[-1])
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -289,7 +289,6 @@ class OpenVINOCausalLM(nn.Module):
 
 def get_model(
     vllm_config: VllmConfig,
-    kv_cache_dtype: ov.Type,
     **kwargs,
 ) -> torch.nn.Module:
     lora_config = kwargs.get("lora_config")
@@ -302,7 +301,6 @@ def get_model(
             "please open an issue on github.")
 
     with set_current_vllm_config(vllm_config):
-        return OpenVINOCausalLM(ov_core, vllm_config.model_config,
-                                kv_cache_dtype)
+        return OpenVINOCausalLM(ov_core, vllm_config.model_config)
 
  
