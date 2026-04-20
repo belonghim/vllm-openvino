@@ -60,7 +60,7 @@ class OpenVinoPlatform(Platform):
         if ov is None:
             raise ImportError(
                 "OpenVINO is required but not installed. "
-                "Install with: pip install openvino>=2026.0.0")
+                "Install with: pip install openvino>=2026.1.0")
         GiB_bytes = 1024 * 1024 * 1024
 
         parallel_config = vllm_config.parallel_config

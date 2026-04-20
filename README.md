@@ -8,9 +8,9 @@ This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's O
 
 ## Requirements
 
-- Python >= 3.9
-- vLLM 0.14.1
-- OpenVINO >= 2026.0.0
+- Python >= 3.10
+- vLLM 0.16.0
+- OpenVINO >= 2026.1.0
 - Linux (x86-64, AVX2+)
 
 ## Installation
@@ -88,5 +88,5 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - LoRA serving is not supported.
 - Single socket only; tensor/pipeline parallelism is not supported.
-- vLLM V1 engine only (vLLM 0.14.1).
+- vLLM V1 engine only (vLLM 0.16.0).
 
