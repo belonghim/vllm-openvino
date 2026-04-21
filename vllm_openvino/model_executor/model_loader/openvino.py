@@ -144,21 +144,35 @@ def _remove_ssmlike_sdpa_subgraph(model: ov.Model) -> None:
             pass
 
 
+def _has_sdpa_ops(model: ov.Model) -> bool:
+    """Check if model has ScaledDotProductAttention operations."""
+    for op in model.get_ops():
+        if op.get_type_name() == "ScaledDotProductAttention":
+            return True
+    return False
+
+
 def apply_selective_paged_attention_transformation(model: ov.Model, model_type: str) -> None:
     """Apply PA transformation selectively based on model type.
 
     For HYBRID_MAMBA models: PA transformation is skipped due to PrevSequenceLengthPattern
     crash on SSM Gather/Reshape nodes. The model runs with internal KV cache.
-    For ATTENTION_ONLY models: apply PA transformation directly.
+    For ATTENTION_ONLY models: apply PA transformation only if SDPA ops exist.
     """
     if model_type == ATTENTION_ONLY:
+        if not _has_sdpa_ops(model):
+            logger.warning(
+                "Model does not have ScaledDotProductAttention operations. "
+                "Skipping PagedAttention transformation. "
+                "The model will run with internal KV cache."
+            )
+            return
         paged_attention_transformation(model)
         return
 
     # For hybrid models: skip PA transformation entirely due to C++ pattern matcher
     # crashing on SSM subgraphs (PrevSequenceLengthPattern on Gather/Reshape nodes).
     # The model will use internal KV cache mechanism instead of PagedAttention.
-    # This is a temporary workaround until a proper solution is found.
     logger.warning(
         "Hybrid Mamba models do not support PagedAttention transformation yet. "
         "The model will run with internal KV cache."
@@ -237,11 +251,15 @@ class OpenVINOCausalLM(nn.Module):
 
         # Find and load IR files
         self.use_text_embeddings_model = False
+        self.use_vision_embeddings_model = False
         if (model_dir / "openvino_language_model.xml").exists():
             ir_filename = "openvino_language_model.xml"
             text_emb_path = model_dir / "openvino_text_embeddings_model.xml"
             if text_emb_path.exists():
                 self.use_text_embeddings_model = True
+            vision_emb_path = model_dir / "openvino_vision_embeddings_model.xml"
+            if vision_emb_path.exists():
+                self.use_vision_embeddings_model = True
         else:
             ir_filename = "openvino_model.xml"
 
@@ -269,6 +287,13 @@ class OpenVINOCausalLM(nn.Module):
                 text_emb_model, ov_device)
             self.text_emb_request = ov_text_emb_compiled.create_infer_request()
 
+        if self.use_vision_embeddings_model:
+            vision_emb_model = ov_core.read_model(
+                str(model_dir / "openvino_vision_embeddings_model.xml"))
+            ov_vision_emb_compiled = ov_core.compile_model(
+                vision_emb_model, ov_device)
+            self.vision_emb_request = ov_vision_emb_compiled.create_infer_request()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -276,6 +301,8 @@ class OpenVINOCausalLM(nn.Module):
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         ssm_caches: Optional[list[ov.Tensor]] = None,
         conv_caches: Optional[list[ov.Tensor]] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         flat_kv_caches = _flatten_inputs(kv_caches)
         state_tensors = list(flat_kv_caches)
@@ -308,6 +335,21 @@ class OpenVINOCausalLM(nn.Module):
             inputs_embeds = self.text_emb_request.get_output_tensor(0)
             # inputs_embeds shape: [1, seq_len, hidden] → flatten to [seq_len, hidden]
             inputs_embeds_2d = inputs_embeds.data.reshape(-1, inputs_embeds.shape[-1])
+
+            if self.use_vision_embeddings_model and pixel_values is not None:
+                pixel_values_np = np.array(pixel_values.data)
+                image_pos_np = np.array(image_position_ids.data)
+                self.vision_emb_request.infer([pixel_values_np, image_pos_np])
+                vision_embeds = self.vision_emb_request.get_output_tensor(0)
+                vision_embeds_2d = vision_embeds.data.reshape(
+                    -1, vision_embeds.shape[-1])
+
+                for i in range(image_pos_np.shape[1]):
+                    start, end = image_pos_np[0, i]
+                    num_patches = end - start
+                    patch_offset = i * num_patches
+                    inputs_embeds_2d[start:end] = vision_embeds_2d[patch_offset:patch_offset+num_patches]
+
             token_type_ids = np.zeros(
                 (1, input_ids_np.shape[1]), dtype=np.int64)
             inputs = [

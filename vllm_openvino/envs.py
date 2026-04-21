@@ -15,9 +15,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
-    # default is 4GB
+    # default is 32GB for Gemma-4 compatibility
     "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
+    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "32")),
 
     # OpenVINO KV cache precision
     # default 'undefined', which means plugin will automatically set

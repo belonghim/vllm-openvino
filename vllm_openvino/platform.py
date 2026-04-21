@@ -118,11 +118,17 @@ class OpenVinoPlatform(Platform):
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
         if kv_cache_space >= 0:
             if kv_cache_space == 0 and OpenVinoPlatform.is_openvino_cpu():
-                cache_config.openvino_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
+                cache_config.openvino_kvcache_space_bytes = 32 * GiB_bytes  # type: ignore
                 logger.warning(
                     "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
-                    "for OpenVINO backend is not set, using 4 by default.")
+                    "for OpenVINO backend is not set, using 32 by default.")
             else:
+                if kv_cache_space < 32 and OpenVinoPlatform.is_openvino_cpu():
+                    logger.warning(
+                        "VLLM_OPENVINO_KVCACHE_SPACE is set to %d GB, "
+                        "which is too small for large models. Using 32 GB instead.",
+                        kv_cache_space)
+                    kv_cache_space = 32
                 cache_config.openvino_kvcache_space_bytes = (  # type: ignore
                     kv_cache_space * GiB_bytes)
                 if kv_cache_space == 0 and not OpenVinoPlatform.is_openvino_cpu():

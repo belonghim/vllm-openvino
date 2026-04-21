@@ -207,6 +207,30 @@ class OpenVINOModelRunnerV1:
 
         self._sampled_idx_buf[:n_reqs] = self._subseq_begins_buf[1:n_reqs + 1] - 1
 
+        multi_modal_kwargs = {}
+        all_pixel_values = []
+        all_image_position_ids = []
+
+        for req_id in self.input_batch.req_ids:
+            request = self.requests[req_id]
+            if request.mm_features:
+                # vLLM v1: mm_features is a list of MultiModalFeatureSpec
+                for mm_feature in request.mm_features:
+                    # mm_feature.data should be the preprocessed image tensor
+                    all_pixel_values.append(mm_feature.data)
+                    # mm_feature.mm_position is typically the (start, end) token positions
+                    all_image_position_ids.append(mm_feature.mm_position)
+
+        if all_pixel_values:
+            # For now, focus on single image per request as per implementation notes.
+            # Assuming mm_feature.data is already in correct shape [num_patches, hidden]
+            # or [batch, num_patches, hidden] depending on vLLM version.
+            # Based on model_loader/openvino.py: pixel_values_np = np.array(pixel_values.data)
+            # and image_pos_np = np.array(image_position_ids.data)
+            multi_modal_kwargs["pixel_values"] = torch.stack(all_pixel_values)
+            multi_modal_kwargs["image_position_ids"] = torch.tensor(
+                all_image_position_ids, dtype=torch.int64)
+
         max_query_len = max(query_lens)
         assert max_query_len > 0, "Invalid query_lens: {}".format(query_lens)
 
@@ -245,7 +269,7 @@ class OpenVINOModelRunnerV1:
             input_positions,
             attn_metadata,
             self.input_batch.sampling_metadata,
-            {},
+            multi_modal_kwargs,
         )
 
     @torch.inference_mode()
@@ -272,6 +296,7 @@ class OpenVINOModelRunnerV1:
             "kv_caches": self.kv_caches,
             "ssm_caches": self.ssm_caches,
             "conv_caches": self.conv_caches,
+            **multi_modal_kwargs,
         }
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):

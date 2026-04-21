@@ -582,10 +582,14 @@ class OpenVINOWorkerV1(WorkerBase):
         # For OpenVINO backend, in case of CPU device, the block number will be
         # calculated based on the openvino_kvcache_space_bytes.
         cache_block_size = self.get_cache_block_size_bytes()
+        kv_space = getattr(self.cache_config, 'openvino_kvcache_space_bytes', 0)
+        logger.info("OpenVINO KV cache space: %d bytes, block_size: %d bytes",
+                    kv_space, cache_block_size)
         num_device_blocks, num_swap_blocks = determine_num_available_blocks(current_platform,
                                                                             self.cache_config,
                                                                             cache_block_size,
                                                                             self.profile_run)
+        logger.info("OpenVINO num_device_blocks: %d", num_device_blocks)
         self.num_swap_blocks = num_swap_blocks
         return num_device_blocks * cache_block_size
 
