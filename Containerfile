@@ -1,8 +1,24 @@
-# Build from source takes 30+ min. Use pre-built quay.io image as base for faster builds.
-# When vLLM wheels become available for your Python version, switch back to build-from-source approach.
-FROM quay.io/joopark/vllm-openvino:0.14.1 AS base
+FROM registry.access.redhat.com/ubi10/ubi:latest AS builder
+RUN dnf install -y git python3 python3-devel gcc gcc-c++ make cmake && \
+    dnf clean all
+ENV VIRTUAL_ENV=/opt/vllm-env
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN pip install -U pip && pip install -U "transformers<4.58" setuptools wheel packaging && \
+    PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" \
+    pip install --no-cache-dir "torch==2.10.0+cpu" "openvino==2026.1.0"
+WORKDIR /opt/vllm
+COPY pyproject.toml ./
+RUN VLLM_TARGET_DEVICE="empty" PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" pip install --no-build-isolation --ignore-installed . && \
+    pip uninstall -y triton && \
+    pip cache purge
+FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
+RUN microdnf install -y python3 shadow-utils && microdnf clean all
+COPY --from=builder /opt/vllm-env /opt/vllm-env
+ENV VIRTUAL_ENV=/opt/vllm-env
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
-RUN mkdir -p /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
+RUN mkdir /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
 ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU VLLM_OPENVINO_KVCACHE_SPACE=8
-ENTRYPOINT ["/opt/vllm-env/bin/python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
