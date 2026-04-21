@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import openvino as ov
@@ -43,19 +43,13 @@ class OpenVINOModelRunnerV1:
 
         # V1 state management
         self.requests: dict[str, CachedRequestState] = {}
-        self.input_batch = InputBatch(
-            max_num_reqs=self.scheduler_config.max_num_seqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
-            device=self.device,
-            pin_memory=False,  # OpenVINO/CPU — no pin memory
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.cache_config.block_size],
-            kernel_block_sizes=[self.cache_config.block_size],
-        )
+        self.num_cache_groups = 1
+        self.input_batch = self._create_input_batch(self.num_cache_groups)
 
         # KV cache — set by worker after initialize_cache
         self.kv_caches: list = []
+        self.ssm_caches: list[ov.Tensor] = []
+        self.conv_caches: list[ov.Tensor] = []
         self.block_size: int = 0
 
         # Pre-allocated fixed-size buffers for _prepare_inputs (avoids per-call allocation)
@@ -64,6 +58,23 @@ class OpenVINOModelRunnerV1:
         self._subseq_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._block_idx_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._sampled_idx_buf = np.zeros(max_seqs, dtype=np.int64)
+
+    def _create_input_batch(self, num_cache_groups: int) -> InputBatch:
+        block_sizes = [self.cache_config.block_size] * max(1, num_cache_groups)
+        return InputBatch(
+            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_model_len=self.model_config.max_model_len,
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            device=self.device,
+            pin_memory=False,  # OpenVINO/CPU — no pin memory
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=block_sizes,
+            kernel_block_sizes=block_sizes,
+        )
+
+    def configure_cache_groups(self, num_cache_groups: int) -> None:
+        self.num_cache_groups = max(1, num_cache_groups)
+        self.input_batch = self._create_input_batch(self.num_cache_groups)
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
@@ -136,7 +147,11 @@ class OpenVINOModelRunnerV1:
         input_positions = []
         seq_lens = []
         query_lens = []
-        block_indices = []
+        block_indices_groups = [[] for _ in range(self.num_cache_groups)]
+        block_indices_begins_groups = [
+            np.zeros_like(self._block_idx_begins_buf)
+            for _ in range(self.num_cache_groups)
+        ]
 
         if len(self.requests) == 0:
             return (
@@ -149,15 +164,26 @@ class OpenVINOModelRunnerV1:
 
         n_reqs = 0
         self._subseq_begins_buf[0] = 0
-        self._block_idx_begins_buf[0] = 0
+        for group_idx in range(self.num_cache_groups):
+            block_indices_begins_groups[group_idx][0] = 0
 
         for req_id in self.input_batch.req_ids:
             req_index = self.input_batch.req_id_to_index[req_id]
             request = self.requests[req_id]
-            block_table = request.block_ids[0]
+            for group_idx in range(self.num_cache_groups):
+                if group_idx < len(request.block_ids):
+                    group_block_table = request.block_ids[group_idx]
+                elif request.block_ids:
+                    # Backward-compatible fallback for single-group block_ids.
+                    group_block_table = request.block_ids[0]
+                else:
+                    group_block_table = []
 
-            block_indices.extend(block_table)
-            self._block_idx_begins_buf[n_reqs + 1] = self._block_idx_begins_buf[n_reqs] + len(block_table)
+                block_indices_groups[group_idx].extend(group_block_table)
+                block_indices_begins_groups[group_idx][n_reqs + 1] = (
+                    block_indices_begins_groups[group_idx][n_reqs]
+                    + len(group_block_table)
+                )
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
@@ -191,15 +217,23 @@ class OpenVINOModelRunnerV1:
 
         past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs].copy(), ov.Shape([n_reqs]), ov.Type.i32)
         subsequence_begins_tensor = ov.Tensor(self._subseq_begins_buf[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
-        block_indices_tensor = ov.Tensor(np.array(block_indices, dtype=np.int32))
-        block_indices_begins_tensor = ov.Tensor(self._block_idx_begins_buf[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
+        block_indices_group_tensors = [
+            ov.Tensor(np.array(group_indices, dtype=np.int32))
+            for group_indices in block_indices_groups
+        ]
+        block_indices_begins_group_tensors = [
+            ov.Tensor(group_begins[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
+            for group_begins in block_indices_begins_groups
+        ]
         max_context_len_tensor = ov.Tensor(np.array(max(seq_lens), dtype=np.int32))
 
         attn_metadata = OpenVINOAttentionMetadata(
             past_lens=past_lens_tensor,
             subsequence_begins=subsequence_begins_tensor,
-            block_indices=block_indices_tensor,
-            block_indices_begins=block_indices_begins_tensor,
+            block_indices=block_indices_group_tensors[0],
+            block_indices_groups=block_indices_group_tensors,
+            block_indices_begins=block_indices_begins_group_tensors[0],
+            block_indices_begins_groups=block_indices_begins_group_tensors,
             max_context_len=max_context_len_tensor,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
@@ -236,6 +270,8 @@ class OpenVINOModelRunnerV1:
             "input_ids": input_tokens,
             "positions": input_positions,
             "kv_caches": self.kv_caches,
+            "ssm_caches": self.ssm_caches,
+            "conv_caches": self.conv_caches,
         }
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):

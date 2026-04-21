@@ -272,9 +272,31 @@ class OpenVINOCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+        ssm_caches: Optional[list[ov.Tensor]] = None,
+        conv_caches: Optional[list[ov.Tensor]] = None,
     ) -> torch.Tensor:
         flat_kv_caches = _flatten_inputs(kv_caches)
+        state_tensors = list(flat_kv_caches)
+        if self.model_type == HYBRID_MAMBA:
+            state_tensors.extend(_flatten_inputs(ssm_caches or []))
+            state_tensors.extend(_flatten_inputs(conv_caches or []))
+
         attn_metadata = get_forward_context().attn_metadata
+        block_indices_groups = getattr(attn_metadata, "block_indices_groups", None)
+        block_indices_begins_groups = getattr(
+            attn_metadata, "block_indices_begins_groups", None)
+
+        if block_indices_groups and block_indices_begins_groups and \
+                len(block_indices_groups) == len(block_indices_begins_groups):
+            block_table_inputs = []
+            for block_indices, block_indices_begins in zip(
+                    block_indices_groups, block_indices_begins_groups):
+                block_table_inputs.extend([block_indices, block_indices_begins])
+        else:
+            block_table_inputs = [
+                attn_metadata.block_indices,
+                attn_metadata.block_indices_begins,
+            ]
 
         if self.use_text_embeddings_model:
             # Gemma 3 style: language model takes inputs_embeds, not input_ids.
@@ -290,22 +312,20 @@ class OpenVINOCausalLM(nn.Module):
                 positions,
                 token_type_ids,
                 inputs_embeds_2d,
-                *flat_kv_caches,
+                *state_tensors,
                 attn_metadata.past_lens,
                 attn_metadata.subsequence_begins,
-                attn_metadata.block_indices,
-                attn_metadata.block_indices_begins,
+                *block_table_inputs,
                 attn_metadata.max_context_len,
             ]
         else:
             inputs = [
                 input_ids,
                 positions,
-                *flat_kv_caches,
+                *state_tensors,
                 attn_metadata.past_lens,
                 attn_metadata.subsequence_begins,
-                attn_metadata.block_indices,
-                attn_metadata.block_indices_begins,
+                *block_table_inputs,
                 attn_metadata.max_context_len,
             ]
 

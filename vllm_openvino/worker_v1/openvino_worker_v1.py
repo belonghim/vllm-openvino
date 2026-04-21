@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Optional, Tuple, Set
+from typing import List, Tuple, Set
 
 import openvino as ov
 import torch
@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttention
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
-from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
@@ -110,6 +109,15 @@ class OpenVINOWorkerV1(WorkerBase):
         self.ssm_cache_config = [shape for shape, dtype in ssm_shapes.get("ssm", [])]
         self.conv_cache_config = [shape for shape, dtype in ssm_shapes.get("conv", [])]
 
+        num_cache_groups = 1
+        if (
+            getattr(ov_model_obj, "model_type", ATTENTION_ONLY) == HYBRID_MAMBA
+            and self.ssm_cache_config
+            and self.conv_cache_config
+        ):
+            num_cache_groups = 2
+        self.model_runner.configure_cache_groups(num_cache_groups)
+
         for input_port in compiled_model.inputs:
             input_name = input_port.get_any_name()
 
@@ -178,6 +186,8 @@ class OpenVINOWorkerV1(WorkerBase):
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache
+        self.model_runner.ssm_caches = self.cache_engine.ssm_cache
+        self.model_runner.conv_caches = self.cache_engine.conv_cache
         bind_kv_cache({}, self.compilation_config.static_forward_context, [])
         self.model_runner.block_size = self.cache_engine.block_size
 
@@ -282,6 +292,12 @@ class OpenVINOWorkerV1(WorkerBase):
                 self.ssm_cache_config,
                 self.conv_cache_config,
             )
+            prev_kv_caches = self.model_runner.kv_caches
+            prev_ssm_caches = self.model_runner.ssm_caches
+            prev_conv_caches = self.model_runner.conv_caches
+            self.model_runner.kv_caches = profiling_cache_engine.kv_cache
+            self.model_runner.ssm_caches = profiling_cache_engine.ssm_cache
+            self.model_runner.conv_caches = profiling_cache_engine.conv_cache
 
             total_num_scheduled_tokens = 0
             num_scheduled_tokens = {}
@@ -298,13 +314,17 @@ class OpenVINOWorkerV1(WorkerBase):
 
                 block_table = list(range(num_blocks, num_blocks + seq_num_blocks))
                 num_blocks += seq_num_blocks
+                block_ids = tuple(
+                    block_table.copy()
+                    for _ in range(self.model_runner.num_cache_groups)
+                )
                 reqs.append(NewRequestData(
                     req_id=str(group_id),
                     prompt_token_ids=list(dummy_data.seq_data.prompt_token_ids),
                     mm_features=[],
                     sampling_params=sampling_params,
                     pooling_params=None,
-                    block_ids=(block_table,),
+                    block_ids=block_ids,
                     num_computed_tokens=0,
                     lora_request=None,
                 ))
@@ -332,6 +352,9 @@ class OpenVINOWorkerV1(WorkerBase):
             # Explicitly revert bind_kv_cache and delete temporary KV cache
             # manager to free KV cache when real inputs will be passed to OV
             bind_kv_cache({}, self.compilation_config.static_forward_context, [])
+            self.model_runner.kv_caches = prev_kv_caches
+            self.model_runner.ssm_caches = prev_ssm_caches
+            self.model_runner.conv_caches = prev_conv_caches
             del profiling_cache_engine
 
         logger.info(
@@ -402,16 +425,7 @@ class OpenVINOWorkerV1(WorkerBase):
                 f"`gpu_memory_utilization`")
 
         # Reset input batch
-        self.model_runner.input_batch = InputBatch(
-            max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
-            max_model_len=self.vllm_config.model_config.max_model_len,
-            max_num_batched_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens,
-            device=self.device,
-            pin_memory=False,
-            vocab_size=self.vllm_config.model_config.get_vocab_size(),
-            block_sizes=[self.vllm_config.cache_config.block_size],
-            kernel_block_sizes=[self.vllm_config.cache_config.block_size],
-        )
+        self.model_runner.configure_cache_groups(self.model_runner.num_cache_groups)
 
         available_memory = total_device_memory * memory_utilization - used_device_mem
         return min(available_memory, get_max_allocatable_memory_gpu(ov_core, ov_device, self.key_cache_config, self.value_cache_config))
