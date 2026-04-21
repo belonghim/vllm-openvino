@@ -9,7 +9,7 @@ This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's O
 ## Requirements
 
 - Python >= 3.10
-- vLLM 0.16.0
+- vLLM 0.14.1
 - OpenVINO >= 2026.1.0
 - Linux (x86-64, AVX2+)
 
