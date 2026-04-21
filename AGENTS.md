@@ -70,7 +70,8 @@ vllm_openvino/
 | `kv_cache.py` | `vllm.v1.kv_cache_interface → KVCacheSpec` | 🔴 높음 |
 | `utils.py` | `vllm.logger → init_logger` | 🟢 낮음 |
 | `attention/backends/openvino.py` | `vllm.v1.attention.backend → AttentionBackend` | 🔴 높음 |
-| `attention/backends/openvino.py` | `vllm.v1.attention.backends.utils → AttentionMetadataBuilder, CommonAttentionMetadata` | 🔴 높음 |
+| `attention/backends/openvino.py` | `vllm.v1.attention.backends.utils → CommonAttentionMetadata` | 🟡 중간 |
+| `attention/backends/openvino.py` | `vllm.v1.attention.backend → AttentionMetadataBuilder` | 🔴 높음 |
 | `attention/backends/openvino.py` | `vllm.v1.kv_cache_interface → AttentionSpec` | 🔴 높음 |
 | `attention/backends/openvino.py` | `vllm.config → VllmConfig` | 🟡 중간 |
 | `model_executor/model_loader/openvino.py` | `vllm.config → ModelConfig, VllmConfig, set_current_vllm_config` | 🟡 중간 |
@@ -334,7 +335,8 @@ vLLM 버전 업그레이드 시 다음 사항을 확인하세요:
 2.  **🔴 높은 위험 import 확인**:
     *   `vllm.v1.kv_cache_interface` — `KVCacheSpec`, `KVCacheConfig`, `FullAttentionSpec`, `AttentionSpec`
     *   `vllm.v1.attention.backend` — `AttentionBackend`, `AttentionMetadata`
-    *   `vllm.v1.attention.backends.utils` — `AttentionMetadataBuilder`, `CommonAttentionMetadata`
+    *   `vllm.v1.attention.backends.utils` — `CommonAttentionMetadata`
+    *   `vllm.v1.attention.backend` — `AttentionMetadataBuilder` (v0.18.1에서 이동됨, 기존: `backends.utils`)
     *   `vllm.v1.outputs` — `SamplerOutput`, `ModelRunnerOutput`
     *   `vllm.v1.sample.metadata` — `SamplingMetadata`
     *   `vllm.v1.sample.sampler` — `Sampler`
