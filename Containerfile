@@ -5,4 +5,4 @@ WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
 RUN mkdir -p /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
 ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU VLLM_OPENVINO_KVCACHE_SPACE=8
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["/opt/vllm-env/bin/python3", "-m", "vllm.entrypoints.openai.api_server"]
