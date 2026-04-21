@@ -109,8 +109,6 @@ class OpenVINOCacheEngine:
             if current_platform.is_openvino_cpu():
                 key_blocks = ov.Tensor(self.ov_cache_dtype, key_cache_shape)
                 value_blocks = ov.Tensor(self.ov_cache_dtype, value_cache_shape)
-                key_blocks.data.fill(0)
-                value_blocks.data.fill(0)
                 kv_cache.append((key_blocks, value_blocks))
             else:
                 remote_context = ov_core.get_default_context(ov_device)
