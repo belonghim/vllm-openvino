@@ -101,6 +101,13 @@ class OpenVINOWorkerV1(WorkerBase):
 
         self.key_cache_config = []
         self.value_cache_config = []
+        self.ssm_cache_config = []
+        self.conv_cache_config = []
+
+        ov_model_obj = self.model_runner.get_model()
+        ssm_shapes = getattr(ov_model_obj, "ssm_state_shapes", {})
+        self.ssm_cache_config = [shape for shape, dtype in ssm_shapes.get("ssm", [])]
+        self.conv_cache_config = [shape for shape, dtype in ssm_shapes.get("conv", [])]
 
         for input_port in compiled_model.inputs:
             input_name = input_port.get_any_name()

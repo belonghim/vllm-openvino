@@ -50,6 +50,34 @@ def has_op_with_type(function: ov.Model, type_name: str):
     return False
 
 
+ATTENTION_ONLY = "attention_only"
+HYBRID_MAMBA = "hybrid_mamba"
+
+
+def detect_model_type(ov_model: ov.Model) -> str:
+    for op in ov_model.get_ops():
+        if op.get_type_name() == "ReadValue":
+            var_id = op.get_variable_id()
+            if var_id and ("ssm" in var_id or "conv" in var_id):
+                return HYBRID_MAMBA
+    return ATTENTION_ONLY
+
+
+def get_ssm_state_shapes(ov_model: ov.Model) -> dict[str, list]:
+    ssm_shapes = []
+    conv_shapes = []
+    for op in ov_model.get_ops():
+        if op.get_type_name() == "ReadValue":
+            var_id = op.get_variable_id()
+            if not var_id:
+                continue
+            if "ssm" in var_id:
+                ssm_shapes.append((op.get_partial_shape(), op.get_element_type().to_string()))
+            elif "conv" in var_id:
+                conv_shapes.append((op.get_partial_shape(), op.get_element_type().to_string()))
+    return {"ssm": ssm_shapes, "conv": conv_shapes}
+
+
 def find_llm_matmul(model: ov.Model):
     last_node = model.output(0).get_node().input_value(0).get_node()
 
@@ -131,6 +159,10 @@ class OpenVINOCausalLM(nn.Module):
             ir_filename = "openvino_model.xml"
 
         ov_model = ov_core.read_model(str(model_dir / ir_filename))
+
+        # Detect model type before PA transformation
+        self.model_type = detect_model_type(ov_model)
+        self.ssm_state_shapes = get_ssm_state_shapes(ov_model)
 
         # apply Paged Attention transformation
         paged_attention_transformation(ov_model)
