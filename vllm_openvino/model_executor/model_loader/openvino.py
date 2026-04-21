@@ -78,6 +78,91 @@ def get_ssm_state_shapes(ov_model: ov.Model) -> dict[str, list]:
     return {"ssm": ssm_shapes, "conv": conv_shapes}
 
 
+def _is_attention_sdpa_var(var_id: str) -> bool:
+    """Check if variable_id is for attention KV cache (not SSM/conv).
+
+    Attention KV: cache_params.past.key.{N}, cache_params.past.value.{N}
+    SSM/conv: cache_params.past.ssm.{N}, cache_params.past.conv.{N}
+    """
+    if not var_id:
+        return False
+    if "past.ssm." in var_id or "past.conv." in var_id:
+        return False
+    if "past.key." in var_id or "past.value." in var_id:
+        return True
+    return False
+
+
+def _find_sdpa_consumer_of_var(model: ov.Model, var_id: str) -> list:
+    """Find all SDPA ops that consume a given variable_id via ReadValue."""
+    consumers = []
+    for op in model.get_ops():
+        if op.get_type_name() != "ScaledDotProductAttention":
+            continue
+        for i in range(op.get_input_size()):
+            try:
+                source = op.input_value(i).get_node()
+                if source.get_type_name() == "ReadValue" and source.get_variable_id() == var_id:
+                    consumers.append(op)
+                    break
+            except Exception:
+                continue
+    return consumers
+
+
+def _remove_ssmlike_sdpa_subgraph(model: ov.Model) -> None:
+    """Remove SDPA ops that are part of SSM/conv (linear attention) layers.
+
+    These SDPA ops are NOT true attention - they are part of Mamba/SSM blocks.
+    We identify them by checking if their ReadValue inputs use ssm/conv variable_ids.
+    """
+    # Find all ssm/conv variable_ids
+    ssm_conv_vars = set()
+    for op in model.get_ops():
+        if op.get_type_name() != "ReadValue":
+            continue
+        var_id = op.get_variable_id()
+        if not var_id:
+            continue
+        if not _is_attention_sdpa_var(var_id) and ("ssm" in var_id or "conv" in var_id):
+            ssm_conv_vars.add(var_id)
+
+    # Find SDPA ops that consume ssm/conv variables
+    ssm_sdpa_ops = set()
+    for var_id in ssm_conv_vars:
+        for op in _find_sdpa_consumer_of_var(model, var_id):
+            ssm_sdpa_ops.add(op)
+
+    # Bypass SSM/conv SDPA ops before PA transformation
+    for sdpa_op in ssm_sdpa_ops:
+        try:
+            sdpa_output = sdpa_op.output(0)
+            sdpa_input = sdpa_op.input_value(0)
+            sdpa_output.replace_source_output(sdpa_input)
+        except Exception:
+            # Best effort: keep node unchanged if rewrite fails
+            pass
+
+
+def apply_selective_paged_attention_transformation(model: ov.Model, model_type: str) -> None:
+    """Apply PA transformation selectively based on model type.
+
+    For HYBRID_MAMBA models: first remove SSM/conv SDPA subgraphs, then apply PA.
+    For ATTENTION_ONLY models: apply PA transformation directly.
+    """
+    if model_type == ATTENTION_ONLY:
+        paged_attention_transformation(model)
+        return
+
+    # For hybrid models: remove SSM SDPA nodes before PA transformation
+    # This prevents the PrevSequenceLengthPattern crash.
+    _remove_ssmlike_sdpa_subgraph(model)
+
+    # Now apply PA transformation - SSM ReadValue/Assign nodes are preserved
+    # and handled in the runtime forward path.
+    paged_attention_transformation(model)
+
+
 def find_llm_matmul(model: ov.Model):
     last_node = model.output(0).get_node().input_value(0).get_node()
 
@@ -164,8 +249,8 @@ class OpenVINOCausalLM(nn.Module):
         self.model_type = detect_model_type(ov_model)
         self.ssm_state_shapes = get_ssm_state_shapes(ov_model)
 
-        # apply Paged Attention transformation
-        paged_attention_transformation(ov_model)
+        # apply Paged Attention transformation (selective for hybrid models)
+        apply_selective_paged_attention_transformation(ov_model, self.model_type)
         apply_gather_before_matmul_transformation(ov_model)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
         ov_model.validate_nodes_and_infer_types()

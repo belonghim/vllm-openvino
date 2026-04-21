@@ -45,6 +45,8 @@ class OpenVINOCacheEngine:
         device_config: DeviceConfig,
         ov_core: ov.Core,
         ov_device: str,
+        ssm_cache_config: Optional[List[ov.PartialShape]] = None,
+        conv_cache_config: Optional[List[ov.PartialShape]] = None,
     ) -> None:
         # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
         # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
@@ -55,6 +57,8 @@ class OpenVINOCacheEngine:
 
         self.key_cache_config = key_cache_config
         self.value_cache_config = value_cache_config
+        self.ssm_cache_config = ssm_cache_config if ssm_cache_config is not None else []
+        self.conv_cache_config = conv_cache_config if conv_cache_config is not None else []
         self.num_layers = len(self.value_cache_config)
 
         self.block_size = cache_config.block_size
@@ -71,13 +75,19 @@ class OpenVINOCacheEngine:
         # Initialize the cache.
         self.kv_cache: List[Tuple[ov.Tensor,
                                   ov.Tensor]] = self._allocate_kv_cache(
-                                      self.num_device_blocks, ov_core,
-                                      ov_device)
+            self.num_device_blocks, ov_core,
+            ov_device)
+
+        # Initialize SSM/conv state caches (for hybrid models like Mamba).
+        self.ssm_cache: List[ov.Tensor] = self._allocate_ssm_cache(
+            self.num_device_blocks, ov_core, ov_device)
+        self.conv_cache: List[ov.Tensor] = self._allocate_conv_cache(
+            self.num_device_blocks, ov_core, ov_device)
 
         # Initialize the swap.
         self.swap_cache: List[Tuple[ov.Tensor,
                                     ov.Tensor]] = self._allocate_swap_cache(
-                                        self.num_swap_blocks, ov_device)
+            self.num_swap_blocks, ov_device)
 
     def _allocate_kv_cache(
         self,
@@ -99,6 +109,8 @@ class OpenVINOCacheEngine:
             if current_platform.is_openvino_cpu():
                 key_blocks = ov.Tensor(self.ov_cache_dtype, key_cache_shape)
                 value_blocks = ov.Tensor(self.ov_cache_dtype, value_cache_shape)
+                key_blocks.data.fill(0)
+                value_blocks.data.fill(0)
                 kv_cache.append((key_blocks, value_blocks))
             else:
                 remote_context = ov_core.get_default_context(ov_device)
@@ -107,6 +119,54 @@ class OpenVINOCacheEngine:
                 kv_cache.append((key_blocks, value_blocks))
 
         return kv_cache
+
+    def _allocate_ssm_cache(
+        self,
+        num_blocks: int,
+        ov_core: ov.Core,
+        ov_device: str,
+    ) -> List[ov.Tensor]:
+        """Allocates SSM state cache for hybrid models."""
+        ssm_cache: List[ov.Tensor] = []
+
+        for ssm_pshape in self.ssm_cache_config:
+            ssm_shape = ssm_pshape
+            ssm_shape[0] = num_blocks
+            ssm_shape = ssm_shape.to_shape()
+
+            if current_platform.is_openvino_cpu():
+                ssm_tensor = ov.Tensor(ov.Type.f32, ssm_shape)
+                ssm_tensor.data.fill(0)
+            else:
+                remote_context = ov_core.get_default_context(ov_device)
+                ssm_tensor = remote_context.create_tensor(ov.Type.f32, ssm_shape, {})
+            ssm_cache.append(ssm_tensor)
+
+        return ssm_cache
+
+    def _allocate_conv_cache(
+        self,
+        num_blocks: int,
+        ov_core: ov.Core,
+        ov_device: str,
+    ) -> List[ov.Tensor]:
+        """Allocates conv state cache for hybrid models."""
+        conv_cache: List[ov.Tensor] = []
+
+        for conv_pshape in self.conv_cache_config:
+            conv_shape = conv_pshape
+            conv_shape[0] = num_blocks
+            conv_shape = conv_shape.to_shape()
+
+            if current_platform.is_openvino_cpu():
+                conv_tensor = ov.Tensor(ov.Type.f32, conv_shape)
+                conv_tensor.data.fill(0)
+            else:
+                remote_context = ov_core.get_default_context(ov_device)
+                conv_tensor = remote_context.create_tensor(ov.Type.f32, conv_shape, {})
+            conv_cache.append(conv_tensor)
+
+        return conv_cache
 
     def _allocate_swap_cache(
         self,
@@ -157,11 +217,30 @@ class OpenVINOCacheEngine:
         cache_dtype: str,
         key_cache_config: List[ov.PartialShape],
         value_cache_config: List[ov.PartialShape],
+        ssm_cache_config: Optional[List[ov.PartialShape]] = None,
+        conv_cache_config: Optional[List[ov.PartialShape]] = None,
     ) -> int:
         total_elements = 0
         for key_cache_shape, value_cache_shape in zip(key_cache_config, value_cache_config):
-             total_elements += key_cache_shape[1].get_length() * key_cache_shape[2].get_length() * key_cache_shape[3].get_length()
-             total_elements += value_cache_shape[1].get_length() * value_cache_shape[2].get_length() * value_cache_shape[3].get_length()
+            total_elements += key_cache_shape[1].get_length() * key_cache_shape[2].get_length() * key_cache_shape[3].get_length()
+            total_elements += value_cache_shape[1].get_length() * value_cache_shape[2].get_length() * value_cache_shape[3].get_length()
+
+        # Add SSM state size (fp32 = 4 bytes)
+        if ssm_cache_config:
+            for ssm_shape in ssm_cache_config:
+                ssm_elements = 1
+                for dim in range(1, len(ssm_shape)):
+                    ssm_elements *= ssm_shape[dim].get_length()
+                total_elements += ssm_elements * (4 / str_to_ov_type[cache_dtype].size)
+
+        # Add conv state size (fp32 = 4 bytes)
+        if conv_cache_config:
+            for conv_shape in conv_cache_config:
+                conv_elements = 1
+                for dim in range(1, len(conv_shape)):
+                    conv_elements *= conv_shape[dim].get_length()
+                total_elements += conv_elements * (4 / str_to_ov_type[cache_dtype].size)
+
         return str_to_ov_type[cache_dtype].size * total_elements
 
     # --- KVCache Interface Methods ---

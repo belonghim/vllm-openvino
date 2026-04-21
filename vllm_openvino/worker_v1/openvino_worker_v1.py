@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
 from vllm.v1.worker.utils import bind_kv_cache
-from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec, MambaSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
@@ -27,6 +27,7 @@ import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
 from vllm_openvino.kv_cache import OpenVINOCacheEngine
 from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu
+from vllm_openvino.model_executor.model_loader.openvino import ATTENTION_ONLY, HYBRID_MAMBA
 
 logger = init_logger(__name__)
 
@@ -172,6 +173,8 @@ class OpenVINOWorkerV1(WorkerBase):
             self.device_config,
             self.ov_core,
             ov_device,
+            self.ssm_cache_config,
+            self.conv_cache_config,
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache
@@ -230,6 +233,8 @@ class OpenVINOWorkerV1(WorkerBase):
             self.cache_config.cache_dtype,
             self.key_cache_config,
             self.value_cache_config,
+            self.ssm_cache_config,
+            self.conv_cache_config,
         )
 
     def profile_run(self) -> int:
@@ -272,7 +277,11 @@ class OpenVINOWorkerV1(WorkerBase):
                 model_config,
                 parallel_config,
                 device_config,
-                ov_core, ov_device)
+                ov_core,
+                ov_device,
+                self.ssm_cache_config,
+                self.conv_cache_config,
+            )
 
             total_num_scheduled_tokens = 0
             num_scheduled_tokens = {}
@@ -417,13 +426,59 @@ class OpenVINOWorkerV1(WorkerBase):
         kv_cache_spec = {}
 
         for idx, (key_cache_shape, value_cache_shape) in enumerate(zip(key_cache_config, value_cache_config)):
-            # This shape is used for calculation of max memory required by KV-cache
-            kv_cache_spec["{}".format(idx)] = FullAttentionSpec(block_size=block_size,
-                                                                num_kv_heads=max(key_cache_shape[1].get_length(),
-                                                                                 value_cache_shape[1].get_length()),
-                                                                head_size=max(key_cache_shape[3].get_length(),
-                                                                              value_cache_shape[3].get_length()),
-                                                                dtype=str_to_torch_type[cache_type])
+            kv_cache_spec["{}".format(idx)] = FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=max(key_cache_shape[1].get_length(), value_cache_shape[1].get_length()),
+                head_size=max(key_cache_shape[3].get_length(), value_cache_shape[3].get_length()),
+                dtype=str_to_torch_type[cache_type])
+
+        # For hybrid Mamba models: add MambaSpec for SSM/conv layers
+        ov_model_obj = self.model_runner.get_model()
+        model_type = getattr(ov_model_obj, "model_type", ATTENTION_ONLY)
+        if model_type == HYBRID_MAMBA:
+            ssm_state_shapes = getattr(ov_model_obj, "ssm_state_shapes", {})
+            ssm_entries = ssm_state_shapes.get("ssm", [])
+            conv_entries = ssm_state_shapes.get("conv", [])
+
+            mamba_ssm_shapes = []
+            mamba_ssm_dtypes = []
+            for shape, dtype_str in ssm_entries:
+                dims = []
+                for d in shape:
+                    if d.is_dynamic:
+                        dims.append(block_size)
+                    else:
+                        dims.append(d.get_length())
+                per_block_shape = tuple(dims[1:])
+                mamba_ssm_shapes.append(per_block_shape)
+                mamba_ssm_dtypes.append(str_to_torch_type.get(dtype_str, torch.float32))
+
+            mamba_conv_shapes = []
+            mamba_conv_dtypes = []
+            for shape, dtype_str in conv_entries:
+                dims = []
+                for d in shape:
+                    if d.is_dynamic:
+                        dims.append(block_size)
+                    else:
+                        dims.append(d.get_length())
+                per_block_shape = tuple(dims[1:]) if len(dims) > 1 else tuple(dims)
+                mamba_conv_shapes.append(per_block_shape)
+                mamba_conv_dtypes.append(str_to_torch_type.get(dtype_str, torch.float32))
+
+            if mamba_ssm_shapes and mamba_conv_shapes:
+                combined_shapes = list(zip(mamba_conv_shapes, mamba_ssm_shapes))
+                max_dtype = max(mamba_conv_dtypes + mamba_ssm_dtypes, key=lambda x: x.item_size)
+                combined_dtypes = [max_dtype] * len(combined_shapes)
+                kv_cache_spec["mamba"] = MambaSpec(
+                    shapes=combined_shapes,
+                    dtypes=combined_dtypes,
+                    block_size=block_size,
+                    mamba_type="mamba2",
+                    mamba_cache_mode="none",
+                    num_speculative_blocks=0,
+                )
+
         return kv_cache_spec
 
     def determine_available_memory(self) -> int:
