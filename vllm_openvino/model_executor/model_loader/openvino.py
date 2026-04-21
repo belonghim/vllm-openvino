@@ -72,9 +72,9 @@ def get_ssm_state_shapes(ov_model: ov.Model) -> dict[str, list]:
             if not var_id:
                 continue
             if "ssm" in var_id:
-                ssm_shapes.append((op.get_partial_shape(), op.get_element_type().to_string()))
+                ssm_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
             elif "conv" in var_id:
-                conv_shapes.append((op.get_partial_shape(), op.get_element_type().to_string()))
+                conv_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
     return {"ssm": ssm_shapes, "conv": conv_shapes}
 
 
@@ -147,20 +147,22 @@ def _remove_ssmlike_sdpa_subgraph(model: ov.Model) -> None:
 def apply_selective_paged_attention_transformation(model: ov.Model, model_type: str) -> None:
     """Apply PA transformation selectively based on model type.
 
-    For HYBRID_MAMBA models: first remove SSM/conv SDPA subgraphs, then apply PA.
+    For HYBRID_MAMBA models: PA transformation is skipped due to PrevSequenceLengthPattern
+    crash on SSM Gather/Reshape nodes. The model runs with internal KV cache.
     For ATTENTION_ONLY models: apply PA transformation directly.
     """
     if model_type == ATTENTION_ONLY:
         paged_attention_transformation(model)
         return
 
-    # For hybrid models: remove SSM SDPA nodes before PA transformation
-    # This prevents the PrevSequenceLengthPattern crash.
-    _remove_ssmlike_sdpa_subgraph(model)
-
-    # Now apply PA transformation - SSM ReadValue/Assign nodes are preserved
-    # and handled in the runtime forward path.
-    paged_attention_transformation(model)
+    # For hybrid models: skip PA transformation entirely due to C++ pattern matcher
+    # crashing on SSM subgraphs (PrevSequenceLengthPattern on Gather/Reshape nodes).
+    # The model will use internal KV cache mechanism instead of PagedAttention.
+    # This is a temporary workaround until a proper solution is found.
+    logger.warning(
+        "Hybrid Mamba models do not support PagedAttention transformation yet. "
+        "The model will run with internal KV cache."
+    )
 
 
 def find_llm_matmul(model: ov.Model):

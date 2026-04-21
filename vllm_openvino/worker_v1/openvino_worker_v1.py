@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from pathlib import Path
 from typing import List, Tuple, Set
 
 import openvino as ov
@@ -88,10 +89,78 @@ class OpenVINOWorkerV1(WorkerBase):
         self.kv_cache: List[Tuple[ov.Tensor, ov.Tensor]]
         self.num_swap_blocks = 0
 
+        # Cache shape metadata (needed before determine_available_memory()).
+        self.key_cache_config = []
+        self.value_cache_config = []
+        self.ssm_cache_config = []
+        self.conv_cache_config = []
+        self.ssm_cache_dtypes = []
+        self.conv_cache_dtypes = []
+
+        # Preload SSM/conv cache shapes from model IR so memory sizing includes
+        # hybrid-model state tensors even before load_model() is called.
+        self._preload_state_cache_shapes()
+
     def init_device(self) -> None:
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
+
+    def _preload_state_cache_shapes(self) -> None:
+        """Populate SSM/conv cache shapes from IR before memory sizing.
+
+        determine_available_memory() may be called before load_model().
+        For hybrid models, we still need SSM/conv shapes for correct
+        per-block memory calculation.
+        """
+        model_dir = Path(self.model_config.model)
+        if not model_dir.is_dir():
+            return
+
+        if (model_dir / "openvino_language_model.xml").exists():
+            ir_path = model_dir / "openvino_language_model.xml"
+        elif (model_dir / "openvino_model.xml").exists():
+            ir_path = model_dir / "openvino_model.xml"
+        else:
+            return
+
+        try:
+            ov_model = self.ov_core.read_model(str(ir_path))
+            ssm_cache_config = []
+            conv_cache_config = []
+            ssm_cache_dtypes = []
+            conv_cache_dtypes = []
+
+            for op in ov_model.get_ops():
+                if op.get_type_name() != "ReadValue":
+                    continue
+                var_id = op.get_variable_id()
+                if not var_id:
+                    continue
+                if "ssm" in var_id:
+                    ssm_cache_config.append(op.output(0).get_partial_shape())
+                    ssm_cache_dtypes.append(op.get_element_type().to_string())
+                elif "conv" in var_id:
+                    conv_cache_config.append(op.output(0).get_partial_shape())
+                    conv_cache_dtypes.append(op.get_element_type().to_string())
+
+            self.ssm_cache_config = ssm_cache_config
+            self.conv_cache_config = conv_cache_config
+            self.ssm_cache_dtypes = ssm_cache_dtypes
+            self.conv_cache_dtypes = conv_cache_dtypes
+            if self.ssm_cache_config or self.conv_cache_config:
+                logger.info(
+                    "Preloaded hybrid cache shapes from %s: ssm=%d conv=%d",
+                    ir_path,
+                    len(self.ssm_cache_config),
+                    len(self.conv_cache_config),
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to preload SSM/conv cache shapes from %s: %r",
+                ir_path,
+                e,
+            )
 
     def load_model(self):
         self.model_runner.load_model()
@@ -103,19 +172,17 @@ class OpenVINOWorkerV1(WorkerBase):
         self.value_cache_config = []
         self.ssm_cache_config = []
         self.conv_cache_config = []
+        self.ssm_cache_dtypes = []
+        self.conv_cache_dtypes = []
 
         ov_model_obj = self.model_runner.get_model()
         ssm_shapes = getattr(ov_model_obj, "ssm_state_shapes", {})
         self.ssm_cache_config = [shape for shape, dtype in ssm_shapes.get("ssm", [])]
         self.conv_cache_config = [shape for shape, dtype in ssm_shapes.get("conv", [])]
+        self.ssm_cache_dtypes = [dtype for shape, dtype in ssm_shapes.get("ssm", [])]
+        self.conv_cache_dtypes = [dtype for shape, dtype in ssm_shapes.get("conv", [])]
 
         num_cache_groups = 1
-        if (
-            getattr(ov_model_obj, "model_type", ATTENTION_ONLY) == HYBRID_MAMBA
-            and self.ssm_cache_config
-            and self.conv_cache_config
-        ):
-            num_cache_groups = 2
         self.model_runner.configure_cache_groups(num_cache_groups)
 
         for input_port in compiled_model.inputs:
@@ -169,8 +236,14 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def _init_cache_engine(self) -> None:
         ov_device = envs.VLLM_OPENVINO_DEVICE
-        # we need to override precision in self.cache_config to one, inference during compile_model
-        self.cache_config.cache_dtype = self.cache_dtype
+        # Override precision in self.cache_config to one used during compile_model
+        # Use cache_dtype from config, falling back to dynamically detected value
+        detected_dtype = getattr(self, 'cache_dtype', None)
+        if detected_dtype is None:
+            detected_dtype = self.cache_config.cache_dtype
+        if detected_dtype == "dynamic":
+            detected_dtype = "fp16"
+        self.cache_config.cache_dtype = detected_dtype
 
         self.cache_engine = OpenVINOCacheEngine(
             self.cache_config,
@@ -288,16 +361,9 @@ class OpenVINOWorkerV1(WorkerBase):
                 parallel_config,
                 device_config,
                 ov_core,
-                ov_device,
-                self.ssm_cache_config,
-                self.conv_cache_config,
-            )
+                ov_device)
             prev_kv_caches = self.model_runner.kv_caches
-            prev_ssm_caches = self.model_runner.ssm_caches
-            prev_conv_caches = self.model_runner.conv_caches
             self.model_runner.kv_caches = profiling_cache_engine.kv_cache
-            self.model_runner.ssm_caches = profiling_cache_engine.ssm_cache
-            self.model_runner.conv_caches = profiling_cache_engine.conv_cache
 
             total_num_scheduled_tokens = 0
             num_scheduled_tokens = {}
@@ -314,17 +380,13 @@ class OpenVINOWorkerV1(WorkerBase):
 
                 block_table = list(range(num_blocks, num_blocks + seq_num_blocks))
                 num_blocks += seq_num_blocks
-                block_ids = tuple(
-                    block_table.copy()
-                    for _ in range(self.model_runner.num_cache_groups)
-                )
                 reqs.append(NewRequestData(
                     req_id=str(group_id),
                     prompt_token_ids=list(dummy_data.seq_data.prompt_token_ids),
                     mm_features=[],
                     sampling_params=sampling_params,
                     pooling_params=None,
-                    block_ids=block_ids,
+                    block_ids=(block_table,),
                     num_computed_tokens=0,
                     lora_request=None,
                 ))
@@ -353,8 +415,6 @@ class OpenVINOWorkerV1(WorkerBase):
             # manager to free KV cache when real inputs will be passed to OV
             bind_kv_cache({}, self.compilation_config.static_forward_context, [])
             self.model_runner.kv_caches = prev_kv_caches
-            self.model_runner.ssm_caches = prev_ssm_caches
-            self.model_runner.conv_caches = prev_conv_caches
             del profiling_cache_engine
 
         logger.info(
@@ -435,7 +495,10 @@ class OpenVINOWorkerV1(WorkerBase):
         key_cache_config = self.key_cache_config
         value_cache_config = self.value_cache_config
         block_size = self.cache_config.block_size
-        cache_type = self.cache_dtype
+        cache_type = self.cache_config.cache_dtype
+        # Handle "dynamic" dtype - convert to fp16 as default for OpenVINO
+        if cache_type == "dynamic":
+            cache_type = "fp16"
         assert cache_type in str_to_torch_type.keys(), "Unexpected cache type {}".format(cache_type)
         kv_cache_spec = {}
 
@@ -446,50 +509,62 @@ class OpenVINOWorkerV1(WorkerBase):
                 head_size=max(key_cache_shape[3].get_length(), value_cache_shape[3].get_length()),
                 dtype=str_to_torch_type[cache_type])
 
-        # For hybrid Mamba models: add MambaSpec for SSM/conv layers
-        ov_model_obj = self.model_runner.get_model()
-        model_type = getattr(ov_model_obj, "model_type", ATTENTION_ONLY)
-        if model_type == HYBRID_MAMBA:
-            ssm_state_shapes = getattr(ov_model_obj, "ssm_state_shapes", {})
-            ssm_entries = ssm_state_shapes.get("ssm", [])
-            conv_entries = ssm_state_shapes.get("conv", [])
+        # Hybrid models: include MambaSpec entries so vLLM accounts for
+        # SSM/conv state memory when allocating cache blocks.
+        if self.ssm_cache_config and self.conv_cache_config:
+            if len(self.ssm_cache_config) != len(self.conv_cache_config):
+                logger.warning(
+                    "Mismatched SSM/conv cache shapes: ssm=%d conv=%d; using min count.",
+                    len(self.ssm_cache_config),
+                    len(self.conv_cache_config),
+                )
 
-            mamba_ssm_shapes = []
-            mamba_ssm_dtypes = []
-            for shape, dtype_str in ssm_entries:
+            mamba_block_size = getattr(self.cache_config, "mamba_block_size", None) or block_size
+            mamba_cache_mode = getattr(self.cache_config, "mamba_cache_mode", "none")
+            if mamba_cache_mode != "none":
+                logger.warning(
+                    "OpenVINO hybrid models support only mamba_cache_mode='none'; overriding '%s'.",
+                    mamba_cache_mode,
+                )
+                mamba_cache_mode = "none"
+
+            def _to_per_block_shape(pshape: ov.PartialShape) -> tuple[int, ...]:
+                # dim0 is num_blocks and excluded from per-page state shape.
                 dims = []
-                for d in shape:
-                    if d.is_dynamic:
+                for dim in pshape[1:]:
+                    if dim.is_dynamic:
                         dims.append(block_size)
                     else:
-                        dims.append(d.get_length())
-                per_block_shape = tuple(dims[1:])
-                mamba_ssm_shapes.append(per_block_shape)
-                mamba_ssm_dtypes.append(str_to_torch_type.get(dtype_str, torch.float32))
+                        dims.append(dim.get_length())
+                return tuple(dims)
 
-            mamba_conv_shapes = []
-            mamba_conv_dtypes = []
-            for shape, dtype_str in conv_entries:
-                dims = []
-                for d in shape:
-                    if d.is_dynamic:
-                        dims.append(block_size)
-                    else:
-                        dims.append(d.get_length())
-                per_block_shape = tuple(dims[1:]) if len(dims) > 1 else tuple(dims)
-                mamba_conv_shapes.append(per_block_shape)
-                mamba_conv_dtypes.append(str_to_torch_type.get(dtype_str, torch.float32))
+            def _dtype_to_torch(dtype_str: str) -> torch.dtype:
+                return str_to_torch_type.get(dtype_str, torch.float32)
 
-            if mamba_ssm_shapes and mamba_conv_shapes:
-                combined_shapes = list(zip(mamba_conv_shapes, mamba_ssm_shapes))
-                max_dtype = max(mamba_conv_dtypes + mamba_ssm_dtypes, key=lambda x: x.item_size)
-                combined_dtypes = [max_dtype] * len(combined_shapes)
-                kv_cache_spec["mamba"] = MambaSpec(
-                    shapes=combined_shapes,
-                    dtypes=combined_dtypes,
-                    block_size=block_size,
+            num_mamba_layers = min(len(self.ssm_cache_config), len(self.conv_cache_config))
+            for i in range(num_mamba_layers):
+                conv_shape = _to_per_block_shape(self.conv_cache_config[i])
+                ssm_shape = _to_per_block_shape(self.ssm_cache_config[i])
+
+                conv_dtype = (
+                    _dtype_to_torch(self.conv_cache_dtypes[i])
+                    if i < len(self.conv_cache_dtypes)
+                    else torch.float32
+                )
+                ssm_dtype = (
+                    _dtype_to_torch(self.ssm_cache_dtypes[i])
+                    if i < len(self.ssm_cache_dtypes)
+                    else torch.float32
+                )
+
+                # MambaSpec.shapes expects tuple[tuple[int, ...], ...], e.g.
+                # (conv_state_shape, ssm_state_shape).
+                kv_cache_spec[f"mamba.{i}"] = MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(conv_shape, ssm_shape),
+                    dtypes=(conv_dtype, ssm_dtype),
                     mamba_type="mamba2",
-                    mamba_cache_mode="none",
+                    mamba_cache_mode=mamba_cache_mode,
                     num_speculative_blocks=0,
                 )
 
@@ -498,7 +573,12 @@ class OpenVINOWorkerV1(WorkerBase):
     def determine_available_memory(self) -> int:
         """Determines how much memory is needed for KV-cache
         """
-        self.cache_config.cache_dtype = self.cache_dtype
+        cache_dtype = getattr(self, 'cache_dtype', None)
+        if cache_dtype is None:
+            cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype == "dynamic":
+            cache_dtype = "fp16"
+        self.cache_config.cache_dtype = cache_dtype
         # For OpenVINO backend, in case of CPU device, the block number will be
         # calculated based on the openvino_kvcache_space_bytes.
         cache_block_size = self.get_cache_block_size_bytes()
