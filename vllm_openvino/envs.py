@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_KV_CACHE_PRECISION: Optional[str] = None
-    VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection
@@ -25,13 +24,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # proper value based on model analysis
     "VLLM_OPENVINO_KV_CACHE_PRECISION":
     lambda: os.getenv("VLLM_OPENVINO_KV_CACHE_PRECISION", None),
-
-    # Enables weights compression during model export via HF Optimum
-    # default is False
-    "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda:
-    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
-     ("on", "true", "1")),
 }
 
 # end-env-vars-definition

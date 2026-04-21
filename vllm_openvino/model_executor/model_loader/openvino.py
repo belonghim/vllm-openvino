@@ -8,9 +8,7 @@ import numpy as np
 import openvino as ov
 import torch
 
-from huggingface_hub import HfApi
 from openvino._offline_transformations import paged_attention_transformation
-from optimum.intel import OVModelForCausalLM
 from torch import nn
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context
@@ -42,48 +40,7 @@ def _flatten_inputs(inputs):
     return flatten_inputs
 
 
-# Removed dead _modify_cache_parameters for OpenVINO 2026.0+
-
-
-def _require_model_export(model_id, revision=None, subfolder=None):
-    model_dir = Path(model_id)
-    if subfolder is not None:
-        model_dir = model_dir / subfolder
-    if model_dir.is_dir():
-        # Standard text-only OV model
-        if ((model_dir / "openvino_model.xml").exists()
-                and (model_dir / "openvino_model.bin").exists()):
-            return False
-        # Multimodal OV model (e.g., Gemma 3) — uses language model suffix
-        if (model_dir / "openvino_language_model.xml").exists():
-            return False
-        return True
-
-    hf_api = HfApi()
-    try:
-        model_info = hf_api.model_info(model_id, revision=revision or "main",
-                                       timeout=10)
-        normalized_subfolder = (None if subfolder is None else
-                                Path(subfolder).as_posix())
-        model_files = [
-            file.rfilename for file in model_info.siblings
-            if normalized_subfolder is None
-            or file.rfilename.startswith(normalized_subfolder)
-        ]
-        ov_model_path = ("openvino_model.xml" if normalized_subfolder is None
-                         else f"{normalized_subfolder}/openvino_model.xml")
-        ov_lang_model_path = ("openvino_language_model.xml"
-                              if normalized_subfolder is None
-                              else f"{normalized_subfolder}/openvino_language_model.xml")
-        # Check standard OV model OR multimodal OV model (e.g., Gemma 3)
-        has_standard = (ov_model_path in model_files
-                        and ov_model_path.replace(".xml", ".bin") in model_files)
-        has_language_model = ov_lang_model_path in model_files
-        return not (has_standard or has_language_model)
-    except Exception:
-        logger.debug("Failed to check HF Hub for model info, "
-                     "assuming export is required", exc_info=True)
-        return True
+# Removed: _modify_cache_parameters (OpenVINO 2026.0+) and _require_model_export (local IR only)
 
 
 def has_op_with_type(function: ov.Model, type_name: str):
@@ -154,57 +111,26 @@ class OpenVINOCausalLM(nn.Module):
             model_config.get_vocab_size(), logits_as_input=True)
         self.sampler = SamplerV1()
 
-        export = _require_model_export(model_config.model)
-        if export:
-            logger.warning(
-                f"Provided model id {model_config.model} does not "  # noqa: G004
-                "contain OpenVINO IR, the model will be converted to IR with "
-                "default options. If you need to use specific options for "
-                "model conversion, use optimum-cli export openvino with "
-                "desired options.")
-        else:
-            logger.warning(
-                "OpenVINO IR is available for provided model id "  # noqa: G004
-                f"{model_config.model}. This IR will be used for inference "
-                "as-is, all possible options that may affect model conversion "
-                "are ignored.")
-
-        load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
-                        if export else False)
+        # Only support local pre-exported IR files
         model_dir = Path(model_config.model)
-        self.use_text_embeddings_model = False
+        if not model_dir.is_dir():
+            raise ValueError(
+                f"Model path {model_config.model} is not a local directory. "
+                "This plugin only supports pre-exported OpenVINO IR files. "
+                "Please provide a local path containing openvino_model.xml "
+                "and openvino_model.bin files.")
 
-        if export:
-            # Branch 1: PyTorch→OpenVINO conversion required
-            pt_model = OVModelForCausalLM.from_pretrained(
-                model_config.model,
-                export=True,
-                compile=False,
-                load_in_8bit=load_in_8bit,
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            ov_model = pt_model.model
-        elif model_dir.is_dir():
-            # Branch 2: Local pre-exported IR — bypass optimum-intel's
-            # Path.resolve() to avoid KServe modelcar symlink issues
-            if (model_dir / "openvino_language_model.xml").exists():
-                ir_filename = "openvino_language_model.xml"
-                text_emb_path = model_dir / "openvino_text_embeddings_model.xml"
-                if text_emb_path.exists():
-                    self.use_text_embeddings_model = True
-            else:
-                ir_filename = "openvino_model.xml"
-            ov_model = ov_core.read_model(str(model_dir / ir_filename))
+        # Find and load IR files
+        self.use_text_embeddings_model = False
+        if (model_dir / "openvino_language_model.xml").exists():
+            ir_filename = "openvino_language_model.xml"
+            text_emb_path = model_dir / "openvino_text_embeddings_model.xml"
+            if text_emb_path.exists():
+                self.use_text_embeddings_model = True
         else:
-            # Branch 3: HuggingFace Hub ID — download required
-            pt_model = OVModelForCausalLM.from_pretrained(
-                model_config.model,
-                export=False,
-                compile=False,
-                load_in_8bit=load_in_8bit,
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            ov_model = pt_model.model
+            ir_filename = "openvino_model.xml"
+
+        ov_model = ov_core.read_model(str(model_dir / ir_filename))
 
         # apply Paged Attention transformation
         paged_attention_transformation(ov_model)

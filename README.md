@@ -4,7 +4,7 @@
 
 ## What is this?
 
-This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's OpenAI-compatible API server on Intel CPUs and GPUs. It integrates OpenVINO as the inference execution layer, leveraging vLLM's scheduler, PagedAttention, and API server infrastructure. Models supported are those compatible with optimum-intel's OpenVINO export.
+This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's OpenAI-compatible API server on Intel CPUs and GPUs. It integrates OpenVINO as the inference execution layer, leveraging vLLM's scheduler, PagedAttention, and API server infrastructure. Models must be pre-exported to OpenVINO IR format (openvino_model.xml + openvino_model.bin).
 
 ## Requirements
 
@@ -66,7 +66,7 @@ VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
   python -m vllm.entrypoints.openai.api_server --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
-Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with any Hugging Face Hub model ID or local path supported by optimum-intel.
+Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported OpenVINO IR files (directory containing openvino_model.xml and openvino_model.bin).
 
 ## Environment Variables
 
@@ -75,7 +75,6 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with any Hugging Face Hub model ID 
 | `VLLM_OPENVINO_DEVICE` | Device selection: CPU, GPU, GPU.1, etc. | `CPU` |
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
 | `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: u8, i8, f16, bf16, f32 | `auto` |
-| `VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS` | Enable U8 weight compression on load | `OFF` |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
 ## Compatibility

@@ -185,7 +185,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 ### 주의사항
 
 - 컨테이너 이미지 `quay.io/joopark/vllm-openvino`에 이미 vLLM + OpenVINO가 설치되어 있음
-- `vllm_openvino/` 소스만 마운트로 교체 — vLLM core, optimum-intel 등은 이미지 내 버전 사용
+- `vllm_openvino/` 소스만 마운트로 교체 — vLLM core 등은 이미지 내 버전 사용
 - 이미지 내 `vllm_openvino`는 `/opt/app-root/vllm_openvino`에 설치됨
 
 ---
@@ -320,7 +320,7 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 3. **LoRA 미지원** — `check_and_update_config()`에서 assert로 차단
 4. **단일 소켓만 지원** — `parallel_config.world_size == 1` 강제. Tensor/Pipeline 병렬 미지원
 5. **KV 캐시 블록 크기** — CPU: 32, GPU: 16 (자동 오버라이드)
-6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. optimum-intel의 `from_pretrained()` 내부에서 `Path.resolve()`를 호출해 symlink를 따라가 접근 불가 경로로 변환되는 문제가 있었음. `model_loader/openvino.py`에서 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 수정 완료 (2026-03-19). 3-branch 구조: export=True → `from_pretrained`, 로컬 dir + export=False → `read_model()`, Hub ID + export=False → `from_pretrained`
+6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 처리. 최적화: 로컬 IR만 지원 (2026-04-21).
 7. **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 `ov = None`으로 설정하고 warning만 출력. 실제 사용 시점인 `check_and_update_config()`에서 `ImportError`를 raise. **import 시점에서 raise하지 않는 이유**: vLLM 플러그인 디스커버리 메커니즘이 모든 플러그인을 import한 뒤 활성 플러그인을 선택하므로, import 시점 raise는 OpenVINO 플러그인이 아닌 다른 플러그인 사용 시에도 크래시를 유발함.
 
 ## vLLM 버전 업그레이드 체크리스트
