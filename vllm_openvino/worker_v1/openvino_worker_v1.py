@@ -155,7 +155,7 @@ class OpenVINOWorkerV1(WorkerBase):
                     len(self.ssm_cache_config),
                     len(self.conv_cache_config),
                 )
-        except Exception as e:
+        except (RuntimeError, FileNotFoundError) as e:
             logger.warning(
                 "Failed to preload SSM/conv cache shapes from %s: %r",
                 ir_path,

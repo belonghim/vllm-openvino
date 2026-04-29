@@ -143,6 +143,15 @@ class OpenVINOModelRunnerV1:
                SamplingMetadata, BatchedTensorInputs]:
         """Prepare the model input based on scheduled requests.
         """
+        if len(self.requests) == 0:
+            return (
+                torch.empty(0, device=self.device),
+                torch.empty(0, device=self.device),
+                None,
+                self.input_batch.sampling_metadata,
+                {},
+            )
+
         input_tokens = []
         input_positions = []
         seq_lens = []
@@ -152,15 +161,6 @@ class OpenVINOModelRunnerV1:
             np.zeros_like(self._block_idx_begins_buf)
             for _ in range(self.num_cache_groups)
         ]
-
-        if len(self.requests) == 0:
-            return (
-                torch.empty(0, device=self.device),
-                torch.empty(0, device=self.device),
-                None,
-                self.input_batch.sampling_metadata,
-                {},
-            )
 
         n_reqs = 0
         self._subseq_begins_buf[0] = 0
@@ -227,9 +227,9 @@ class OpenVINOModelRunnerV1:
             # or [batch, num_patches, hidden] depending on vLLM version.
             # Based on model_loader/openvino.py: pixel_values_np = np.array(pixel_values.data)
             # and image_pos_np = np.array(image_position_ids.data)
-            multi_modal_kwargs["pixel_values"] = torch.stack(all_pixel_values)
+            multi_modal_kwargs["pixel_values"] = torch.stack(all_pixel_values).to(self.device)
             multi_modal_kwargs["image_position_ids"] = torch.tensor(
-                all_image_position_ids, dtype=torch.int64)
+                all_image_position_ids, dtype=torch.int64, device=self.device)
 
         max_query_len = max(query_lens)
         assert max_query_len > 0, "Invalid query_lens: {}".format(query_lens)

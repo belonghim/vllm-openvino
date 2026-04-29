@@ -40,9 +40,6 @@ def _flatten_inputs(inputs):
     return flatten_inputs
 
 
-# Removed: _modify_cache_parameters (OpenVINO 2026.0+) and _require_model_export (local IR only)
-
-
 def has_op_with_type(function: ov.Model, type_name: str):
     for op in function.get_ops():
         if op.get_type_name() == type_name:

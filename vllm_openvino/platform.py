@@ -105,13 +105,13 @@ class OpenVinoPlatform(Platform):
         if OpenVinoPlatform.is_openvino_cpu():
             if cache_config.block_size != 32:
                 logger.info(
-                    f"OpenVINO CPU optimal block size is 32, overriding currently set {cache_config.block_size}"  # noqa: G004, E501
+                    f"OpenVINO CPU optimal block size is 32, overriding {cache_config.block_size} to 32"  # noqa: G004, E501
                 )
                 cache_config.block_size = 32
         else:
             if cache_config.block_size != 16:
                 logger.info(
-                    f"OpenVINO GPU optimal block size is 16, overriding currently set {cache_config.block_size}"  # noqa: G004, E501
+                    f"OpenVINO GPU optimal block size is 16, overriding {cache_config.block_size} to 16"  # noqa: G004, E501
                 )
                 cache_config.block_size = 16
 
