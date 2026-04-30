@@ -58,6 +58,14 @@ class OpenVINOModelRunnerV1:
         self._subseq_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._block_idx_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._sampled_idx_buf = np.zeros(max_seqs, dtype=np.int64)
+        self._input_tokens_buf = np.zeros(
+            self.scheduler_config.max_num_batched_tokens,
+            dtype=np.int64,
+        )
+        self._input_positions_buf = np.zeros(
+            self.scheduler_config.max_num_batched_tokens,
+            dtype=np.int64,
+        )
 
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
@@ -199,8 +207,8 @@ class OpenVINOModelRunnerV1:
                 {},
             )
 
-        input_tokens = []
-        input_positions = []
+        token_idx = 0
+        pos_idx = 0
         seq_lens = []
         query_lens = []
 
@@ -225,6 +233,8 @@ class OpenVINOModelRunnerV1:
                 num_group_blocks = len(group_block_table)
                 if num_group_blocks:
                     group_offset = int(self._block_idx_group_offsets[group_idx])
+                    assert group_offset + num_group_blocks <= self._max_block_indices, \
+                        f"block_indices overflow: {group_offset + num_group_blocks} > {self._max_block_indices}"
                     self._block_indices_group_data[group_idx][
                         group_offset:group_offset + num_group_blocks
                     ] = group_block_table
@@ -248,9 +258,14 @@ class OpenVINOModelRunnerV1:
             seq_lens.append(seq_len)
             query_len = len(tokens)
             query_lens.append(query_len)
-            input_tokens.extend(tokens)
+            num_tokens = len(tokens)
+            self._input_tokens_buf[token_idx:token_idx + num_tokens] = tokens
+            token_idx += num_tokens
+
             positions_range = range(num_computed, num_tokens_total)
-            input_positions.extend(positions_range)
+            num_positions = len(positions_range)
+            self._input_positions_buf[pos_idx:pos_idx + num_positions] = list(positions_range)
+            pos_idx += num_positions
 
             self._past_lens_buf[n_reqs] = num_computed
             self._subseq_begins_buf[n_reqs + 1] = self._subseq_begins_buf[n_reqs] + query_len
@@ -296,9 +311,17 @@ class OpenVINOModelRunnerV1:
         max_query_len = max(query_lens)
         assert max_query_len > 0, "Invalid query_lens: {}".format(query_lens)
 
-        input_tokens = ov.Tensor(np.array(input_tokens), ov.Shape([len(input_tokens)]), ov.Type.i64)
+        input_tokens = ov.Tensor(
+            self._input_tokens_buf[:token_idx],
+            ov.Shape([token_idx]),
+            ov.Type.i64,
+        )
 
-        input_positions = ov.Tensor(np.array(input_positions, dtype=np.int64))
+        input_positions = ov.Tensor(
+            self._input_positions_buf[:pos_idx],
+            ov.Shape([pos_idx]),
+            ov.Type.i64,
+        )
         sampled_token_indices_tensor = ov.Tensor(self._sampled_idx_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i64)
 
         past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i32)

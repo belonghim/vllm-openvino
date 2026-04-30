@@ -2,6 +2,7 @@
 
 # ruff: noqa: SIM117
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import openvino as ov
@@ -242,7 +243,7 @@ class OpenVINOCausalLM(nn.Module):
         return list(self._flat_kv_caches_template)
 
     @staticmethod
-    def _as_numpy_no_copy(tensor_like) -> np.ndarray:
+    def _as_numpy_no_copy(tensor_like: np.ndarray | ov.Tensor | torch.Tensor | Any) -> np.ndarray:
         if isinstance(tensor_like, np.ndarray):
             return tensor_like
         if isinstance(tensor_like, ov.Tensor):
