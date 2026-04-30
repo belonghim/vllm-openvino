@@ -43,9 +43,18 @@ vllm_openvino/
 ├── envs.py                              # 환경변수 정의 (VLLM_OPENVINO_*)
 ├── kv_cache.py                          # OpenVINOCacheEngine — KV 캐시 관리
 ├── utils.py                             # GPU 메모리 계산 유틸리티
-├── attention/backends/openvino.py       # OpenVINO Attention 백엔드
-├── model_executor/model_loader/openvino.py  # 모델 로딩 + PagedAttention 변환
+├── attention/
+│   ├── __init__.py
+│   └── backends/
+│       ├── __init__.py
+│       └── openvino.py                  # OpenVINO Attention 백엔드
+├── model_executor/
+│   ├── __init__.py
+│   └── model_loader/
+│       ├── __init__.py
+│       └── openvino.py                  # 모델 로딩 + PagedAttention 변환
 └── worker_v1/
+    ├── __init__.py
     ├── openvino_worker_v1.py            # OpenVINOWorkerV1 — 워커 (KV 캐시 할당, 프로파일링)
     └── openvino_model_runner_v1.py      # ModelRunner — 입력 준비 + 추론 실행
 scripts/benchmark.sh                     # 성능 벤치마크 스크립트
