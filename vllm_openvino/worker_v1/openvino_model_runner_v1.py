@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Tuple
-
 import numpy as np
 import openvino as ov
 import torch
@@ -139,7 +137,7 @@ class OpenVINOModelRunnerV1:
     def _prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
                SamplingMetadata, BatchedTensorInputs]:
         """Prepare the model input based on scheduled requests.
         """

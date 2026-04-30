@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 from pathlib import Path
-from typing import List, Tuple, Set
+from typing import Set
 
 import openvino as ov
 import torch
 import torch.distributed
 import torch.nn as nn
-from vllm.config import (CacheConfig, VllmConfig)
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 
@@ -27,7 +27,7 @@ import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
 from vllm_openvino.kv_cache import OpenVINOCacheEngine
 from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu
-from vllm_openvino.model_executor.model_loader.openvino import ATTENTION_ONLY, HYBRID_MAMBA
+from vllm_openvino.model_executor.model_loader.openvino import HYBRID_MAMBA
 
 logger = init_logger(__name__)
 
@@ -86,7 +86,7 @@ class OpenVINOWorkerV1(WorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: OpenVINOCacheEngine
-        self.kv_cache: List[Tuple[ov.Tensor, ov.Tensor]]
+        self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]]
         self.num_swap_blocks = 0
 
         # Cache shape metadata (needed before determine_available_memory()).
@@ -616,7 +616,7 @@ class OpenVINOWorkerV1(WorkerBase):
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not supported.")
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         raise NotImplementedError(
             "Use determine_available_memory() instead. "
             "This method is not used in V1 engine."

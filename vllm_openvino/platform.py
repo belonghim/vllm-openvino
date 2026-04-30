@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 from typing import TYPE_CHECKING
 
 import torch
@@ -9,7 +8,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 import vllm_openvino.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig, CompilationMode
+    from vllm.config import VllmConfig
 else:
     VllmConfig = None
 
@@ -93,42 +92,38 @@ class OpenVinoPlatform(Platform):
         precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
         cache_dtype = _kv_precision_map.get(precision_key)
         if cache_dtype is not None:
-            logger.info("KV cache type is overridden to %s via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var.", cache_dtype)
+            logger.info(
+                "KV cache type is overridden to %s via "
+                "VLLM_OPENVINO_KV_CACHE_PRECISION env var.", cache_dtype)
             cache_config.cache_dtype = cache_dtype
         else:
-            logger.info("KV cache type is not specified via "
-                        "VLLM_OPENVINO_KV_CACHE_PRECISION env var. "
-                        "It will be determined automatically by a plugin")
+            logger.info(
+                "KV cache type is not specified via "
+                "VLLM_OPENVINO_KV_CACHE_PRECISION env var. "
+                "It will be determined automatically by a plugin")
             cache_config.cache_dtype = "dynamic"
 
         if OpenVinoPlatform.is_openvino_cpu():
             if cache_config.block_size != 32:
                 logger.info(
-                    f"OpenVINO CPU optimal block size is 32, overriding {cache_config.block_size} to 32"  # noqa: G004, E501
-                )
+                    f"OpenVINO CPU optimal block size is 32, overriding "
+                    f"{cache_config.block_size} to 32")
                 cache_config.block_size = 32
         else:
             if cache_config.block_size != 16:
                 logger.info(
-                    f"OpenVINO GPU optimal block size is 16, overriding {cache_config.block_size} to 16"  # noqa: G004, E501
-                )
+                    f"OpenVINO GPU optimal block size is 16, overriding "
+                    f"{cache_config.block_size} to 16")
                 cache_config.block_size = 16
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
         if kv_cache_space >= 0:
             if kv_cache_space == 0 and OpenVinoPlatform.is_openvino_cpu():
-                cache_config.openvino_kvcache_space_bytes = 32 * GiB_bytes  # type: ignore
+                cache_config.openvino_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
                 logger.warning(
                     "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
-                    "for OpenVINO backend is not set, using 32 by default.")
+                    "for OpenVINO backend is not set, using 4 by default.")
             else:
-                if kv_cache_space < 32 and OpenVinoPlatform.is_openvino_cpu():
-                    logger.warning(
-                        "VLLM_OPENVINO_KVCACHE_SPACE is set to %d GB, "
-                        "which is too small for large models. Using 32 GB instead.",
-                        kv_cache_space)
-                    kv_cache_space = 32
                 cache_config.openvino_kvcache_space_bytes = (  # type: ignore
                     kv_cache_space * GiB_bytes)
                 if kv_cache_space == 0 and not OpenVinoPlatform.is_openvino_cpu():
@@ -138,8 +133,8 @@ class OpenVinoPlatform(Platform):
                         "profiling run.")
         else:
             raise RuntimeError(
-                "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE"
-                f" {kv_cache_space}, expect a positive integer value.")
+                "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE "
+                f"{kv_cache_space}, expect a positive integer value.")
 
         # Disable torch compilation — OpenVINO compiles its own models
         from vllm.config import CompilationMode

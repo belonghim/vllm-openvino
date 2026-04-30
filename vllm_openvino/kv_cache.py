@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
-from typing import List, Optional, Tuple
-
-import openvino as ov
-import torch
-
-import vllm_openvino.envs as envs
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig)
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-
-# Import V1 KVCache interface
-from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -38,15 +29,15 @@ class OpenVINOCacheEngine:
     def __init__(
         self,
         cache_config: CacheConfig,
-        key_cache_config: List[ov.PartialShape],
-        value_cache_config: List[ov.PartialShape],
+        key_cache_config: list[ov.PartialShape],
+        value_cache_config: list[ov.PartialShape],
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
         ov_core: ov.Core,
         ov_device: str,
-        ssm_cache_config: Optional[List[ov.PartialShape]] = None,
-        conv_cache_config: Optional[List[ov.PartialShape]] = None,
+        ssm_cache_config: list[ov.PartialShape] | None = None,
+        conv_cache_config: list[ov.PartialShape] | None = None,
     ) -> None:
         # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
         # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
@@ -73,20 +64,18 @@ class OpenVINOCacheEngine:
         self.ov_cache_dtype = str_to_ov_type[self.cache_config.cache_dtype]
 
         # Initialize the cache.
-        self.kv_cache: List[Tuple[ov.Tensor,
-                                  ov.Tensor]] = self._allocate_kv_cache(
+        self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_kv_cache(
             self.num_device_blocks, ov_core,
             ov_device)
 
         # Initialize SSM/conv state caches (for hybrid models like Mamba).
-        self.ssm_cache: List[ov.Tensor] = self._allocate_ssm_cache(
+        self.ssm_cache: list[ov.Tensor] = self._allocate_ssm_cache(
             self.num_device_blocks, ov_core, ov_device)
-        self.conv_cache: List[ov.Tensor] = self._allocate_conv_cache(
+        self.conv_cache: list[ov.Tensor] = self._allocate_conv_cache(
             self.num_device_blocks, ov_core, ov_device)
 
         # Initialize the swap.
-        self.swap_cache: List[Tuple[ov.Tensor,
-                                    ov.Tensor]] = self._allocate_swap_cache(
+        self.swap_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_swap_cache(
             self.num_swap_blocks, ov_device)
 
     def _allocate_kv_cache(
@@ -94,9 +83,9 @@ class OpenVINOCacheEngine:
         num_blocks: int,
         ov_core: ov.Core,
         ov_device: str,
-    ) -> List[Tuple[ov.Tensor, ov.Tensor]]:
+    ) -> list[tuple[ov.Tensor, ov.Tensor]]:
         """Allocates KV cache."""
-        kv_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
+        kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = []
 
         for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
             key_cache_shape = key_cache_pshape
@@ -123,9 +112,9 @@ class OpenVINOCacheEngine:
         num_blocks: int,
         ov_core: ov.Core,
         ov_device: str,
-    ) -> List[ov.Tensor]:
+    ) -> list[ov.Tensor]:
         """Allocates SSM state cache for hybrid models."""
-        ssm_cache: List[ov.Tensor] = []
+        ssm_cache: list[ov.Tensor] = []
 
         for ssm_pshape in self.ssm_cache_config:
             ssm_shape = ssm_pshape
@@ -147,9 +136,9 @@ class OpenVINOCacheEngine:
         num_blocks: int,
         ov_core: ov.Core,
         ov_device: str,
-    ) -> List[ov.Tensor]:
+    ) -> list[ov.Tensor]:
         """Allocates conv state cache for hybrid models."""
-        conv_cache: List[ov.Tensor] = []
+        conv_cache: list[ov.Tensor] = []
 
         for conv_pshape in self.conv_cache_config:
             conv_shape = conv_pshape
@@ -170,9 +159,9 @@ class OpenVINOCacheEngine:
         self,
         num_blocks: int,
         ov_device: str,
-    ) -> List[Tuple[ov.Tensor, ov.Tensor]]:
+    ) -> list[tuple[ov.Tensor, ov.Tensor]]:
         """Allocates swap cache."""
-        swap_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
+        swap_cache: list[tuple[ov.Tensor, ov.Tensor]] = []
 
         if num_blocks == 0:
             return swap_cache
@@ -192,31 +181,31 @@ class OpenVINOCacheEngine:
 
         return swap_cache
 
-    def swap_in(self, src_to_dst: List[Tuple[int, int]]) -> None:
+    def swap_in(self, src_to_dst: list[tuple[int, int]]) -> None:
         for i in range(self.num_layers):
             for swap_tensor, kv_tensor in zip(self.swap_cache[i],
                                               self.kv_cache[i]):
                 OpenVINOAttentionBackend.swap_blocks(swap_tensor, kv_tensor,
                                                     src_to_dst)
 
-    def swap_out(self, src_to_dst: List[Tuple[int, int]]) -> None:
+    def swap_out(self, src_to_dst: list[tuple[int, int]]) -> None:
         for i in range(self.num_layers):
             for swap_tensor, kv_tensor in zip(self.swap_cache[i],
                                               self.kv_cache[i]):
                 OpenVINOAttentionBackend.swap_blocks(kv_tensor, swap_tensor,
                                                     src_to_dst)
 
-    def copy(self, src_to_dsts: List[Tuple[int, int]]) -> None:
+    def copy(self, src_to_dsts: list[tuple[int, int]]) -> None:
         if (len(src_to_dsts) > 0):
             OpenVINOAttentionBackend.copy_blocks(self.kv_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(
         cache_dtype: str,
-        key_cache_config: List[ov.PartialShape],
-        value_cache_config: List[ov.PartialShape],
-        ssm_cache_config: Optional[List[ov.PartialShape]] = None,
-        conv_cache_config: Optional[List[ov.PartialShape]] = None,
+        key_cache_config: list[ov.PartialShape],
+        value_cache_config: list[ov.PartialShape],
+        ssm_cache_config: list[ov.PartialShape] | None = None,
+        conv_cache_config: list[ov.PartialShape] | None = None,
     ) -> int:
         total_elements = 0
         for key_cache_shape, value_cache_shape in zip(key_cache_config, value_cache_config):
@@ -243,11 +232,11 @@ class OpenVINOCacheEngine:
 
     # --- KVCache Interface Methods ---
 
-    def get_k_cache(self) -> List[ov.Tensor]:
+    def get_k_cache(self) -> list[ov.Tensor]:
         """Returns the key cache tensors."""
         return [tensor[0] for tensor in self.kv_cache]
 
-    def get_v_cache(self) -> List[ov.Tensor]:
+    def get_v_cache(self) -> list[ov.Tensor]:
         """Returns the value cache tensors."""
         return [tensor[1] for tensor in self.kv_cache]
 

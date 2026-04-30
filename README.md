@@ -9,7 +9,7 @@ This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's O
 ## Requirements
 
 - Python >= 3.10
-- vLLM 0.18.1
+- vLLM 0.19.1
 - OpenVINO >= 2026.1.0
 - Linux (x86-64, AVX2+)
 
@@ -82,10 +82,11 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
+- Gemma 4 multimodal (text + image)
 
 ## Limitations
 
 - LoRA serving is not supported.
 - Single socket only; tensor/pipeline parallelism is not supported.
-- vLLM V1 engine only (vLLM 0.18.1).
+- vLLM V1 engine only (vLLM 0.19.1).
 

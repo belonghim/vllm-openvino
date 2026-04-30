@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
-    VLLM_OPENVINO_KVCACHE_SPACE: int = 32
+    VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_KV_CACHE_PRECISION: Optional[str] = None
 
 environment_variables: dict[str, Callable[[], Any]] = {
@@ -15,9 +15,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
-    # default is 32GB for Gemma-4 compatibility
+    # default is 0 (auto: 4 GB on CPU)
     "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "32")),
+    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
 
     # OpenVINO KV cache precision
     # default 'undefined', which means plugin will automatically set

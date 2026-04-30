@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -71,22 +70,22 @@ class OpenVINOAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (2, num_blocks, num_kv_heads, block_size, head_size)
 
     @staticmethod
     def swap_blocks(
         src_tensor: ov.Tensor,
         dst_tensor: ov.Tensor,
-        src_to_dists: List[Tuple[int, int]],
+        src_to_dists: list[tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
             copy_cache_block(src_tensor, dst_tensor, src, dst)
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[Tuple[ov.Tensor, ov.Tensor]],
-        src_to_dists: List[Tuple[int, int]],
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+        src_to_dists: list[tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
             if src == dst:
@@ -144,7 +143,7 @@ class OpenVINOAttentionMetadata:
     # N.B. These aren't really related to attention and don't belong on this
     # type -- this is just a temporary solution to make them available to
     # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[str, list]]
+    multi_modal_placeholder_index_maps: dict[str, list] | None
 
     # Enable/disable KV scales calculation. This is so that we can disable the
     # calculation until after prefill and cuda graph capture.
@@ -155,10 +154,10 @@ class OpenVINOAttentionMetadata:
 
     # Optional per-group block indices (group 0 == attention).
     # Used by hybrid cache-group models (e.g. attention + Mamba states).
-    block_indices_groups: Optional[List[ov.Tensor]] = None
+    block_indices_groups: list[ov.Tensor] | None = None
 
     # Optional per-group block_indices_begins (group 0 == attention).
-    block_indices_begins_groups: Optional[List[ov.Tensor]] = None
+    block_indices_begins_groups: list[ov.Tensor] | None = None
 
 
 class OpenVINOAttentionMetadataBuilder(

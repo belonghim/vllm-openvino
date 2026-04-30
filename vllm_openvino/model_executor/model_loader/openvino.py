@@ -2,7 +2,6 @@
 
 # ruff: noqa: SIM117
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import openvino as ov
@@ -73,72 +72,6 @@ def get_ssm_state_shapes(ov_model: ov.Model) -> dict[str, list]:
             elif "conv" in var_id:
                 conv_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
     return {"ssm": ssm_shapes, "conv": conv_shapes}
-
-
-def _is_attention_sdpa_var(var_id: str) -> bool:
-    """Check if variable_id is for attention KV cache (not SSM/conv).
-
-    Attention KV: cache_params.past.key.{N}, cache_params.past.value.{N}
-    SSM/conv: cache_params.past.ssm.{N}, cache_params.past.conv.{N}
-    """
-    if not var_id:
-        return False
-    if "past.ssm." in var_id or "past.conv." in var_id:
-        return False
-    if "past.key." in var_id or "past.value." in var_id:
-        return True
-    return False
-
-
-def _find_sdpa_consumer_of_var(model: ov.Model, var_id: str) -> list:
-    """Find all SDPA ops that consume a given variable_id via ReadValue."""
-    consumers = []
-    for op in model.get_ops():
-        if op.get_type_name() != "ScaledDotProductAttention":
-            continue
-        for i in range(op.get_input_size()):
-            try:
-                source = op.input_value(i).get_node()
-                if source.get_type_name() == "ReadValue" and source.get_variable_id() == var_id:
-                    consumers.append(op)
-                    break
-            except Exception:
-                continue
-    return consumers
-
-
-def _remove_ssmlike_sdpa_subgraph(model: ov.Model) -> None:
-    """Remove SDPA ops that are part of SSM/conv (linear attention) layers.
-
-    These SDPA ops are NOT true attention - they are part of Mamba/SSM blocks.
-    We identify them by checking if their ReadValue inputs use ssm/conv variable_ids.
-    """
-    # Find all ssm/conv variable_ids
-    ssm_conv_vars = set()
-    for op in model.get_ops():
-        if op.get_type_name() != "ReadValue":
-            continue
-        var_id = op.get_variable_id()
-        if not var_id:
-            continue
-        if not _is_attention_sdpa_var(var_id) and ("ssm" in var_id or "conv" in var_id):
-            ssm_conv_vars.add(var_id)
-
-    # Find SDPA ops that consume ssm/conv variables
-    ssm_sdpa_ops = set()
-    for var_id in ssm_conv_vars:
-        for op in _find_sdpa_consumer_of_var(model, var_id):
-            ssm_sdpa_ops.add(op)
-
-    # Bypass SSM/conv SDPA ops before PA transformation
-    for sdpa_op in ssm_sdpa_ops:
-        try:
-            sdpa_output = sdpa_op.output(0)
-            sdpa_input = sdpa_op.input_value(0)
-            sdpa_output.replace_source_output(sdpa_input)
-        except Exception:
-            # Best effort: keep node unchanged if rewrite fails
-            pass
 
 
 def _has_sdpa_ops(model: ov.Model) -> bool:
@@ -296,10 +229,10 @@ class OpenVINOCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
-        ssm_caches: Optional[list[ov.Tensor]] = None,
-        conv_caches: Optional[list[ov.Tensor]] = None,
-        pixel_values: Optional[torch.Tensor] = None,
-        image_position_ids: Optional[torch.Tensor] = None,
+        ssm_caches: list[ov.Tensor] | None = None,
+        conv_caches: list[ov.Tensor] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         flat_kv_caches = _flatten_inputs(kv_caches)
         state_tensors = list(flat_kv_caches)
@@ -393,7 +326,7 @@ class OpenVINOCausalLM(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
+    ) -> SamplerOutput | None:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 

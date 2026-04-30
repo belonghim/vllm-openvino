@@ -6,7 +6,7 @@
 
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO를 LLM 추론 백엔드로 추가합니다.
 
-- **vLLM 버전**: 0.13.0+ (V1 엔진 전용, 0.14.1 컨테이너 이미지 테스트 완료)
+- **vLLM 버전**: 0.19.1 (V1 엔진 전용, V0 엔진 완전 제거됨)
 - **OpenVINO 버전**: >= 2026.0.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
@@ -316,13 +316,14 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 
 ## 알려진 기술적 특이사항
 
-1. **`TORCH_COMPILE_DISABLE=1` 필수** — vLLM 0.13.0+에서 torch.compile/Inductor가 OpenVINO와 비호환. 이 env var 없으면 크래시
+1. **`TORCH_COMPILE_DISABLE=1` 필수** — vLLM 0.19.1에서 torch.compile/Inductor가 OpenVINO와 비호환. 이 env var 없으면 크래시
 2. **Pin memory 미지원** — `is_pin_memory_available()` → False. CPU/OpenVINO 환경에서는 pin memory 불필요
 3. **LoRA 미지원** — `check_and_update_config()`에서 assert로 차단
 4. **단일 소켓만 지원** — `parallel_config.world_size == 1` 강제. Tensor/Pipeline 병렬 미지원
 5. **KV 캐시 블록 크기** — CPU: 32, GPU: 16 (자동 오버라이드)
 6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 처리. 최적화: 로컬 IR만 지원 (2026-04-21).
 7. **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 `ov = None`으로 설정하고 warning만 출력. 실제 사용 시점인 `check_and_update_config()`에서 `ImportError`를 raise. **import 시점에서 raise하지 않는 이유**: vLLM 플러그인 디스커버리 메커니즘이 모든 플러그인을 import한 뒤 활성 플러그인을 선택하므로, import 시점 raise는 OpenVINO 플러그인이 아닌 다른 플러그인 사용 시에도 크래시를 유발함.
+8. **Gemma 4 지원** — vLLM 0.19.1에서 Gemma 4 아키텍처(MoE, multimodal, reasoning, tool-use) 완전 지원. OpenVINO 플러그인은 vision embeddings 모델(`openvino_vision_embeddings_model.xml`)을 로드하여 multimodal 추론 가능.
 
 ## vLLM 버전 업그레이드 체크리스트
 

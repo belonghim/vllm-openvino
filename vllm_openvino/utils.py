@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from typing import Tuple
 from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def determine_num_available_blocks(current_platform,  cache_config, cache_block_size, profile_run_func) -> Tuple[int, int]:
+def determine_num_available_blocks(current_platform, cache_config, cache_block_size, profile_run_func) -> tuple[int, int]:
     """Determine the number of blocks available for the KV cache.
 
     This determines how many KV blocks can fit into the configured
@@ -18,9 +16,10 @@ def determine_num_available_blocks(current_platform,  cache_config, cache_block_
         num_swap_blocks = 0
     else:
         if kvcache_space_bytes > 0:
-            logger.info("KV_CACHE size was explicitly configured via "
-                        "VLLM_OPENVINO_KVCACHE_SPACE environment "
-                        "variable, ignoring profiling run.")
+            logger.info(
+                "KV_CACHE size was explicitly configured via "
+                "VLLM_OPENVINO_KVCACHE_SPACE environment variable, "
+                "ignoring profiling run.")
             kv_cache_size = kvcache_space_bytes
         else:
             try:
