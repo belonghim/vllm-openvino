@@ -57,6 +57,49 @@ class OpenVINOModelRunnerV1:
         self._block_idx_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._sampled_idx_buf = np.zeros(max_seqs, dtype=np.int64)
 
+        # Track requests that have multimodal features.
+        self._mm_req_ids: set[str] = set()
+
+        # Pre-allocated block-index tensors.
+        self._init_block_index_tensors()
+
+    def _init_block_index_tensors(self) -> None:
+        max_seqs = self.scheduler_config.max_num_seqs
+        block_size = self.cache_config.block_size
+        max_blocks_per_seq = max(1, (self.model_config.max_model_len + block_size - 1) // block_size)
+        self._max_block_indices = max_seqs * max_blocks_per_seq
+
+        self._block_indices_group_tensors_base = [
+            ov.Tensor(ov.Type.i32, ov.Shape([self._max_block_indices]))
+            for _ in range(self.num_cache_groups)
+        ]
+        self._block_indices_group_data = [
+            tensor.data for tensor in self._block_indices_group_tensors_base
+        ]
+
+        self._block_idx_begins_group_tensors_base = []
+        self._block_idx_begins_group_data = []
+        self._block_idx_begins_group_bufs = []
+        for group_idx in range(self.num_cache_groups):
+            if group_idx == 0:
+                group_begins_buf = self._block_idx_begins_buf
+            else:
+                group_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
+            tensor = ov.Tensor(group_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
+            self._block_idx_begins_group_bufs.append(group_begins_buf)
+            self._block_idx_begins_group_tensors_base.append(tensor)
+            self._block_idx_begins_group_data.append(tensor.data)
+
+        self._block_idx_group_offsets = np.zeros(self.num_cache_groups, dtype=np.int32)
+        self._empty_block_indices_group_tensors = [
+            ov.Tensor(np.empty(0, dtype=np.int32))
+            for _ in range(self.num_cache_groups)
+        ]
+
+    @staticmethod
+    def _slice_tensor(base_tensor: ov.Tensor, length: int) -> ov.Tensor:
+        return ov.Tensor(base_tensor, ov.Coordinate([0]), ov.Coordinate([length]))
+
     def _create_input_batch(self, num_cache_groups: int) -> InputBatch:
         block_sizes = [self.cache_config.block_size] * max(1, num_cache_groups)
         return InputBatch(
@@ -73,6 +116,7 @@ class OpenVINOModelRunnerV1:
     def configure_cache_groups(self, num_cache_groups: int) -> None:
         self.num_cache_groups = max(1, num_cache_groups)
         self.input_batch = self._create_input_batch(self.num_cache_groups)
+        self._init_block_index_tensors()
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
@@ -87,6 +131,7 @@ class OpenVINOModelRunnerV1:
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.input_batch.remove_request(req_id)
+            self._mm_req_ids.discard(req_id)
 
         # Remove unscheduled requests from batch (but keep cached state)
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
@@ -113,6 +158,8 @@ class OpenVINOModelRunnerV1:
             )
             self.requests[req_id] = req_state
             self.input_batch.add_request(req_state)
+            if req_state.mm_features:
+                self._mm_req_ids.add(req_id)
 
         # Update cached (running) requests
         req_data = scheduler_output.scheduled_cached_reqs
@@ -154,16 +201,12 @@ class OpenVINOModelRunnerV1:
         input_positions = []
         seq_lens = []
         query_lens = []
-        block_indices_groups = [[] for _ in range(self.num_cache_groups)]
-        block_indices_begins_groups = [
-            np.zeros_like(self._block_idx_begins_buf)
-            for _ in range(self.num_cache_groups)
-        ]
 
         n_reqs = 0
         self._subseq_begins_buf[0] = 0
+        self._block_idx_group_offsets.fill(0)
         for group_idx in range(self.num_cache_groups):
-            block_indices_begins_groups[group_idx][0] = 0
+            self._block_idx_begins_group_data[group_idx][0] = 0
 
         for req_id in self.input_batch.req_ids:
             req_index = self.input_batch.req_id_to_index[req_id]
@@ -177,10 +220,18 @@ class OpenVINOModelRunnerV1:
                 else:
                     group_block_table = []
 
-                block_indices_groups[group_idx].extend(group_block_table)
-                block_indices_begins_groups[group_idx][n_reqs + 1] = (
-                    block_indices_begins_groups[group_idx][n_reqs]
-                    + len(group_block_table)
+                num_group_blocks = len(group_block_table)
+                if num_group_blocks:
+                    group_offset = int(self._block_idx_group_offsets[group_idx])
+                    self._block_indices_group_data[group_idx][
+                        group_offset:group_offset + num_group_blocks
+                    ] = group_block_table
+                    self._block_idx_group_offsets[group_idx] = (
+                        group_offset + num_group_blocks
+                    )
+
+                self._block_idx_begins_group_data[group_idx][n_reqs + 1] = (
+                    self._block_idx_group_offsets[group_idx]
                 )
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -209,15 +260,19 @@ class OpenVINOModelRunnerV1:
         all_pixel_values = []
         all_image_position_ids = []
 
-        for req_id in self.input_batch.req_ids:
+        mm_req_ids = [
+            req_id for req_id in self._mm_req_ids
+            if req_id in self.input_batch.req_id_to_index
+        ]
+        mm_req_ids.sort(key=self.input_batch.req_id_to_index.__getitem__)
+        for req_id in mm_req_ids:
             request = self.requests[req_id]
-            if request.mm_features:
-                # vLLM v1: mm_features is a list of MultiModalFeatureSpec
-                for mm_feature in request.mm_features:
-                    # mm_feature.data should be the preprocessed image tensor
-                    all_pixel_values.append(mm_feature.data)
-                    # mm_feature.mm_position is typically the (start, end) token positions
-                    all_image_position_ids.append(mm_feature.mm_position)
+            # vLLM v1: mm_features is a list of MultiModalFeatureSpec
+            for mm_feature in request.mm_features:
+                # mm_feature.data should be the preprocessed image tensor
+                all_pixel_values.append(mm_feature.data)
+                # mm_feature.mm_position is typically the (start, end) token positions
+                all_image_position_ids.append(mm_feature.mm_position)
 
         if all_pixel_values:
             # For now, focus on single image per request as per implementation notes.
@@ -225,9 +280,16 @@ class OpenVINOModelRunnerV1:
             # or [batch, num_patches, hidden] depending on vLLM version.
             # Based on model_loader/openvino.py: pixel_values_np = np.array(pixel_values.data)
             # and image_pos_np = np.array(image_position_ids.data)
-            multi_modal_kwargs["pixel_values"] = torch.stack(all_pixel_values).to(self.device)
-            multi_modal_kwargs["image_position_ids"] = torch.tensor(
-                all_image_position_ids, dtype=torch.int64, device=self.device)
+            pixel_values = torch.stack(all_pixel_values)
+            if pixel_values.device != self.device:
+                pixel_values = pixel_values.to(self.device)
+            multi_modal_kwargs["pixel_values"] = pixel_values
+
+            image_position_ids = torch.tensor(
+                all_image_position_ids, dtype=torch.int64)
+            if image_position_ids.device != self.device:
+                image_position_ids = image_position_ids.to(self.device)
+            multi_modal_kwargs["image_position_ids"] = image_position_ids
 
         max_query_len = max(query_lens)
         assert max_query_len > 0, "Invalid query_lens: {}".format(query_lens)
@@ -235,18 +297,31 @@ class OpenVINOModelRunnerV1:
         input_tokens = ov.Tensor(np.array(input_tokens), ov.Shape([len(input_tokens)]), ov.Type.i64)
 
         input_positions = ov.Tensor(np.array(input_positions, dtype=np.int64))
-        sampled_token_indices_tensor = ov.Tensor(self._sampled_idx_buf[:n_reqs].copy(), ov.Shape([n_reqs]), ov.Type.i64)
+        sampled_token_indices_tensor = ov.Tensor(self._sampled_idx_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i64)
 
-        past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs].copy(), ov.Shape([n_reqs]), ov.Type.i32)
-        subsequence_begins_tensor = ov.Tensor(self._subseq_begins_buf[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
-        block_indices_group_tensors = [
-            ov.Tensor(np.array(group_indices, dtype=np.int32))
-            for group_indices in block_indices_groups
-        ]
-        block_indices_begins_group_tensors = [
-            ov.Tensor(group_begins[:n_reqs + 1].copy(), ov.Shape([n_reqs + 1]), ov.Type.i32)
-            for group_begins in block_indices_begins_groups
-        ]
+        past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i32)
+        subsequence_begins_tensor = ov.Tensor(self._subseq_begins_buf[:n_reqs + 1], ov.Shape([n_reqs + 1]), ov.Type.i32)
+        block_indices_group_tensors = []
+        block_indices_begins_group_tensors = []
+        for group_idx in range(self.num_cache_groups):
+            num_blocks = int(self._block_idx_group_offsets[group_idx])
+            if num_blocks == 0:
+                block_indices_group_tensors.append(
+                    self._empty_block_indices_group_tensors[group_idx]
+                )
+            else:
+                block_indices_group_tensors.append(
+                    self._slice_tensor(
+                        self._block_indices_group_tensors_base[group_idx],
+                        num_blocks,
+                    )
+                )
+            block_indices_begins_group_tensors.append(
+                self._slice_tensor(
+                    self._block_idx_begins_group_tensors_base[group_idx],
+                    n_reqs + 1,
+                )
+            )
         max_context_len_tensor = ov.Tensor(np.array(max(seq_lens), dtype=np.int32))
 
         attn_metadata = OpenVINOAttentionMetadata(

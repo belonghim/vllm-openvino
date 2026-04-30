@@ -214,6 +214,9 @@ class OpenVINOCausalLM(nn.Module):
 
         ov_compiled = ov_core.compile_model(ov_model, ov_device, perf_hint)
         self.ov_request = ov_compiled.create_infer_request()
+        self._flat_kv_caches_template: list[ov.Tensor] | None = None
+        self._use_grouped_block_table_inputs: bool | None = None
+        self._infer_supports_share_inputs: bool | None = None
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
         if self.use_text_embeddings_model:
@@ -230,6 +233,57 @@ class OpenVINOCausalLM(nn.Module):
                 vision_emb_model, ov_device, perf_hint)
             self.vision_emb_request = ov_vision_emb_compiled.create_infer_request()
 
+    def _get_flat_kv_caches_template(
+        self,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+    ) -> list[ov.Tensor]:
+        if self._flat_kv_caches_template is None:
+            self._flat_kv_caches_template = _flatten_inputs(kv_caches)
+        # Return a shallow copy so per-forward state_tensors can be extended safely.
+        return list(self._flat_kv_caches_template)
+
+    @staticmethod
+    def _as_numpy_no_copy(tensor_like) -> np.ndarray:
+        if isinstance(tensor_like, np.ndarray):
+            return tensor_like
+        if isinstance(tensor_like, ov.Tensor):
+            return tensor_like.data
+        if isinstance(tensor_like, torch.Tensor):
+            return tensor_like.detach().cpu().numpy()
+        return np.asarray(tensor_like)
+
+    def _iter_block_table_inputs(self, attn_metadata):
+        if self._use_grouped_block_table_inputs is None:
+            block_indices_groups = getattr(attn_metadata, "block_indices_groups", None)
+            block_indices_begins_groups = getattr(
+                attn_metadata, "block_indices_begins_groups", None)
+            self._use_grouped_block_table_inputs = (
+                block_indices_groups is not None
+                and block_indices_begins_groups is not None
+                and len(block_indices_groups) == len(block_indices_begins_groups)
+            )
+
+        if self._use_grouped_block_table_inputs:
+            return zip(
+                attn_metadata.block_indices_groups,
+                attn_metadata.block_indices_begins_groups,
+            )
+
+        return ((attn_metadata.block_indices, attn_metadata.block_indices_begins),)
+
+    def _infer(self, inputs: list) -> None:
+        if self._infer_supports_share_inputs is False:
+            self.ov_request.infer(inputs)
+            return
+
+        try:
+            self.ov_request.infer(inputs, share_inputs=True)
+            self._infer_supports_share_inputs = True
+        except TypeError:
+            # Older/newer OpenVINO bindings may not expose share_inputs on infer().
+            self._infer_supports_share_inputs = False
+            self.ov_request.infer(inputs)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -240,41 +294,30 @@ class OpenVINOCausalLM(nn.Module):
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        flat_kv_caches = _flatten_inputs(kv_caches)
-        state_tensors = list(flat_kv_caches)
+        state_tensors = self._get_flat_kv_caches_template(kv_caches)
         if self.model_type == HYBRID_MAMBA:
-            state_tensors.extend(_flatten_inputs(ssm_caches or []))
-            state_tensors.extend(_flatten_inputs(conv_caches or []))
+            if ssm_caches:
+                state_tensors.extend(ssm_caches)
+            if conv_caches:
+                state_tensors.extend(conv_caches)
 
         attn_metadata = get_forward_context().attn_metadata
-        block_indices_groups = getattr(attn_metadata, "block_indices_groups", None)
-        block_indices_begins_groups = getattr(
-            attn_metadata, "block_indices_begins_groups", None)
-
-        if block_indices_groups and block_indices_begins_groups and \
-                len(block_indices_groups) == len(block_indices_begins_groups):
-            block_table_inputs = []
-            for block_indices, block_indices_begins in zip(
-                    block_indices_groups, block_indices_begins_groups):
-                block_table_inputs.extend([block_indices, block_indices_begins])
-        else:
-            block_table_inputs = [
-                attn_metadata.block_indices,
-                attn_metadata.block_indices_begins,
-            ]
+        block_table_inputs = []
+        for block_indices, block_indices_begins in self._iter_block_table_inputs(attn_metadata):
+            block_table_inputs.extend((block_indices, block_indices_begins))
 
         if self.use_text_embeddings_model:
             # Gemma 3 style: language model takes inputs_embeds, not input_ids.
             # Run text embeddings model first: input_ids (1D) → inputs_embeds.
-            input_ids_np = np.array(input_ids.data).reshape(1, -1)
+            input_ids_np = self._as_numpy_no_copy(input_ids).reshape(1, -1)
             self.text_emb_request.infer([input_ids_np])
             inputs_embeds = self.text_emb_request.get_output_tensor(0)
             # inputs_embeds shape: [1, seq_len, hidden] → flatten to [seq_len, hidden]
             inputs_embeds_2d = inputs_embeds.data.reshape(-1, inputs_embeds.shape[-1])
 
             if self.use_vision_embeddings_model and pixel_values is not None:
-                pixel_values_np = np.array(pixel_values.data)
-                image_pos_np = np.array(image_position_ids.data)
+                pixel_values_np = self._as_numpy_no_copy(pixel_values)
+                image_pos_np = self._as_numpy_no_copy(image_position_ids)
                 self.vision_emb_request.infer([pixel_values_np, image_pos_np])
                 vision_embeds = self.vision_emb_request.get_output_tensor(0)
                 vision_embeds_2d = vision_embeds.data.reshape(
@@ -310,9 +353,7 @@ class OpenVINOCausalLM(nn.Module):
             ]
 
         inputs.append(attn_metadata.sampled_token_indices)
-
-        self.ov_request.start_async(inputs, share_inputs=True)
-        self.ov_request.wait()
+        self._infer(inputs)
 
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
 

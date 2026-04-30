@@ -83,6 +83,12 @@ class OpenVINOCacheEngine:
         self.swap_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_swap_cache(
             self.num_swap_blocks, ov_device)
 
+        # Cache k_cache and v_cache lists to avoid rebuilding on every call.
+        # self.kv_cache structure is immutable after init (only tensor data changes),
+        # so caching is safe.
+        self._k_cache: list[ov.Tensor] = [tensor[0] for tensor in self.kv_cache]
+        self._v_cache: list[ov.Tensor] = [tensor[1] for tensor in self.kv_cache]
+
     def _allocate_kv_cache(
         self,
         num_blocks: int,
@@ -239,9 +245,9 @@ class OpenVINOCacheEngine:
 
     def get_k_cache(self) -> list[ov.Tensor]:
         """Returns the key cache tensors."""
-        return [tensor[0] for tensor in self.kv_cache]
+        return self._k_cache
 
     def get_v_cache(self) -> list[ov.Tensor]:
         """Returns the value cache tensors."""
-        return [tensor[1] for tensor in self.kv_cache]
+        return self._v_cache
 
