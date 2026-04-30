@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Set
 
 import openvino as ov
+import openvino.properties as ov_props
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -64,6 +65,7 @@ class OpenVINOWorkerV1(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
         self.ov_core = ov.Core()
+        self.ov_core.set_property({ov_props.enable_mmap: True})
         self.parallel_config.rank = rank
         self.local_rank = local_rank
         self.rank = rank

@@ -78,6 +78,39 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `LATENCY` |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
+## Performance Tuning
+
+### KV Cache Quantization
+
+The KV cache precision can be reduced to significantly lower memory usage:
+
+| Precision | Memory | Notes |
+|-----------|--------|-------|
+| `u8` | Lowest | 8-bit unsigned integer; fastest, smallest footprint |
+| `i8` | Low | 8-bit signed integer |
+| `f16` / `bf16` | Medium | Default on most GPUs; good balance |
+| `f32` | Highest | Best accuracy, highest memory usage |
+
+Set via environment variable:
+```bash
+VLLM_OPENVINO_KV_CACHE_PRECISION=u8 \
+  python -m vllm.entrypoints.openai.api_server --model <model_id>
+```
+
+### Memory-Mapped Model Loading
+
+OpenVINO automatically memory-maps model weights since 2026.0+. This reduces RAM usage during model loading by mapping weights directly from disk rather than copying them into memory. No configuration is required.
+
+### Benchmarking
+
+To measure throughput/latency improvements, use the provided benchmark script:
+
+```bash
+./scripts/benchmark.sh <model_path> [num_requests]
+```
+
+The script runs a warmed-up benchmark against the local OpenAI-compatible endpoint and reports tokens/sec.
+
 ## Compatibility
 
 The following vLLM features are compatible with the OpenVINO backend:

@@ -2,6 +2,7 @@
 
 import numpy as np
 import openvino as ov
+import openvino.properties as ov_props
 import torch
 from torch import nn
 from vllm.config import VllmConfig
@@ -37,6 +38,7 @@ class OpenVINOModelRunnerV1:
         self.compilation_config = vllm_config.compilation_config
         self.device = device
         self.ov_core = ov_core or ov.Core()
+        self.ov_core.set_property({ov_props.enable_mmap: True})
         self.model: nn.Module  # Set after load_model()
 
         # V1 state management

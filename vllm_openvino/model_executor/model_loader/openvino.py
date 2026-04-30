@@ -216,7 +216,6 @@ class OpenVINOCausalLM(nn.Module):
         self.ov_request = ov_compiled.create_infer_request()
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
         self._use_grouped_block_table_inputs: bool | None = None
-        self._infer_supports_share_inputs: bool | None = None
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
         if self.use_text_embeddings_model:
@@ -250,6 +249,8 @@ class OpenVINOCausalLM(nn.Module):
             return tensor_like.data
         if isinstance(tensor_like, torch.Tensor):
             return tensor_like.detach().cpu().numpy()
+        assert not isinstance(tensor_like, (ov.Tensor, torch.Tensor)), \
+            f"_as_numpy_no_copy: unhandled type {type(tensor_like)}"
         return np.asarray(tensor_like)
 
     def _iter_block_table_inputs(self, attn_metadata):
@@ -270,19 +271,6 @@ class OpenVINOCausalLM(nn.Module):
             )
 
         return ((attn_metadata.block_indices, attn_metadata.block_indices_begins),)
-
-    def _infer(self, inputs: list) -> None:
-        if self._infer_supports_share_inputs is False:
-            self.ov_request.infer(inputs)
-            return
-
-        try:
-            self.ov_request.infer(inputs, share_inputs=True)
-            self._infer_supports_share_inputs = True
-        except TypeError:
-            # Older/newer OpenVINO bindings may not expose share_inputs on infer().
-            self._infer_supports_share_inputs = False
-            self.ov_request.infer(inputs)
 
     def forward(
         self,
@@ -353,7 +341,7 @@ class OpenVINOCausalLM(nn.Module):
             ]
 
         inputs.append(attn_metadata.sampled_token_indices)
-        self._infer(inputs)
+        self.ov_request.infer(inputs)
 
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
 
