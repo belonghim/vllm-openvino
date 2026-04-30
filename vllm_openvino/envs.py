@@ -24,6 +24,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # proper value based on model analysis
     "VLLM_OPENVINO_KV_CACHE_PRECISION":
     lambda: os.getenv("VLLM_OPENVINO_KV_CACHE_PRECISION", None),
+
+    # OpenVINO performance mode: LATENCY or THROUGHPUT
+    # LATENCY is recommended for faster first-token response on CPU
+    "VLLM_OPENVINO_PERFORMANCE_MODE":
+    lambda: os.getenv("VLLM_OPENVINO_PERFORMANCE_MODE", "LATENCY").upper(),
 }
 
 # end-env-vars-definition

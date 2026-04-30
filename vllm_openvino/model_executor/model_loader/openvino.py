@@ -206,7 +206,13 @@ class OpenVINOCausalLM(nn.Module):
         ov_model.validate_nodes_and_infer_types()
 
         ov_device = envs.VLLM_OPENVINO_DEVICE
-        ov_compiled = ov_core.compile_model(ov_model, ov_device)
+
+        perf_mode = envs.VLLM_OPENVINO_PERFORMANCE_MODE
+        import openvino.properties.hint as hints
+        perf_hint = {hints.performance_mode: hints.PerformanceMode.LATENCY} \
+            if perf_mode == "LATENCY" else {hints.performance_mode: hints.PerformanceMode.THROUGHPUT}
+
+        ov_compiled = ov_core.compile_model(ov_model, ov_device, perf_hint)
         self.ov_request = ov_compiled.create_infer_request()
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
@@ -214,14 +220,14 @@ class OpenVINOCausalLM(nn.Module):
             text_emb_model = ov_core.read_model(
                 str(model_dir / "openvino_text_embeddings_model.xml"))
             ov_text_emb_compiled = ov_core.compile_model(
-                text_emb_model, ov_device)
+                text_emb_model, ov_device, perf_hint)
             self.text_emb_request = ov_text_emb_compiled.create_infer_request()
 
         if self.use_vision_embeddings_model:
             vision_emb_model = ov_core.read_model(
                 str(model_dir / "openvino_vision_embeddings_model.xml"))
             ov_vision_emb_compiled = ov_core.compile_model(
-                vision_emb_model, ov_device)
+                vision_emb_model, ov_device, perf_hint)
             self.vision_emb_request = ov_vision_emb_compiled.create_infer_request()
 
     def forward(
