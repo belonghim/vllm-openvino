@@ -209,9 +209,40 @@ class OpenVINOCausalLM(nn.Module):
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
         perf_mode = envs.VLLM_OPENVINO_PERFORMANCE_MODE
+        ov_device_upper = ov_device.upper()
         import openvino.properties.hint as hints
+        import openvino.properties as props
         perf_hint = {hints.performance_mode: hints.PerformanceMode.LATENCY} \
             if perf_mode == "LATENCY" else {hints.performance_mode: hints.PerformanceMode.THROUGHPUT}
+
+        if ov_device_upper == "CPU":
+            cpu_hint: dict[Any, Any] = {}
+
+            cpu_threads_num = envs.VLLM_OPENVINO_CPU_THREADS_NUM
+            if cpu_threads_num > 0:
+                # AVX2-only CPUs are often compute-bound; capping threads can
+                # reduce oversubscription and improve stable token throughput.
+                cpu_hint[props.inference_num_threads] = cpu_threads_num
+
+            cpu_bind_thread = envs.VLLM_OPENVINO_CPU_BIND_THREAD
+            if cpu_bind_thread in {"CORE", "NUMA", "NONE"}:
+                # Explicit affinity helps avoid thread migration penalties.
+                affinity_enum = getattr(getattr(props, "Affinity", None),
+                                        cpu_bind_thread, None)
+                affinity_value = affinity_enum if affinity_enum is not None else cpu_bind_thread
+                affinity_key = getattr(props, "affinity", "AFFINITY")
+                cpu_hint[affinity_key] = affinity_value
+
+            num_streams = envs.VLLM_OPENVINO_NUM_STREAMS
+            if isinstance(num_streams, int) and num_streams > 0:
+                # Multiple streams can increase throughput on CPUs by enabling
+                # parallel infer request execution.
+                cpu_hint[props.num_streams] = num_streams
+            elif num_streams == "AUTO":
+                # Keep OpenVINO stream heuristic (default behavior).
+                pass
+
+            perf_hint = {**perf_hint, **cpu_hint}
 
         ov_compiled = ov_core.compile_model(ov_model, ov_device, perf_hint)
         self.ov_request = ov_compiled.create_infer_request()

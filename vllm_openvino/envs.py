@@ -7,6 +7,9 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
+    VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
+    VLLM_OPENVINO_CPU_BIND_THREAD: str | None = None
+    VLLM_OPENVINO_NUM_STREAMS: str | int = "AUTO"
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection
@@ -29,6 +32,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # LATENCY is recommended for faster first-token response on CPU
     "VLLM_OPENVINO_PERFORMANCE_MODE":
     lambda: os.getenv("VLLM_OPENVINO_PERFORMANCE_MODE", "LATENCY").upper(),
+
+    # CPU-only: cap total inference threads used by OpenVINO CPU plugin
+    # 0 means OpenVINO auto-selects threads
+    "VLLM_OPENVINO_CPU_THREADS_NUM":
+    lambda: int(os.getenv("VLLM_OPENVINO_CPU_THREADS_NUM", "0")),
+
+    # CPU-only: thread binding policy (CORE, NUMA, NONE)
+    # None means keep OpenVINO default behavior
+    "VLLM_OPENVINO_CPU_BIND_THREAD":
+    lambda: (lambda v: v.upper() if v else None)(
+        os.getenv("VLLM_OPENVINO_CPU_BIND_THREAD", None)),
+
+    # Number of CPU inference streams.
+    # AUTO keeps OpenVINO heuristic. Numeric values force explicit streams.
+    "VLLM_OPENVINO_NUM_STREAMS":
+    lambda: (lambda v: int(v) if v.isdigit() else v.upper())(
+        os.getenv("VLLM_OPENVINO_NUM_STREAMS", "AUTO")),
 }
 
 # end-env-vars-definition

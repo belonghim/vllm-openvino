@@ -76,9 +76,14 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
 | `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: u8, i8, f16, bf16, f32 | `auto` |
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `LATENCY` |
+| `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = OpenVINO auto) | `0` |
+| `VLLM_OPENVINO_CPU_BIND_THREAD` | CPU only. Thread affinity: `CORE`, `NUMA`, `NONE` | unset |
+| `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer | `AUTO` |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
 ## Performance Tuning
+
+For CPU deployments, especially AVX2-only systems, tuning OpenVINO CPU threading/stream properties can improve sustained tokens/sec.
 
 ### KV Cache Quantization
 
@@ -95,6 +100,30 @@ Set via environment variable:
 ```bash
 VLLM_OPENVINO_KV_CACHE_PRECISION=u8 \
   python -m vllm.entrypoints.openai.api_server --model <model_id>
+```
+
+### CPU Tuning (AVX2)
+
+On AVX2-only CPUs, int4 models usually show a larger throughput gap vs AVX-512/VNNI capable CPUs due to lower effective low-precision compute throughput. In practice, CPU scheduling knobs (threads, affinity, streams) are often the main software lever for improving throughput stability.
+
+For older AVX2 systems, fp16 or int8 models are often a better latency/throughput trade-off than int4.
+
+| Variable | Type | Values | Effect |
+|----------|------|--------|--------|
+| `VLLM_OPENVINO_CPU_THREADS_NUM` | int | `0` (auto), `1..N` | Caps OpenVINO CPU inference threads |
+| `VLLM_OPENVINO_CPU_BIND_THREAD` | str | `CORE`, `NUMA`, `NONE` | Controls CPU thread affinity policy |
+| `VLLM_OPENVINO_NUM_STREAMS` | str/int | `AUTO`, `1..N` | Controls number of parallel CPU inference streams |
+
+Example (throughput-oriented on AVX2):
+
+```bash
+VLLM_OPENVINO_DEVICE=CPU \
+VLLM_OPENVINO_PERFORMANCE_MODE=THROUGHPUT \
+VLLM_OPENVINO_CPU_THREADS_NUM=8 \
+VLLM_OPENVINO_CPU_BIND_THREAD=CORE \
+VLLM_OPENVINO_NUM_STREAMS=2 \
+TORCH_COMPILE_DISABLE=1 \
+python -m vllm.entrypoints.openai.api_server --model <model_id>
 ```
 
 ### Memory-Mapped Model Loading
@@ -123,4 +152,3 @@ The following vLLM features are compatible with the OpenVINO backend:
 - LoRA serving is not supported.
 - Single socket only; tensor/pipeline parallelism is not supported.
 - vLLM V1 engine only (vLLM 0.19.1).
-
