@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
-    VLLM_OPENVINO_KV_CACHE_PRECISION: Optional[str] = None
+    VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection

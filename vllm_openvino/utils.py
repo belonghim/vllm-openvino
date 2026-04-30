@@ -3,7 +3,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def determine_num_available_blocks(current_platform, cache_config, cache_block_size, profile_run_func) -> tuple[int, int]:
+def determine_num_available_blocks(current_platform, cache_config, cache_block_size: int, profile_run_func) -> tuple[int, int]:
     """Determine the number of blocks available for the KV cache.
 
     This determines how many KV blocks can fit into the configured
@@ -37,7 +37,7 @@ def determine_num_available_blocks(current_platform, cache_config, cache_block_s
 
     return num_device_blocks, num_swap_blocks
 
-def get_max_allocatable_memory_gpu(ov_core, ov_device, key_cache_config, value_cache_config):
+def get_max_allocatable_memory_gpu(ov_core, ov_device: str, key_cache_config: list, value_cache_config: list) -> int:
     import openvino.properties.intel_gpu as intel_gpu
     if not hasattr(intel_gpu, "device_max_alloc_mem_size"):
         import sys

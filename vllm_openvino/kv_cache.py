@@ -7,7 +7,12 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-str_to_ov_type = {
+try:
+    import openvino as ov
+except ImportError:
+    ov = None  # type: ignore[assignment]
+
+str_to_ov_type: dict[str, Any] = {
     "u8": ov.Type.u8,
     "i8": ov.Type.i8,
     "fp16": ov.Type.f16,
@@ -16,7 +21,7 @@ str_to_ov_type = {
     "f32": ov.Type.f32,
     "fp32": ov.Type.f32,
     "dynamic": ov.Type.dynamic,
-}
+} if ov is not None else {}
 
 class OpenVINOCacheEngine:
     """Manages the KV cache for OpenVINO backend, implementing the V1 KVCache interface.
@@ -196,7 +201,7 @@ class OpenVINOCacheEngine:
                                                     src_to_dst)
 
     def copy(self, src_to_dsts: list[tuple[int, int]]) -> None:
-        if (len(src_to_dsts) > 0):
+        if len(src_to_dsts) > 0:
             OpenVINOAttentionBackend.copy_blocks(self.kv_cache, src_to_dsts)
 
     @staticmethod

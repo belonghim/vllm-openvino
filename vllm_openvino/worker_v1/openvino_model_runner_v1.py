@@ -27,7 +27,7 @@ class OpenVINOModelRunnerV1:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        ov_core: ov.Core = None,
+        ov_core: ov.Core | None = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

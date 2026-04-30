@@ -90,7 +90,7 @@ class OpenVinoPlatform(Platform):
             "f32": "f32", "fp32": "f32",
         }
         precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
-        cache_dtype = _kv_precision_map.get(precision_key)
+        cache_dtype = _kv_precision_map.get(precision_key or "")
         if cache_dtype is not None:
             logger.info(
                 "KV cache type is overridden to %s via "
