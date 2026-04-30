@@ -7,7 +7,7 @@
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO를 LLM 추론 백엔드로 추가합니다.
 
 - **vLLM 버전**: 0.19.1 (V1 엔진 전용, V0 엔진 완전 제거됨)
-- **OpenVINO 버전**: >= 2026.0.0
+- **OpenVINO 버전**: >= 2026.1.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
 
@@ -48,6 +48,7 @@ vllm_openvino/
 └── worker_v1/
     ├── openvino_worker_v1.py            # OpenVINOWorkerV1 — 워커 (KV 캐시 할당, 프로파일링)
     └── openvino_model_runner_v1.py      # ModelRunner — 입력 준비 + 추론 실행
+scripts/benchmark.sh                     # 성능 벤치마크 스크립트
 ```
 
 ## 핵심 의존 관계
@@ -99,7 +100,7 @@ vllm_openvino/
 | `worker_v1/openvino_worker_v1.py` | `vllm.platforms → current_platform` | 🟡 중간 |
 | `worker_v1/openvino_worker_v1.py` | `vllm.sampling_params → SamplingParams` | 🟡 중간 |
 | `worker_v1/openvino_worker_v1.py` | `vllm.v1.worker.utils → bind_kv_cache` | 🔴 높음 |
-| `worker_v1/openvino_worker_v1.py` | `vllm.v1.kv_cache_interface → KVCacheSpec, KVCacheConfig, FullAttentionSpec` | 🔴 높음 |
+| `worker_v1/openvino_worker_v1.py` | `vllm.v1.kv_cache_interface → MambaSpec` | 🔴 높음 |
 | `worker_v1/openvino_worker_v1.py` | `vllm.v1.outputs → ModelRunnerOutput` | 🔴 높음 |
 | `worker_v1/openvino_worker_v1.py` | `vllm.v1.worker.worker_base → WorkerBase` | 🔴 높음 |
 | `worker_v1/openvino_worker_v1.py` | `vllm.v1.core.sched.output → SchedulerOutput, NewRequestData, CachedRequestData` | 🔴 높음 |
@@ -120,6 +121,9 @@ VLLM_OPENVINO_DEVICE=CPU TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_KVCACHE_SPACE=8 \
 # 실행 (GPU)
 VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
   python -m vllm.entrypoints.openai.api_server --model <model_id>
+
+# 성능 벤치마크
+./scripts/benchmark.sh <model_path> [num_requests]
 ```
 
 ## 소스 마운트 테스트 (podman)
@@ -299,7 +303,7 @@ from openvino._offline_transformations import paged_attention_transformation
 
 ---
 
-## OpenVINO 2026.0.0 호환성 변경 이력
+## OpenVINO 2026.x 호환성 변경 이력
 
 OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응 내역 (2026-03-09 완료).
 
@@ -309,6 +313,9 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 | `ov.Type.undefined` 삭제 | `model_executor/model_loader/openvino.py` | 해당 코드가 dead code(`_modify_cache_parameters()`)임을 확인 후 함수 전체 제거 (커밋 `49f9587`) |
 | `paged_attention_transformation` (`_offline_transformations`) | `model_executor/model_loader/openvino.py` | 변경 없음 — private API 유지됨, 정상 동작 |
 | `compile_model` 시 KV 캐시 처리 | — | 2026.0에서 플러그인이 자동 처리 → `_modify_cache_parameters()` 불필요 확인 |
+| `enable_mmap` 설정 추가 | `worker_v1/openvino_worker_v1.py` | OpenVINO 2026.0+ 메모리 매핑 활성화를 위해 `ov.Core()`에 `enable_mmap: True` 설정 (커밋 `bffd8cc`) |
+| CPU compile properties 추가 (AVX2 튜닝) | `worker_v1/openvino_worker_v1.py` | CPU 디바이스용 AFFINITY, BIND_THREAD, NUM_STREAMS, THREADS_NUM compile properties 추가 (커밋 `e80fea7`) |
+| SSM/Mamba 지원 추가 | `model_executor/model_loader/openvino.py`, `worker_v1/openvino_worker_v1.py` | Hybrid model detection 및 selective PagedAttention transform 도입. `MambaSpec` import 및 SSM/conv cache 처리 추가 (커밋 `001a294`, `356b009`, `2701318`) |
 
 > 향후 OpenVINO 버전 업그레이드 시 위 패턴을 참고할 것. 특히 `ov.runtime.*` 같은 하위 모듈 API는 삭제될 가능성이 있음.
 
@@ -323,7 +330,12 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 5. **KV 캐시 블록 크기** — CPU: 32, GPU: 16 (자동 오버라이드)
 6. **KServe modelcar 호환성** — modelcar 방식으로 배포 시 `/mnt/models`가 symlink로 제공됨. 로컬 pre-exported IR은 `ov_core.read_model()` 직접 로딩으로 처리. 최적화: 로컬 IR만 지원 (2026-04-21).
 7. **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 `ov = None`으로 설정하고 warning만 출력. 실제 사용 시점인 `check_and_update_config()`에서 `ImportError`를 raise. **import 시점에서 raise하지 않는 이유**: vLLM 플러그인 디스커버리 메커니즘이 모든 플러그인을 import한 뒤 활성 플러그인을 선택하므로, import 시점 raise는 OpenVINO 플러그인이 아닌 다른 플러그인 사용 시에도 크래시를 유발함.
-8. **Gemma 4 지원** — vLLM 0.19.1에서 Gemma 4 아키텍처(MoE, multimodal, reasoning, tool-use) 완전 지원. OpenVINO 플러그인은 vision embeddings 모델(`openvino_vision_embeddings_model.xml`)을 로드하여 multimodal 추론 가능.
+8. **VLLM_OPENVINO_PERFORMANCE_MODE** — 성능 모드 설정 (`LATENCY`/`THROUGHPUT`, 기본값: `LATENCY`). CPU 환경에서 TTFT(Time-To-First-Token) 개선에 유용.
+9. **CPU-specific compile properties (AVX2 튜닝)** — CPU 디바이스 사용 시 `AFFINITY`, `BIND_THREAD`, `NUM_STREAMS`, `THREADS_NUM` compile properties를 적용. `worker_v1/openvino_worker_v1.py`의 `_get_cpu_compile_properties()`에서 처리.
+10. **Memory-mapped model loading (`enable_mmap`)** — `worker_v1/openvino_worker_v1.py`에서 `ov.Core()` 생성 후 `ov_props.enable_mmap: True` 설정. OpenVINO 2026.0+부터 모델 가중치를 메모리 매핑하여 RAM 사용량 감소.
+11. **SSM (State Space Model) / MambaSpec 지원** — hybrid model(Attention + SSM) 지원. `model_executor/model_loader/openvino.py`의 `detect_model_type()`으로 모델 타입 탐지, `apply_selective_paged_attention_transformation()`으로 attention-only 모델에만 PagedAttention 변환 적용. `worker_v1/openvino_worker_v1.py`에서 `MambaSpec` import 및 SSM/conv 상태 캐시 관리.
+12. **KV 캐시 `.fill(0)` 제거** — `kv_cache.py`의 `_allocate_kv_cache()`에서 신규 블록 할당 시 `.fill(0)` 제거. OpenVINO가 내부적으로 초기화를 처리하며, 명시적 zero-fill은 대형 KV 캐시에서 불필요한 OOM을 유발했음 (커밋 `e106f19`).
+13. **입력 버퍼 pre-allocation 및 `_infer()` wrapper 제거** — `worker_v1/openvino_model_runner_v1.py`에서 매 배치마다 리스트/텐서를 새로 생성하는 대신 고정 스키마의 NumPy 배열을 pre-allocate하여 재사용. `_infer()` wrapper 함수를 제거하고 직접 `ov_request.infer()`를 호출하여 호출 오버헤드 감소 (커밋 `86e4734`, `bffd8cc`, `e86910d`).
 
 ## vLLM 버전 업그레이드 체크리스트
 
