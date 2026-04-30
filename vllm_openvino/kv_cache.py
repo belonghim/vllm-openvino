@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
+from typing import Any
+
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
