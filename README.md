@@ -79,6 +79,9 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = OpenVINO auto) | `0` |
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | CPU only. Thread affinity: `CORE`, `NUMA`, `NONE` | unset |
 | `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer | `AUTO` |
+| `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true` or `false` | `auto` |
+| `VLLM_OPENVINO_INFERENCE_PRECISION` | CPU only. Force inference precision: `f32`, `f16`, `bf16` | `auto` |
+| `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true` or `false` | `auto` |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
 ## Performance Tuning
@@ -113,15 +116,19 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | int | `0` (auto), `1..N` | Caps OpenVINO CPU inference threads |
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | str | `CORE`, `NUMA`, `NONE` | Controls CPU thread affinity policy |
 | `VLLM_OPENVINO_NUM_STREAMS` | str/int | `AUTO`, `1..N` | Controls number of parallel CPU inference streams |
+| `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | bool | `true`, `false`, `auto` | Disabling prevents HT oversubscription on 2-socket systems |
+| `VLLM_OPENVINO_INFERENCE_PRECISION` | str | `f32`, `f16`, `bf16`, `auto` | Forces specific precision for matmul operations |
+| `VLLM_OPENVINO_ENABLE_CPU_PINNING` | bool | `true`, `false`, `auto` | Controls thread-to-core pinning |
 
-Example (throughput-oriented on AVX2):
+Example (latency-optimized for AVX2, 2-socket Xeon):
 
 ```bash
 VLLM_OPENVINO_DEVICE=CPU \
-VLLM_OPENVINO_PERFORMANCE_MODE=THROUGHPUT \
-VLLM_OPENVINO_CPU_THREADS_NUM=8 \
+VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY \
+VLLM_OPENVINO_CPU_THREADS_NUM=24 \
 VLLM_OPENVINO_CPU_BIND_THREAD=CORE \
-VLLM_OPENVINO_NUM_STREAMS=2 \
+VLLM_OPENVINO_NUM_STREAMS=1 \
+VLLM_OPENVINO_ENABLE_HYPER_THREADING=false \
 TORCH_COMPILE_DISABLE=1 \
 python -m vllm.entrypoints.openai.api_server --model <model_id>
 ```

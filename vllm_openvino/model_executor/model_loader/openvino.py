@@ -242,6 +242,18 @@ class OpenVINOCausalLM(nn.Module):
                 # Keep OpenVINO stream heuristic (default behavior).
                 pass
 
+            enable_ht = envs.VLLM_OPENVINO_ENABLE_HYPER_THREADING
+            if enable_ht is not None:
+                cpu_hint[hints.enable_hyper_threading()] = enable_ht
+
+            inference_prec = envs.VLLM_OPENVINO_INFERENCE_PRECISION
+            if inference_prec is not None:
+                cpu_hint[hints.inference_precision] = inference_prec
+
+            enable_pinning = envs.VLLM_OPENVINO_ENABLE_CPU_PINNING
+            if enable_pinning is not None:
+                cpu_hint[hints.enable_cpu_pinning()] = enable_pinning
+
             perf_hint = {**perf_hint, **cpu_hint}
 
         ov_compiled = ov_core.compile_model(ov_model, ov_device, perf_hint)

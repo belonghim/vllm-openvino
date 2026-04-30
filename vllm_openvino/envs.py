@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
     VLLM_OPENVINO_CPU_BIND_THREAD: str | None = None
     VLLM_OPENVINO_NUM_STREAMS: str | int = "AUTO"
+    VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
+    VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
+    VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection
@@ -49,6 +52,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OPENVINO_NUM_STREAMS":
     lambda: (lambda v: int(v) if v.isdigit() else v.upper())(
         os.getenv("VLLM_OPENVINO_NUM_STREAMS", "AUTO")),
+
+    # CPU-only: enable/disable hyperthreading. When disabled, uses 1 thread
+    # per physical core instead of 2 (useful on oversubscription-prone systems).
+    "VLLM_OPENVINO_ENABLE_HYPER_THREADING":
+    lambda: None if os.getenv("VLLM_OPENVINO_ENABLE_HYPER_THREADING", "").lower() in ("", "auto") else
+            os.getenv("VLLM_OPENVINO_ENABLE_HYPER_THREADING", "true").lower() == "true",
+
+    # CPU-only: inference precision hint (f32, f16, bf16). Forces specific
+    # precision for matmul operations. On CPUs without int8 acceleration, this
+    # can avoid expensive int8->fp dequantization overhead.
+    "VLLM_OPENVINO_INFERENCE_PRECISION":
+    lambda: os.getenv("VLLM_OPENVINO_INFERENCE_PRECISION", None),
+
+    # CPU-only: enable/disable CPU core pinning. When enabled, threads are
+    # pinned to specific CPU cores to avoid migration penalties.
+    "VLLM_OPENVINO_ENABLE_CPU_PINNING":
+    lambda: None if os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower() in ("", "auto") else
+            os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "true").lower() == "true",
 }
 
 # end-env-vars-definition
