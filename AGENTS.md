@@ -349,6 +349,8 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 15. **Stateful model 지원 (HYBRID_MAMBA 등)** — `apply_selective_paged_attention_transformation()`이 HYBRID_MAMBA 모델에 대해 PA 변환을 스킵하도록 수정. 이 경우 모델은 남은 ReadValue/Assign stateful ops를 사용하여 나이브하게 추론됨. `StatefulInputBuilder`가 이를 지원하기 위해 컴파일된 모델의 입력 shape을 자동으로 파악하고, `np.tile()`로 단일 요청을 배치 크기만큼 복제하여 OpenVINO 모델에 공급.
 16. **Gather-before-matmul 변환 조걶 적용** — `apply_gather_before_matmul_transformation()`이 PA-transformed 모델에만 적용되도록 변경. 해당 변환은 `sampled_tokens_indices` 입력 파라미터를 추가하는데, stateful 모델에 이를 적용하면 입력 누락 시 `seq_len=0` 출력이 발생하여 서빙 실패.
 17. **Multi-request batching for stateful models** — stateful 모델은 컴파일 시 고정 batch_size(예: 4)를 가지지만 실제 요청 수는 더 적을 수 있음. `forward()`에 `num_requests` 파라미터를 추가하여 OpenVINO 출력 [batch, vocab]를 실제 요청 수만큼 슬라이싱 [n_reqs, vocab]하여 반환. 이를 통해 2개 이상의 동시 요청 처리 가능.
+18. **bf16 → float32 변환** — `_as_numpy_no_copy()`에서 torch bfloat16 tensor를 numpy로 변환할 때 float32로 캐스팅. OpenVINO는 bf16 numpy array를 지원하지 않음 (커밋 `39faa5d`).
+19. **MultiModalKwargsItem 지원 (향후 vision)** — vLLM 0.19.1에서 `mm_feature.data`가 `MultiModalKwargsItem` (UserDict)으로 변경됨. `mm_item["pixel_values"].data`로 실제 tensor를 추출하도록 수정. 단, **full vision pipeline은 아직 미지원** — Qwen3.5의 vision 모델이 multi-step pipeline (encoder → merger → pos)를 사용하여 단순 `pixel_values` 전달만으로는 부족. Text-only serving은 완전히 지원 (커밋 `39faa5d`).
 
 ## vLLM 버전 업그레이드 체크리스트
 
