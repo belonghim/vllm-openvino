@@ -2,6 +2,7 @@
 
 # ruff: noqa: SIM117
 from pathlib import Path
+from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
@@ -49,14 +50,29 @@ def has_op_with_type(function: ov.Model, type_name: str):
 
 ATTENTION_ONLY = "attention_only"
 HYBRID_MAMBA = "hybrid_mamba"
+HYBRID_QWEN3_5 = "hybrid_qwen3_5"
 
 
 def detect_model_type(ov_model: ov.Model) -> str:
+    has_readvalue = False
+    has_ssm_conv = False
+    has_beam_idx = False
     for op in ov_model.get_ops():
-        if op.get_type_name() == "ReadValue":
+        type_name = op.get_type_name()
+        if type_name == "ReadValue":
+            has_readvalue = True
             var_id = op.get_variable_id()
             if var_id and ("ssm" in var_id or "conv" in var_id):
-                return HYBRID_MAMBA
+                has_ssm_conv = True
+        elif type_name == "Parameter":
+            for tensor_name in op.output(0).get_tensor().get_names():
+                if "beam_idx" in tensor_name:
+                    has_beam_idx = True
+                    break
+    if has_ssm_conv:
+        return HYBRID_MAMBA
+    if has_beam_idx and has_readvalue:
+        return HYBRID_QWEN3_5
     return ATTENTION_ONLY
 
 
@@ -159,6 +175,41 @@ def apply_gather_before_matmul_transformation(model: ov.Model):
         model.add_parameters([indices])
 
 
+class OpenVINOInputBuilder(ABC):
+    """Abstract base class for building OpenVINO model inputs.
+
+    Subclasses implement ``build_inputs()`` to prepare the input
+    list or dict consumed by an OpenVINO ``InferRequest``.
+    """
+
+    @abstractmethod
+    def build_inputs(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+        ssm_caches: list[ov.Tensor] | None = None,
+        conv_caches: list[ov.Tensor] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_position_ids: torch.Tensor | None = None,
+    ) -> list | dict:
+        """Build and return inputs for the OpenVINO inference request.
+
+        Args:
+            input_ids: Token IDs tensor.
+            positions: Position IDs tensor.
+            kv_caches: List of KV cache tensor pairs.
+            ssm_caches: Optional SSM state tensors (hybrid models).
+            conv_caches: Optional convolution cache tensors (hybrid models).
+            pixel_values: Optional pixel values for vision embeddings.
+            image_position_ids: Optional image position indices.
+
+        Returns:
+            A list or dict suitable for ``ov_request.infer()``.
+        """
+        ...
+
+
 class OpenVINOCausalLM(nn.Module):
 
     def __init__(
@@ -200,9 +251,9 @@ class OpenVINOCausalLM(nn.Module):
         self.model_type = detect_model_type(ov_model)
         self.ssm_state_shapes = get_ssm_state_shapes(ov_model)
 
-        # apply Paged Attention transformation (selective for hybrid models)
         apply_selective_paged_attention_transformation(ov_model, self.model_type)
-        apply_gather_before_matmul_transformation(ov_model)
+        if has_op_with_type(ov_model, "PagedAttentionExtension"):
+            apply_gather_before_matmul_transformation(ov_model)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
         ov_model.validate_nodes_and_infer_types()
 
@@ -261,6 +312,16 @@ class OpenVINOCausalLM(nn.Module):
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
         self._use_grouped_block_table_inputs: bool | None = None
 
+        # Detect if model has external KV cache inputs (PA-transformed)
+        self._has_kv_cache_inputs = any(
+            inp.get_any_name().startswith(("key_cache.", "value_cache."))
+            for inp in ov_compiled.inputs
+        )
+        logger.info(
+            "OpenVINO model loaded: type=%s, has_kv_cache=%s",
+            self.model_type, self._has_kv_cache_inputs
+        )
+
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
         if self.use_text_embeddings_model:
             text_emb_model = ov_core.read_model(
@@ -316,6 +377,18 @@ class OpenVINOCausalLM(nn.Module):
 
         return ((attn_metadata.block_indices, attn_metadata.block_indices_begins),)
 
+    def _get_input_builder(self) -> OpenVINOInputBuilder:
+        """Factory method that returns the appropriate input builder.
+
+        Routes based on compiled model capabilities:
+        - PA-transformed models (have KV cache inputs) -> PAInputBuilder
+        - Stateful models (no KV cache inputs) -> StatefulInputBuilder
+        """
+        if self._has_kv_cache_inputs:
+            return PAInputBuilder(self)
+        else:
+            return StatefulInputBuilder(self)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -326,8 +399,80 @@ class OpenVINOCausalLM(nn.Module):
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        state_tensors = self._get_flat_kv_caches_template(kv_caches)
-        if self.model_type == HYBRID_MAMBA:
+        builder = self._get_input_builder()
+        inputs = builder.build_inputs(
+            input_ids=input_ids,
+            positions=positions,
+            kv_caches=kv_caches,
+            ssm_caches=ssm_caches,
+            conv_caches=conv_caches,
+            pixel_values=pixel_values,
+            image_position_ids=image_position_ids,
+        )
+        self.ov_request.infer(inputs)
+        logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
+
+        # For stateful models, logits shape is [batch, seq_len, vocab].
+        # vLLM expects [batch, vocab] (last token logits only).
+        if logits.dim() == 3:
+            if logits.shape[1] > 0:
+                # Only return logits for the first item in batch
+                # (vLLM processes one request at a time for now)
+                logits = logits[0:1, -1, :]  # [1, vocab]
+            else:
+                logger.warning("logits seq_len is 0, returning as-is")
+        elif logits.dim() == 2:
+            if logits.shape[0] > 0:
+                logits = logits[-1:, :]  # [1, vocab]
+            else:
+                logger.warning("logits batch is 0, returning as-is")
+        
+        return logits
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        # For stateful models, forward() already returns logits.
+        # Skip logits_processor if hidden_states is already logits.
+        if hidden_states.dim() == 2 and hidden_states.shape[-1] == self.logits_processor.vocab_size:
+            return hidden_states
+        logits = self.logits_processor(None, hidden_states, sampling_metadata)
+        return logits
+
+
+    @torch._dynamo.disable
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput | None:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+
+class PAInputBuilder(OpenVINOInputBuilder):
+    """Builds list-based inputs for PA-transformed OpenVINO models.
+
+    This builder encapsulates the exact input preparation logic previously
+    inline in :meth:`OpenVINOCausalLM.forward` for PA-transformed models.
+    """
+
+    def __init__(self, model: "OpenVINOCausalLM") -> None:
+        self.model = model
+
+    def build_inputs(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+        ssm_caches: list[ov.Tensor] | None = None,
+        conv_caches: list[ov.Tensor] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_position_ids: torch.Tensor | None = None,
+    ) -> list:
+        """Build list-based inputs for a PA-transformed model inference request."""
+        model = self.model
+        state_tensors = model._get_flat_kv_caches_template(kv_caches)
+        if model.model_type == HYBRID_MAMBA:
             if ssm_caches:
                 state_tensors.extend(ssm_caches)
             if conv_caches:
@@ -335,23 +480,23 @@ class OpenVINOCausalLM(nn.Module):
 
         attn_metadata = get_forward_context().attn_metadata
         block_table_inputs = []
-        for block_indices, block_indices_begins in self._iter_block_table_inputs(attn_metadata):
+        for block_indices, block_indices_begins in model._iter_block_table_inputs(attn_metadata):
             block_table_inputs.extend((block_indices, block_indices_begins))
 
-        if self.use_text_embeddings_model:
+        if model.use_text_embeddings_model:
             # Gemma 3 style: language model takes inputs_embeds, not input_ids.
             # Run text embeddings model first: input_ids (1D) → inputs_embeds.
-            input_ids_np = self._as_numpy_no_copy(input_ids).reshape(1, -1)
-            self.text_emb_request.infer([input_ids_np])
-            inputs_embeds = self.text_emb_request.get_output_tensor(0)
+            input_ids_np = model._as_numpy_no_copy(input_ids).reshape(1, -1)
+            model.text_emb_request.infer([input_ids_np])
+            inputs_embeds = model.text_emb_request.get_output_tensor(0)
             # inputs_embeds shape: [1, seq_len, hidden] → flatten to [seq_len, hidden]
             inputs_embeds_2d = inputs_embeds.data.reshape(-1, inputs_embeds.shape[-1])
 
-            if self.use_vision_embeddings_model and pixel_values is not None:
-                pixel_values_np = self._as_numpy_no_copy(pixel_values)
-                image_pos_np = self._as_numpy_no_copy(image_position_ids)
-                self.vision_emb_request.infer([pixel_values_np, image_pos_np])
-                vision_embeds = self.vision_emb_request.get_output_tensor(0)
+            if model.use_vision_embeddings_model and pixel_values is not None:
+                pixel_values_np = model._as_numpy_no_copy(pixel_values)
+                image_pos_np = model._as_numpy_no_copy(image_position_ids)
+                model.vision_emb_request.infer([pixel_values_np, image_pos_np])
+                vision_embeds = model.vision_emb_request.get_output_tensor(0)
                 vision_embeds_2d = vision_embeds.data.reshape(
                     -1, vision_embeds.shape[-1])
 
@@ -385,29 +530,146 @@ class OpenVINOCausalLM(nn.Module):
             ]
 
         inputs.append(attn_metadata.sampled_token_indices)
-        self.ov_request.infer(inputs)
-
-        logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
-
-        # NOTE: view reshapes logits from [seq_len, vocab] to [-1, vocab].
-        # OpenVINO PA currently outputs with a seq_len dimension; remove view if/when that changes.
-        return logits.view(-1, logits.shape[-1])
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-
-        logits = self.logits_processor(None, hidden_states, sampling_metadata)
-        return logits
+        return inputs
 
 
-    @torch._dynamo.disable
-    def sample(
+class StatefulInputBuilder(OpenVINOInputBuilder):
+    """Builds dict-based inputs for stateful OpenVINO models.
+
+    Stateful models use OpenVINO's internal state management (ReadValue/Assign
+    ops) rather than explicit KV cache tensors passed as inputs.
+    """
+
+    def __init__(self, model: "OpenVINOCausalLM") -> None:
+        self.model = model
+        compiled_model = model.ov_request.get_compiled_model()
+        self.input_shapes: dict[str, list] = {}
+        self.batch_size = 1
+        for inp in compiled_model.inputs:
+            name = inp.get_any_name()
+            shape = []
+            for dim in inp.get_partial_shape():
+                if dim.is_dynamic:
+                    shape.append(None)
+                else:
+                    shape.append(dim.get_length())
+            self.input_shapes[name] = shape
+            # Use the fixed batch dimension if available
+            if len(shape) > 0 and shape[0] is not None and shape[0] > self.batch_size:
+                self.batch_size = shape[0]
+        logger.info("StatefulInputBuilder shape registry: %s, batch_size: %d",
+                    self.input_shapes, self.batch_size)
+
+    def build_inputs(
         self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput | None:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+        ssm_caches: list[ov.Tensor] | None = None,
+        conv_caches: list[ov.Tensor] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_position_ids: torch.Tensor | None = None,
+    ) -> dict:
+        """Build dict-based inputs for a stateful model inference request."""
+        model = self.model
+        inputs_dict: dict[str, np.ndarray] = {}
+
+        if model.use_text_embeddings_model:
+            input_ids_np = model._as_numpy_no_copy(input_ids).reshape(1, -1)
+            model.text_emb_request.infer([input_ids_np])
+            inputs_embeds = model.text_emb_request.get_output_tensor(0)
+            # Text embeddings output: [1, seq_len, hidden] -> [seq_len, hidden]
+            inputs_embeds_2d = inputs_embeds.data.reshape(
+                -1, inputs_embeds.shape[-1])
+
+            if model.use_vision_embeddings_model and pixel_values is not None:
+                pixel_values_np = model._as_numpy_no_copy(pixel_values)
+                image_pos_np = model._as_numpy_no_copy(image_position_ids)
+                model.vision_emb_request.infer(
+                    [pixel_values_np, image_pos_np])
+                vision_embeds = model.vision_emb_request.get_output_tensor(0)
+                vision_embeds_2d = vision_embeds.data.reshape(
+                    -1, vision_embeds.shape[-1])
+
+                for i in range(image_pos_np.shape[1]):
+                    start, end = image_pos_np[0, i]
+                    num_patches = end - start
+                    patch_offset = i * num_patches
+                    inputs_embeds_2d[start:end] = vision_embeds_2d[
+                        patch_offset:patch_offset + num_patches]
+
+            seq_len = inputs_embeds_2d.shape[0]
+            hidden = inputs_embeds_2d.shape[1]
+
+            for name, shape in self.input_shapes.items():
+                if name == "inputs_embeds":
+                    inputs_dict[name] = np.tile(
+                        inputs_embeds_2d[np.newaxis, :, :],
+                        (self.batch_size, 1, 1))
+                elif name == "position_ids":
+                    if len(shape) == 3:
+                        pos = np.arange(seq_len, dtype=np.int64)
+                        inputs_dict[name] = np.tile(
+                            pos, (self.batch_size, 1)).reshape(
+                                self.batch_size, 1, seq_len)
+                    elif len(shape) == 2:
+                        pos = model._as_numpy_no_copy(positions)
+                        inputs_dict[name] = pos.reshape(self.batch_size, -1)
+                    else:
+                        inputs_dict[name] = model._as_numpy_no_copy(
+                            positions).reshape(-1)
+                elif name == "attention_mask":
+                    inputs_dict[name] = np.ones(
+                        (self.batch_size, seq_len), dtype=np.int64)
+                elif name == "beam_idx":
+                    inputs_dict[name] = np.arange(
+                        self.batch_size, dtype=np.int32)
+                else:
+                    logger.warning(
+                        "StatefulInputBuilder: unhandled input %s "
+                        "(shape %s), skipping", name, shape)
+        else:
+            input_ids_np = model._as_numpy_no_copy(input_ids)
+            if input_ids_np.ndim == 1:
+                seq_len = input_ids_np.shape[0]
+            else:
+                seq_len = input_ids_np.shape[1]
+
+            for name, shape in self.input_shapes.items():
+                if name == "input_ids":
+                    if len(shape) == 2:
+                        inputs_dict[name] = input_ids_np.reshape(
+                            self.batch_size, -1)
+                    else:
+                        inputs_dict[name] = input_ids_np.reshape(-1)
+                elif name == "inputs_embeds":
+                    hidden = shape[-1] if shape[-1] is not None else 2048
+                    inputs_dict[name] = np.zeros(
+                        (self.batch_size, seq_len, hidden), dtype=np.float32)
+                elif name == "position_ids":
+                    if len(shape) == 3:
+                        pos = np.arange(seq_len, dtype=np.int64)
+                        inputs_dict[name] = np.tile(
+                            pos, (self.batch_size, 1)).reshape(
+                                self.batch_size, 1, seq_len)
+                    elif len(shape) == 2:
+                        pos = model._as_numpy_no_copy(positions)
+                        inputs_dict[name] = pos.reshape(self.batch_size, -1)
+                    else:
+                        inputs_dict[name] = model._as_numpy_no_copy(
+                            positions).reshape(-1)
+                elif name == "attention_mask":
+                    inputs_dict[name] = np.ones(
+                        (self.batch_size, seq_len), dtype=np.int64)
+                elif name == "beam_idx":
+                    inputs_dict[name] = np.arange(
+                        self.batch_size, dtype=np.int32)
+                else:
+                    logger.warning(
+                        "StatefulInputBuilder: unhandled input %s "
+                        "(shape %s), skipping", name, shape)
+
+        return inputs_dict
 
 
 def get_model(

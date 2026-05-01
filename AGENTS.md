@@ -345,6 +345,9 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 11. **SSM (State Space Model) / MambaSpec 지원** — hybrid model(Attention + SSM) 지원. `model_executor/model_loader/openvino.py`의 `detect_model_type()`으로 모델 타입 탐지, `apply_selective_paged_attention_transformation()`으로 attention-only 모델에만 PagedAttention 변환 적용. `worker_v1/openvino_worker_v1.py`에서 `MambaSpec` import 및 SSM/conv 상태 캐시 관리.
 12. **KV 캐시 `.fill(0)` 제거** — `kv_cache.py`의 `_allocate_kv_cache()`에서 신규 블록 할당 시 `.fill(0)` 제거. OpenVINO가 내부적으로 초기화를 처리하며, 명시적 zero-fill은 대형 KV 캐시에서 불필요한 OOM을 유발했음 (커밋 `e106f19`).
 13. **입력 버퍼 pre-allocation 및 `_infer()` wrapper 제거** — `worker_v1/openvino_model_runner_v1.py`에서 매 배치마다 리스트/텐서를 새로 생성하는 대신 고정 스키마의 NumPy 배열을 pre-allocate하여 재사용. `_infer()` wrapper 함수를 제거하고 직접 `ov_request.infer()`를 호출하여 호출 오버헤드 감소 (커밋 `86e4734`, `bffd8cc`, `e86910d`).
+14. **InputBuilder Strategy Pattern** — `model_executor/model_loader/openvino.py`에 `OpenVINOInputBuilder` 추상 클래스와 두 구현체(`PAInputBuilder`, `StatefulInputBuilder`)를 도입. `_get_input_builder()`가 컴파일된 모델의 입력 목록에서 KV cache 관련 입력(key_cache.*, value_cache.*) 존재 여부로 자동 분기하여 적절한 빌더를 반환. PA-transformed 모델은 list 기반 입력(기존과 동일)을, stateful 모델(HYBRID_MAMBA 등)은 dict 기반 입력을 사용.
+15. **Stateful model 지원 (HYBRID_MAMBA 등)** — `apply_selective_paged_attention_transformation()`이 HYBRID_MAMBA 모델에 대해 PA 변환을 스킵하도록 수정. 이 경우 모델은 남은 ReadValue/Assign stateful ops를 사용하여 나이브하게 추론됨. `StatefulInputBuilder`가 이를 지원하기 위해 컴파일된 모델의 입력 shape을 자동으로 파악하고, `np.tile()`로 단일 요청을 배치 크기만큼 복제하여 OpenVINO 모델에 공급.
+16. **Gather-before-matmul 변환 조걶 적용** — `apply_gather_before_matmul_transformation()`이 PA-transformed 모델에만 적용되도록 변경. 해당 변환은 `sampled_tokens_indices` 입력 파라미터를 추가하는데, stateful 모델에 이를 적용하면 입력 누락 시 `seq_len=0` 출력이 발생하여 서빙 실패.
 
 ## vLLM 버전 업그레이드 체크리스트
 
