@@ -394,6 +394,7 @@ class OpenVINOModelRunnerV1:
             "kv_caches": self.kv_caches,
             "ssm_caches": self.ssm_caches,
             "conv_caches": self.conv_caches,
+            "num_requests": len(self.input_batch.req_ids),
             **multi_modal_kwargs,
         }
 

@@ -384,6 +384,7 @@ class OpenVINOCausalLM(nn.Module):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        num_requests: int | None = None,
     ) -> torch.Tensor:
         builder = self._get_input_builder()
         inputs = builder.build_inputs(
@@ -397,32 +398,25 @@ class OpenVINOCausalLM(nn.Module):
         )
         self.ov_request.infer(inputs)
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
-
-        # For stateful models, logits shape is [batch, seq_len, vocab].
-        # vLLM expects [batch, vocab] (last token logits only).
-        if logits.dim() == 3:
-            if logits.shape[1] > 0:
-                # Only return logits for the first item in batch
-                # (vLLM processes one request at a time for now)
-                logits = logits[0:1, -1, :]  # [1, vocab]
-            else:
-                logger.warning("logits seq_len is 0, returning as-is")
-        elif logits.dim() == 2:
-            if logits.shape[0] > 0:
-                logits = logits[-1:, :]  # [1, vocab]
-            else:
-                logger.warning("logits batch is 0, returning as-is")
-        
-        return logits
+        return self._extract_logits(logits, num_requests)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        # Stateful models return logits directly because the OpenVINO IR
-        # includes the final lm_head/matmul layer. PA-transformed models
-        # return hidden states and need the logits_processor.
         if not self._has_kv_cache_inputs:
             return hidden_states
         logits = self.logits_processor(None, hidden_states, sampling_metadata)
+        return logits
+
+    def _extract_logits(
+        self,
+        logits: torch.Tensor,
+        num_requests: int | None = None,
+    ) -> torch.Tensor:
+        if logits.dim() == 3:
+            last_token_logits = logits[:, -1, :]
+            if num_requests is not None and num_requests < last_token_logits.shape[0]:
+                return last_token_logits[:num_requests]
+            return last_token_logits
         return logits
 
 
