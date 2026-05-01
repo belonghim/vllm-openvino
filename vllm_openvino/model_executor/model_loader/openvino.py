@@ -339,7 +339,10 @@ class OpenVINOCausalLM(nn.Module):
         if isinstance(tensor_like, ov.Tensor):
             return tensor_like.data
         if isinstance(tensor_like, torch.Tensor):
-            return tensor_like.detach().cpu().numpy()
+            tensor = tensor_like.detach().cpu()
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.to(torch.float32)
+            return tensor.numpy()
         assert not isinstance(tensor_like, (ov.Tensor, torch.Tensor)), \
             f"_as_numpy_no_copy: unhandled type {type(tensor_like)}"
         return np.asarray(tensor_like)

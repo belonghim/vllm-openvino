@@ -284,19 +284,25 @@ class OpenVINOModelRunnerV1:
         mm_req_ids.sort(key=self.input_batch.req_id_to_index.__getitem__)
         for req_id in mm_req_ids:
             request = self.requests[req_id]
-            # vLLM v1: mm_features is a list of MultiModalFeatureSpec
             for mm_feature in request.mm_features:
-                # mm_feature.data should be the preprocessed image tensor
-                all_pixel_values.append(mm_feature.data)
-                # mm_feature.mm_position is typically the (start, end) token positions
-                all_image_position_ids.append(mm_feature.mm_position)
+                # mm_feature.data is MultiModalKwargsItem (dict-like) in vLLM 0.19.1
+                mm_item = mm_feature.data
+                if mm_item is not None:
+                    # Extract pixel_values tensor from MultiModalKwargsItem
+                    if "pixel_values" in mm_item:
+                        all_pixel_values.append(mm_item["pixel_values"].data)
+                    else:
+                        # Fallback: use first available tensor key
+                        for _key, elem in mm_item.items():
+                            if hasattr(elem.data, 'shape'):
+                                all_pixel_values.append(elem.data)
+                                break
+                # Convert PlaceholderRange to (start, end) tuple
+                pos = mm_feature.mm_position
+                all_image_position_ids.append(
+                    (pos.offset, pos.offset + pos.length))
 
         if all_pixel_values:
-            # For now, focus on single image per request as per implementation notes.
-            # Assuming mm_feature.data is already in correct shape [num_patches, hidden]
-            # or [batch, num_patches, hidden] depending on vLLM version.
-            # Based on model_loader/openvino.py: pixel_values_np = np.array(pixel_values.data)
-            # and image_pos_np = np.array(image_position_ids.data)
             pixel_values = torch.stack(all_pixel_values)
             if pixel_values.device != self.device:
                 pixel_values = pixel_values.to(self.device)
