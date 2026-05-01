@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import openvino as ov
 import torch
+from statistics import StatisticsError, mode
 
 from openvino._offline_transformations import paged_attention_transformation
 from torch import nn
@@ -416,9 +417,10 @@ class OpenVINOCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        # For stateful models, forward() already returns logits.
-        # Skip logits_processor if hidden_states is already logits.
-        if hidden_states.dim() == 2 and hidden_states.shape[-1] == self.logits_processor.vocab_size:
+        # Stateful models return logits directly because the OpenVINO IR
+        # includes the final lm_head/matmul layer. PA-transformed models
+        # return hidden states and need the logits_processor.
+        if not self._has_kv_cache_inputs:
             return hidden_states
         logits = self.logits_processor(None, hidden_states, sampling_metadata)
         return logits
@@ -529,7 +531,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         self.model = model
         compiled_model = model.ov_request.get_compiled_model()
         self.input_shapes: dict[str, list] = {}
-        self.batch_size = 1
+        first_fixed_dims: list[int] = []
         for inp in compiled_model.inputs:
             name = inp.get_any_name()
             shape = []
@@ -539,9 +541,16 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 else:
                     shape.append(dim.get_length())
             self.input_shapes[name] = shape
-            # Use the fixed batch dimension if available
-            if len(shape) > 0 and shape[0] is not None and shape[0] > self.batch_size:
-                self.batch_size = shape[0]
+            if len(shape) > 0 and shape[0] is not None:
+                first_fixed_dims.append(shape[0])
+        if first_fixed_dims:
+            from statistics import mode
+            try:
+                self.batch_size = mode(first_fixed_dims)
+            except StatisticsError:
+                self.batch_size = max(first_fixed_dims)
+        else:
+            self.batch_size = 1
         logger.info("StatefulInputBuilder shape registry: %s, batch_size: %d",
                     self.input_shapes, self.batch_size)
 
