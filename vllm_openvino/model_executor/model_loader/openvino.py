@@ -50,29 +50,14 @@ def has_op_with_type(function: ov.Model, type_name: str):
 
 ATTENTION_ONLY = "attention_only"
 HYBRID_MAMBA = "hybrid_mamba"
-HYBRID_QWEN3_5 = "hybrid_qwen3_5"
 
 
 def detect_model_type(ov_model: ov.Model) -> str:
-    has_readvalue = False
-    has_ssm_conv = False
-    has_beam_idx = False
     for op in ov_model.get_ops():
-        type_name = op.get_type_name()
-        if type_name == "ReadValue":
-            has_readvalue = True
+        if op.get_type_name() == "ReadValue":
             var_id = op.get_variable_id()
             if var_id and ("ssm" in var_id or "conv" in var_id):
-                has_ssm_conv = True
-        elif type_name == "Parameter":
-            for tensor_name in op.output(0).get_tensor().get_names():
-                if "beam_idx" in tensor_name:
-                    has_beam_idx = True
-                    break
-    if has_ssm_conv:
-        return HYBRID_MAMBA
-    if has_beam_idx and has_readvalue:
-        return HYBRID_QWEN3_5
+                return HYBRID_MAMBA
     return ATTENTION_ONLY
 
 
