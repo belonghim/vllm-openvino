@@ -330,6 +330,21 @@ OpenVINO 2026.0.0으로 업그레이드 시 발생한 breaking change 및 대응
 
 ---
 
+## Refactoring History
+
+### 2026-05-02: Safe Refactoring (Magic Numbers & Utilities)
+
+**Completed:**
+1. Extracted `format_memory_size()` from `worker_v1/openvino_worker_v1.py:profile_run()` to `utils.py` as module-level function (Task 1)
+2. Added named constants in `platform.py`: `GIB_BYTES`, `CPU_BLOCK_SIZE`, `GPU_BLOCK_SIZE`, `DEFAULT_CPU_KV_CACHE_GB` (Task 2)
+3. Added `USED_MEMORY_THRESHOLD` constant in `worker_v1/openvino_worker_v1.py` (Task 3)
+
+**Rationale:** Improve code readability by eliminating magic numbers. All changes follow upstream patterns and maintain minimalism.
+
+**Skipped (from original plan):**
+- Step C (document duplicate type maps): AGENTS.md already explains these are intentionally separate (different type systems: OpenVINO vs PyTorch)
+- Step D (break down long functions): Would break upstream pattern compatibility, against project's "upstream 패턴 추종" principle
+
 ## 알려진 기술적 특이사항
 
 1. **`TORCH_COMPILE_DISABLE=1` 필수** — vLLM 0.19.1에서 torch.compile/Inductor가 OpenVINO와 비호환. 이 env var 없으면 크래시

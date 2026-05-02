@@ -46,3 +46,15 @@ def get_max_allocatable_memory_gpu(ov_core, ov_device: str, key_cache_config: li
     max_tensor_alloc_size_gpu = ov_core.get_property(ov_device, intel_gpu.device_max_alloc_mem_size)
     assert len(key_cache_config) == len(value_cache_config), "Key cache config length should be equal to value cache config length."
     return len(key_cache_config) * 2 * max_tensor_alloc_size_gpu
+
+
+def format_memory_size(size: float) -> str:
+    """Convert byte size to human-readable string (B, KB, MB, GB)."""
+    units = ["B", "KB", "MB", "GB"]
+    unit_index = 0
+
+    while size > 1024 and unit_index < len(units) - 1:
+        size /= 1024
+        unit_index += 1
+
+    return f"{size:.2f} {units[unit_index]}"

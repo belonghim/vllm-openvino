@@ -27,7 +27,7 @@ from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
 from vllm_openvino.kv_cache import OpenVINOCacheEngine
-from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu
+from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu, format_memory_size
 from vllm_openvino.model_executor.model_loader.openvino import HYBRID_MAMBA
 
 logger = init_logger(__name__)
@@ -41,6 +41,8 @@ str_to_torch_type = {
     "f32": torch.float32,
     "fp32": torch.float32
 }
+
+USED_MEMORY_THRESHOLD = 1.1
 
 
 class OpenVINOWorkerV1(WorkerBase):
@@ -451,21 +453,11 @@ class OpenVINOWorkerV1(WorkerBase):
         # there could be unaccounted extra memory reserved by kernels, kept
         # in memory pools, etc
         # therefore, add a threshold to account for this
-        used_memory_threshold = 1.1
+        used_memory_threshold = USED_MEMORY_THRESHOLD
         used_device_mem *= used_memory_threshold
 
         total_device_memory = \
             ov_core.get_property(ov_device, intel_gpu.device_total_mem_size)
-
-        def format_memory_size(size) -> str:
-            units = ["B", "KB", "MB", "GB"]
-            unit_index = 0
-
-            while size > 1024 and unit_index < len(units) - 1:
-                size /= 1024
-                unit_index += 1
-
-            return f"{size:.2f} {units[unit_index]}"
 
         total_device_memory_str = format_memory_size(total_device_memory)
         used_device_memory_str = format_memory_size(used_device_mem)

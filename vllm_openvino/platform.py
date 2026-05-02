@@ -14,6 +14,12 @@ else:
 
 logger = init_logger(__name__)
 
+# Constants for memory and block size configuration
+GIB_BYTES = 1024 ** 3
+CPU_BLOCK_SIZE = 32
+GPU_BLOCK_SIZE = 16
+DEFAULT_CPU_KV_CACHE_GB = 4
+
 try:
     import openvino as ov
 except ImportError as e:
@@ -60,7 +66,6 @@ class OpenVinoPlatform(Platform):
             raise ImportError(
                 "OpenVINO is required but not installed. "
                 "Install with: pip install openvino>=2026.1.0")
-        GiB_bytes = 1024 * 1024 * 1024
 
         parallel_config = vllm_config.parallel_config
         assert (parallel_config.world_size == 1
@@ -81,7 +86,7 @@ class OpenVinoPlatform(Platform):
         # check and update cache config
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = GPU_BLOCK_SIZE
 
         _kv_precision_map = {
             "u8": "u8", "i8": "i8",
@@ -104,28 +109,28 @@ class OpenVinoPlatform(Platform):
             cache_config.cache_dtype = "dynamic"
 
         if OpenVinoPlatform.is_openvino_cpu():
-            if cache_config.block_size != 32:
+            if cache_config.block_size != CPU_BLOCK_SIZE:
                 logger.info(
-                    f"OpenVINO CPU optimal block size is 32, overriding "
-                    f"{cache_config.block_size} to 32")
-                cache_config.block_size = 32
+                    f"OpenVINO CPU optimal block size is {CPU_BLOCK_SIZE}, overriding "
+                    f"{cache_config.block_size} to {CPU_BLOCK_SIZE}")
+                cache_config.block_size = CPU_BLOCK_SIZE
         else:
-            if cache_config.block_size != 16:
+            if cache_config.block_size != GPU_BLOCK_SIZE:
                 logger.info(
-                    f"OpenVINO GPU optimal block size is 16, overriding "
-                    f"{cache_config.block_size} to 16")
-                cache_config.block_size = 16
+                    f"OpenVINO GPU optimal block size is {GPU_BLOCK_SIZE}, overriding "
+                    f"{cache_config.block_size} to {GPU_BLOCK_SIZE}")
+                cache_config.block_size = GPU_BLOCK_SIZE
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
         if kv_cache_space >= 0:
             if kv_cache_space == 0 and OpenVinoPlatform.is_openvino_cpu():
-                cache_config.openvino_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
+                cache_config.openvino_kvcache_space_bytes = DEFAULT_CPU_KV_CACHE_GB * GIB_BYTES  # type: ignore
                 logger.warning(
                     "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
                     "for OpenVINO backend is not set, using 4 by default.")
             else:
                 cache_config.openvino_kvcache_space_bytes = (  # type: ignore
-                    kv_cache_space * GiB_bytes)
+                    kv_cache_space * GIB_BYTES)
                 if kv_cache_space == 0 and not OpenVinoPlatform.is_openvino_cpu():
                     logger.info(
                         "VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU device. "
