@@ -673,17 +673,12 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     if len(shape) == 3:
                         pos = model._as_numpy_no_copy(positions)
                         channels = shape[0] if shape[0] is not None else 1
-                        if pos.ndim == 1:
-                            if pos.shape[0] == batch_size and batch_size > 1:
-                                pos = pos.reshape(1, -1, 1)
-                                pos = np.tile(pos, (channels, 1, 1))
-                            else:
-                                pos = pos.reshape(1, 1, -1)
-                                pos = np.tile(pos, (channels, batch_size, 1))
-                        else:
-                            pos = pos.reshape(1, 1, -1)
-                            pos = np.tile(pos, (channels, batch_size, 1))
-                        inputs_dict[name] = pos
+                        pos_3d = np.zeros((channels, batch_size, pos.shape[-1] if pos.ndim > 0 else 1), dtype=pos.dtype)
+                        pos_text = pos.reshape(1, 1, -1)
+                        if pos_text.shape[1] < batch_size:
+                            pos_text = np.tile(pos_text, (1, batch_size, 1))
+                        pos_3d[0:1, :, :] = pos_text
+                        inputs_dict[name] = pos_3d
                     elif len(shape) == 2:
                         pos = model._as_numpy_no_copy(positions)
                         inputs_dict[name] = pos.reshape(batch_size, -1)
@@ -721,17 +716,12 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     if len(shape) == 3:
                         pos = model._as_numpy_no_copy(positions)
                         channels = shape[0] if shape[0] is not None else 1
-                        if pos.ndim == 1:
-                            if pos.shape[0] == batch_size and batch_size > 1:
-                                pos = pos.reshape(1, -1, 1)
-                                pos = np.tile(pos, (channels, 1, 1))
-                            else:
-                                pos = pos.reshape(1, 1, -1)
-                                pos = np.tile(pos, (channels, batch_size, 1))
-                        else:
-                            pos = pos.reshape(1, 1, -1)
-                            pos = np.tile(pos, (channels, batch_size, 1))
-                        inputs_dict[name] = pos
+                        pos_3d = np.zeros((channels, batch_size, pos.shape[-1] if pos.ndim > 0 else 1), dtype=pos.dtype)
+                        pos_text = pos.reshape(1, 1, -1)
+                        if pos_text.shape[1] < batch_size:
+                            pos_text = np.tile(pos_text, (1, batch_size, 1))
+                        pos_3d[0:1, :, :] = pos_text
+                        inputs_dict[name] = pos_3d
                     elif len(shape) == 2:
                         pos = model._as_numpy_no_copy(positions)
                         inputs_dict[name] = pos.reshape(batch_size, -1)
