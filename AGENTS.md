@@ -60,11 +60,19 @@ scripts/benchmark.sh                     # 성능 벤치마크 스크립트
 
 실제 개발 및 검증은 **빌드 없이 podman 소스 마운트**로 진행합니다. 로컬 `pip install`은 거의 사용되지 않습니다.
 
+### 로컬 검증 우선 원칙 (필수)
+
+- **에이전트는 사용자에게 "배포해주세요"를 요청하기 전, 반드시 로컬 podman에서 직접 검증해야 한다.**
+- 코드 수정 → `python3 -m py_compile` → podman 소스 마운트 → API 호출 테스트 → 정상 응답 확인 후에만 사용자에게 클러스터 배포를 요청한다.
+- podman 테스트 시 `--enable-auto-tool-choice --tool-call-parser=qwen3_coder` 등 실제 실행 인자를 그대로 사용한다.
+- 단일 요청, 연속 요청, 동시 요청 모두 통과해야 한다.
+- 상세 가이드 및 반복 디버그 루프: `docs/podman-testing.md`
+
 ```bash
 # 문법 오류 사전 차단 (반드시 먼저 실행)
 python3 -m py_compile <file>
 
-# podman 소스 마운트 테스트 (상세: docs/podman-testing.md)
+# podman 소스 마운트 테스트
 podman run --replace -d --name vllm-server -p 8080:8080 \
   -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino \
   -v /home/user/hf:/models:Z \

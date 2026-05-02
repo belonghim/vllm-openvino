@@ -294,6 +294,7 @@ class OpenVINOCausalLM(nn.Module):
             perf_hint = {**perf_hint, **cpu_hint}
 
         ov_compiled = ov_core.compile_model(ov_model, ov_device, perf_hint)
+        self.ov_compiled = ov_compiled
         self.ov_request = ov_compiled.create_infer_request()
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
         self._use_grouped_block_table_inputs: bool | None = None
@@ -303,18 +304,41 @@ class OpenVINOCausalLM(nn.Module):
             inp.get_any_name().startswith(("key_cache.", "value_cache."))
             for inp in ov_compiled.inputs
         )
+
+        if not self._has_kv_cache_inputs:
+            states = self.ov_request.query_state()
+            logger.info("[OV-STATE] Model has %d state tensors", len(states))
+            for i, state in enumerate(states[:5]):
+                logger.info("[OV-STATE] State %d: name=%s, shape=%s, dtype=%s",
+                            i, state.name, state.state.shape,
+                            state.state.get_element_type())
+        self._batch_size = 1
+        if not self._has_kv_cache_inputs:
+            first_fixed_dims: list[int] = []
+            for inp in ov_compiled.inputs:
+                shape = inp.get_partial_shape()
+                if len(shape) > 0 and shape[0].is_static:
+                    first_fixed_dims.append(shape[0].get_length())
+            if first_fixed_dims:
+                from statistics import mode, StatisticsError
+                try:
+                    self._batch_size = mode(first_fixed_dims)
+                except StatisticsError:
+                    self._batch_size = max(first_fixed_dims)
+
         logger.info(
-            "OpenVINO model loaded: type=%s, has_kv_cache=%s",
-            self.model_type, self._has_kv_cache_inputs
+            "OpenVINO model loaded: type=%s, has_kv_cache=%s, batch_size=%d",
+            self.model_type, self._has_kv_cache_inputs, self._batch_size
         )
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
+        self.ov_text_emb_compiled = None
         if self.use_text_embeddings_model:
             text_emb_model = ov_core.read_model(
                 str(model_dir / "openvino_text_embeddings_model.xml"))
-            ov_text_emb_compiled = ov_core.compile_model(
+            self.ov_text_emb_compiled = ov_core.compile_model(
                 text_emb_model, ov_device, perf_hint)
-            self.text_emb_request = ov_text_emb_compiled.create_infer_request()
+            self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
 
         if self.use_vision_embeddings_model:
             vision_emb_model = ov_core.read_model(
@@ -398,7 +422,19 @@ class OpenVINOCausalLM(nn.Module):
             conv_caches=conv_caches,
             pixel_values=pixel_values,
             image_position_ids=image_position_ids,
+            num_requests=num_requests,
         )
+        if not self._has_kv_cache_inputs and logger.isEnabledFor(10):
+            if isinstance(inputs, dict):
+                for k, v in inputs.items():
+                    logger.debug("[OV-INPUT] %s: shape=%s, dtype=%s",
+                                 k, getattr(v, 'shape', 'N/A'),
+                                 getattr(v, 'dtype', 'N/A'))
+            else:
+                for i, v in enumerate(inputs):
+                    logger.debug("[OV-INPUT] [%d]: shape=%s, dtype=%s",
+                                 i, getattr(v, 'shape', 'N/A'),
+                                 getattr(v, 'dtype', 'N/A'))
         self.ov_request.infer(inputs)
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
         return self._extract_logits(logits, num_requests)
@@ -422,6 +458,38 @@ class OpenVINOCausalLM(nn.Module):
             return last_token_logits
         return logits
 
+
+    def recreate_infer_request(self) -> None:
+        if self._has_kv_cache_inputs:
+            return
+        try:
+            self.ov_request = self.ov_compiled.create_infer_request()
+            if (self.ov_text_emb_compiled is not None
+                    and hasattr(self, 'text_emb_request')):
+                self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
+            states = self.ov_request.query_state()
+            for state in states:
+                state_tensor = state.state
+                shape = list(state_tensor.shape)
+                needs_resize = shape[0] == 0
+                if needs_resize:
+                    shape[0] = self._batch_size
+                np_dtype = {
+                    ov.Type.f32: np.float32,
+                    ov.Type.f16: np.float16,
+                    ov.Type.bf16: np.float32,
+                    ov.Type.i32: np.int32,
+                    ov.Type.i64: np.int64,
+                }.get(state_tensor.get_element_type(), np.float32)
+                if needs_resize:
+                    zeros = np.zeros(shape, dtype=np_dtype)
+                    state.state = ov.Tensor(zeros)
+                else:
+                    state.state.data[:] = 0
+            logger.info("[OV-STATE] Recreated infer request and zeroed %d states",
+                        len(states))
+        except Exception as e:
+            logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
 
     @torch._dynamo.disable
     def sample(
@@ -560,10 +628,14 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        num_requests: int | None = None,
     ) -> dict:
-        """Build dict-based inputs for a stateful model inference request."""
         model = self.model
         inputs_dict: dict[str, np.ndarray] = {}
+        input_ids_np = model._as_numpy_no_copy(input_ids)
+        batch_size = (num_requests if num_requests is not None
+                      else max(1, input_ids_np.shape[0]
+                               if input_ids_np.ndim > 0 else 1))
 
         if model.use_text_embeddings_model:
             input_ids_np = model._as_numpy_no_copy(input_ids).reshape(1, -1)
@@ -596,31 +668,39 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 if name == "inputs_embeds":
                     inputs_dict[name] = np.tile(
                         inputs_embeds_2d[np.newaxis, :, :],
-                        (self.batch_size, 1, 1))
+                        (batch_size, 1, 1))
                 elif name == "position_ids":
                     if len(shape) == 3:
-                        pos = np.arange(seq_len, dtype=np.int64)
-                        inputs_dict[name] = np.tile(
-                            pos, (self.batch_size, 1)).reshape(
-                                self.batch_size, 1, seq_len)
+                        pos = model._as_numpy_no_copy(positions)
+                        channels = shape[0] if shape[0] is not None else 1
+                        if pos.ndim == 1:
+                            if pos.shape[0] == batch_size and batch_size > 1:
+                                pos = pos.reshape(1, -1, 1)
+                                pos = np.tile(pos, (channels, 1, 1))
+                            else:
+                                pos = pos.reshape(1, 1, -1)
+                                pos = np.tile(pos, (channels, batch_size, 1))
+                        else:
+                            pos = pos.reshape(1, 1, -1)
+                            pos = np.tile(pos, (channels, batch_size, 1))
+                        inputs_dict[name] = pos
                     elif len(shape) == 2:
                         pos = model._as_numpy_no_copy(positions)
-                        inputs_dict[name] = pos.reshape(self.batch_size, -1)
+                        inputs_dict[name] = pos.reshape(batch_size, -1)
                     else:
                         inputs_dict[name] = model._as_numpy_no_copy(
                             positions).reshape(-1)
                 elif name == "attention_mask":
                     inputs_dict[name] = np.ones(
-                        (self.batch_size, seq_len), dtype=np.int64)
+                        (batch_size, seq_len), dtype=np.int64)
                 elif name == "beam_idx":
-                    inputs_dict[name] = np.arange(
-                        self.batch_size, dtype=np.int32)
+                    inputs_dict[name] = np.zeros(
+                        batch_size, dtype=np.int32)
                 else:
                     logger.warning(
                         "StatefulInputBuilder: unhandled input %s "
                         "(shape %s), skipping", name, shape)
         else:
-            input_ids_np = model._as_numpy_no_copy(input_ids)
             if input_ids_np.ndim == 1:
                 seq_len = input_ids_np.shape[0]
             else:
@@ -630,31 +710,40 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 if name == "input_ids":
                     if len(shape) == 2:
                         inputs_dict[name] = input_ids_np.reshape(
-                            self.batch_size, -1)
+                            batch_size, -1)
                     else:
                         inputs_dict[name] = input_ids_np.reshape(-1)
                 elif name == "inputs_embeds":
                     hidden = shape[-1] if shape[-1] is not None else 2048
                     inputs_dict[name] = np.zeros(
-                        (self.batch_size, seq_len, hidden), dtype=np.float32)
+                        (batch_size, seq_len, hidden), dtype=np.float32)
                 elif name == "position_ids":
                     if len(shape) == 3:
-                        pos = np.arange(seq_len, dtype=np.int64)
-                        inputs_dict[name] = np.tile(
-                            pos, (self.batch_size, 1)).reshape(
-                                self.batch_size, 1, seq_len)
+                        pos = model._as_numpy_no_copy(positions)
+                        channels = shape[0] if shape[0] is not None else 1
+                        if pos.ndim == 1:
+                            if pos.shape[0] == batch_size and batch_size > 1:
+                                pos = pos.reshape(1, -1, 1)
+                                pos = np.tile(pos, (channels, 1, 1))
+                            else:
+                                pos = pos.reshape(1, 1, -1)
+                                pos = np.tile(pos, (channels, batch_size, 1))
+                        else:
+                            pos = pos.reshape(1, 1, -1)
+                            pos = np.tile(pos, (channels, batch_size, 1))
+                        inputs_dict[name] = pos
                     elif len(shape) == 2:
                         pos = model._as_numpy_no_copy(positions)
-                        inputs_dict[name] = pos.reshape(self.batch_size, -1)
+                        inputs_dict[name] = pos.reshape(batch_size, -1)
                     else:
                         inputs_dict[name] = model._as_numpy_no_copy(
                             positions).reshape(-1)
                 elif name == "attention_mask":
                     inputs_dict[name] = np.ones(
-                        (self.batch_size, seq_len), dtype=np.int64)
+                        (batch_size, seq_len), dtype=np.int64)
                 elif name == "beam_idx":
-                    inputs_dict[name] = np.arange(
-                        self.batch_size, dtype=np.int32)
+                    inputs_dict[name] = np.zeros(
+                        batch_size, dtype=np.int32)
                 else:
                     logger.warning(
                         "StatefulInputBuilder: unhandled input %s "

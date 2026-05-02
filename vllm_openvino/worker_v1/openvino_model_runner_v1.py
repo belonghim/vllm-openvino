@@ -69,6 +69,7 @@ class OpenVINOModelRunnerV1:
 
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
+        self._new_req_ids: set[str] = set()
 
         # Pre-allocated block-index tensors.
         self._init_block_index_tensors()
@@ -168,6 +169,7 @@ class OpenVINOModelRunnerV1:
             )
             self.requests[req_id] = req_state
             self.input_batch.add_request(req_state)
+            self._new_req_ids.add(req_id)
             if req_state.mm_features:
                 self._mm_req_ids.add(req_id)
 
@@ -382,8 +384,19 @@ class OpenVINOModelRunnerV1:
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
+
+        old_req_ids = list(self.input_batch.req_ids)
         self.input_batch.condense()
         self.input_batch.refresh_metadata()
+        new_req_ids = list(self.input_batch.req_ids)
+
+        if not self.model._has_kv_cache_inputs:
+            has_running = any(req_id not in self._new_req_ids for req_id in new_req_ids if req_id is not None)
+            has_new = any(req_id in self._new_req_ids for req_id in new_req_ids if req_id is not None)
+            if has_new and not has_running:
+                logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
+                self.model.recreate_infer_request()
+            self._new_req_ids.clear()
 
         (
             input_tokens,
@@ -393,6 +406,8 @@ class OpenVINOModelRunnerV1:
             multi_modal_kwargs,
         ) = self._prepare_inputs(scheduler_output)
 
+        actual_num_requests = sum(
+            1 for req_id in self.input_batch.req_ids if req_id is not None)
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids": input_tokens,
@@ -400,7 +415,7 @@ class OpenVINOModelRunnerV1:
             "kv_caches": self.kv_caches,
             "ssm_caches": self.ssm_caches,
             "conv_caches": self.conv_caches,
-            "num_requests": len(self.input_batch.req_ids),
+            "num_requests": actual_num_requests,
             **multi_modal_kwargs,
         }
 
