@@ -152,10 +152,11 @@ The script runs a warmed-up benchmark against the local OpenAI-compatible endpoi
 The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
-- Gemma 4 multimodal (text + image)
+- Gemma 4 text and multimodal (text + image)
 
 ## Limitations
 
 - LoRA serving is not supported.
+- Stateful models (e.g., Gemma-4 without PA transformation) require `max_num_seqs=1` as they do not support batched inference.
 - Single socket only; tensor/pipeline parallelism is not supported.
 - vLLM V1 engine only (vLLM 0.19.1).

@@ -425,6 +425,10 @@ class OpenVINOCausalLM(nn.Module):
         image_position_ids: torch.Tensor | None = None,
         num_requests: int | None = None,
     ) -> torch.Tensor:
+        if not self._has_kv_cache_inputs and num_requests is not None and num_requests > 1:
+            raise RuntimeError(
+                "Stateful OpenVINO models do not support batched inference. "
+                "Please set max_num_seqs=1 when using stateful models.")
         builder = self._get_input_builder()
         inputs = builder.build_inputs(
             input_ids=input_ids,
