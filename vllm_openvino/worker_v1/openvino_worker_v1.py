@@ -134,6 +134,9 @@ class OpenVINOWorkerV1(WorkerBase):
             conv_cache_config = []
             ssm_cache_dtypes = []
             conv_cache_dtypes = []
+            key_cache_config = []
+            value_cache_config = []
+            cache_dtype = None
 
             for op in ov_model.get_ops():
                 if op.get_type_name() != "ReadValue":
@@ -147,17 +150,35 @@ class OpenVINOWorkerV1(WorkerBase):
                 elif "conv" in var_id:
                     conv_cache_config.append(op.output(0).get_partial_shape())
                     conv_cache_dtypes.append(op.get_element_type().to_string())
+                elif "past_key_values" in var_id:
+                    if cache_dtype is None:
+                        cache_dtype = op.get_element_type().to_string()
+                    if ".key" in var_id:
+                        key_cache_config.append(op.output(0).get_partial_shape())
+                    elif ".value" in var_id:
+                        value_cache_config.append(op.output(0).get_partial_shape())
 
             self.ssm_cache_config = ssm_cache_config
             self.conv_cache_config = conv_cache_config
             self.ssm_cache_dtypes = ssm_cache_dtypes
             self.conv_cache_dtypes = conv_cache_dtypes
+            self.key_cache_config = key_cache_config
+            self.value_cache_config = value_cache_config
+            if cache_dtype is not None:
+                self.cache_dtype = cache_dtype
             if self.ssm_cache_config or self.conv_cache_config:
                 logger.info(
                     "Preloaded hybrid cache shapes from %s: ssm=%d conv=%d",
                     ir_path,
                     len(self.ssm_cache_config),
                     len(self.conv_cache_config),
+                )
+            if self.key_cache_config or self.value_cache_config:
+                logger.info(
+                    "Preloaded KV cache shapes from %s: key=%d value=%d",
+                    ir_path,
+                    len(self.key_cache_config),
+                    len(self.value_cache_config),
                 )
         except (RuntimeError, FileNotFoundError) as e:
             logger.warning(
@@ -169,11 +190,8 @@ class OpenVINOWorkerV1(WorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-        # we need to take information about KV cache config from compiled model
         compiled_model = self.model_runner.get_model().ov_request.get_compiled_model()
 
-        self.key_cache_config = []
-        self.value_cache_config = []
         self.ssm_cache_config = []
         self.conv_cache_config = []
         self.ssm_cache_dtypes = []
@@ -189,14 +207,30 @@ class OpenVINOWorkerV1(WorkerBase):
         num_cache_groups = 1
         self.model_runner.configure_cache_groups(num_cache_groups)
 
+        has_external_kv = False
         for input_port in compiled_model.inputs:
             input_name = input_port.get_any_name()
 
             if input_name.startswith("key_cache."):
+                has_external_kv = True
                 self.cache_dtype = input_port.get_element_type().to_string()
                 self.key_cache_config.append(input_port.get_partial_shape())
             if input_name.startswith("value_cache."):
                 self.value_cache_config.append(input_port.get_partial_shape())
+
+        if not has_external_kv:
+            logger.info(
+                "[OV-WORKER] Stateful model, using preloaded KV shapes: "
+                "key=%d, value=%d",
+                len(self.key_cache_config), len(self.value_cache_config),
+            )
+        else:
+            logger.info(
+                "[OV-WORKER] PA model, key_cache=%d, value_cache=%d, "
+                "ssm_cache=%d, conv_cache=%d",
+                len(self.key_cache_config), len(self.value_cache_config),
+                len(self.ssm_cache_config), len(self.conv_cache_config),
+            )
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -229,11 +263,17 @@ class OpenVINOWorkerV1(WorkerBase):
                 "Try increasing `VLLM_OPENVINO_KVCACHE_SPACE` when "
                 "initializing the engine.")
 
+        model = getattr(self.model_runner, 'model', None)
+        is_stateful = model is not None and not getattr(
+            model, '_has_kv_cache_inputs', True)
+        if is_stateful:
+            return
+
         max_seq_len = self.cache_config.block_size * num_blocks
         if self.model_config.max_model_len > max_seq_len:
             raise ValueError(
                 f"The model's max seq len ({self.model_config.max_model_len}) "
-                "is larger than the maximum number of tokens that can be "
+                f"is larger than the maximum number of tokens that can be "
                 f"stored in KV cache ({max_seq_len}). Try increasing "
                 "`VLLM_OPENVINO_KVCACHE_SPACE` or decreasing `max_model_len` "
                 "when initializing the engine.")
@@ -322,6 +362,7 @@ class OpenVINOWorkerV1(WorkerBase):
             self.value_cache_config,
             self.ssm_cache_config,
             self.conv_cache_config,
+            self.cache_config.block_size,
         )
 
     def profile_run(self) -> int:
@@ -496,6 +537,14 @@ class OpenVINOWorkerV1(WorkerBase):
         assert cache_type in str_to_torch_type.keys(), "Unexpected cache type {}".format(cache_type)
         kv_cache_spec = {}
 
+        logger.info(
+            "[OV-WORKER] get_kv_cache_spec: key=%d, value=%d, "
+            "ssm=%d, conv=%d, block_size=%d, cache_type=%s",
+            len(key_cache_config), len(value_cache_config),
+            len(self.ssm_cache_config), len(self.conv_cache_config),
+            block_size, cache_type,
+        )
+
         for idx, (key_cache_shape, value_cache_shape) in enumerate(zip(key_cache_config, value_cache_config)):
             kv_cache_spec["{}".format(idx)] = FullAttentionSpec(
                 block_size=block_size,
@@ -573,17 +622,34 @@ class OpenVINOWorkerV1(WorkerBase):
         if cache_dtype == "dynamic":
             cache_dtype = "fp16"
         self.cache_config.cache_dtype = cache_dtype
-        # For OpenVINO backend, in case of CPU device, the block number will be
-        # calculated based on the openvino_kvcache_space_bytes.
         cache_block_size = self.get_cache_block_size_bytes()
         kv_space = getattr(self.cache_config, 'openvino_kvcache_space_bytes', 0)
-        logger.info("OpenVINO KV cache space: %d bytes, block_size: %d bytes",
-                    kv_space, cache_block_size)
+        logger.info(
+            "[OV-WORKER] determine_available_memory: cache_dtype=%s, "
+            "cache_block_size=%d bytes, kv_space=%d bytes",
+            cache_dtype, cache_block_size, kv_space,
+        )
         num_device_blocks, num_swap_blocks = determine_num_available_blocks(current_platform,
                                                                             self.cache_config,
                                                                             cache_block_size,
                                                                             self.profile_run)
-        logger.info("OpenVINO num_device_blocks: %d", num_device_blocks)
+        model = getattr(self.model_runner, 'model', None)
+        is_stateful = model is not None and not getattr(
+            model, '_has_kv_cache_inputs', True)
+        if is_stateful:
+            max_needed = (
+                self.model_config.max_model_len + self.cache_config.block_size - 1
+            ) // self.cache_config.block_size
+            if num_device_blocks > max_needed:
+                logger.info(
+                    "[OV-WORKER] Capping stateful num_blocks %d -> %d",
+                    num_device_blocks, max_needed)
+                num_device_blocks = max_needed
+        logger.info(
+            "[OV-WORKER] determine_available_memory: num_device_blocks=%d, "
+            "num_swap_blocks=%d",
+            num_device_blocks, num_swap_blocks,
+        )
         self.num_swap_blocks = num_swap_blocks
         return num_device_blocks * cache_block_size
 

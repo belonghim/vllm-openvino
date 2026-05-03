@@ -101,12 +101,17 @@ class OpenVINOCacheEngine:
         kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = []
 
         for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
-            key_cache_shape = key_cache_pshape
-            value_cache_shape = value_cache_pshape
-            key_cache_shape[0] = num_blocks
-            value_cache_shape[0] = num_blocks
-            key_cache_shape = key_cache_shape.to_shape()
-            value_cache_shape = value_cache_shape.to_shape()
+            key_dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
+                for i, dim in enumerate(key_cache_pshape)
+            ]
+            key_cache_shape = ov.PartialShape(key_dims).to_shape()
+
+            value_dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
+                for i, dim in enumerate(value_cache_pshape)
+            ]
+            value_cache_shape = ov.PartialShape(value_dims).to_shape()
 
             if current_platform.is_openvino_cpu():
                 key_blocks = ov.Tensor(self.ov_cache_dtype, key_cache_shape)
@@ -219,26 +224,34 @@ class OpenVINOCacheEngine:
         value_cache_config: list[ov.PartialShape],
         ssm_cache_config: list[ov.PartialShape] | None = None,
         conv_cache_config: list[ov.PartialShape] | None = None,
+        block_size: int = 1,
     ) -> int:
+        def _dim_len(dim, idx: int = -1):
+            if dim.is_static:
+                return dim.get_length()
+            if idx == 2:
+                return block_size
+            return 1
+
         total_elements = 0
         for key_cache_shape, value_cache_shape in zip(key_cache_config, value_cache_config):
-            total_elements += key_cache_shape[1].get_length() * key_cache_shape[2].get_length() * key_cache_shape[3].get_length()
-            total_elements += value_cache_shape[1].get_length() * value_cache_shape[2].get_length() * value_cache_shape[3].get_length()
+            total_elements += _dim_len(key_cache_shape[1]) * _dim_len(key_cache_shape[2], 2) * _dim_len(key_cache_shape[3])
+            total_elements += _dim_len(value_cache_shape[1]) * _dim_len(value_cache_shape[2], 2) * _dim_len(value_cache_shape[3])
 
         # Add SSM state size (fp32 = 4 bytes)
         if ssm_cache_config:
             for ssm_shape in ssm_cache_config:
                 ssm_elements = 1
-                for dim in range(1, len(ssm_shape)):
-                    ssm_elements *= ssm_shape[dim].get_length()
+                for dim_idx, dim in enumerate(ssm_shape[1:], start=1):
+                    ssm_elements *= _dim_len(dim, dim_idx)
                 total_elements += ssm_elements * (4 / str_to_ov_type[cache_dtype].size)
 
         # Add conv state size (fp32 = 4 bytes)
         if conv_cache_config:
             for conv_shape in conv_cache_config:
                 conv_elements = 1
-                for dim in range(1, len(conv_shape)):
-                    conv_elements *= conv_shape[dim].get_length()
+                for dim_idx, dim in enumerate(conv_shape[1:], start=1):
+                    conv_elements *= _dim_len(dim, dim_idx)
                 total_elements += conv_elements * (4 / str_to_ov_type[cache_dtype].size)
 
         return str_to_ov_type[cache_dtype].size * total_elements

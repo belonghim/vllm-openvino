@@ -349,6 +349,16 @@ class OpenVINOCausalLM(nn.Module):
                 vision_emb_model, ov_device, perf_hint)
             self.vision_emb_request = ov_vision_emb_compiled.create_infer_request()
 
+        self.use_per_layer_embeddings_model = False
+        self.ov_per_layer_emb_compiled = None
+        per_layer_emb_path = model_dir / "openvino_text_embeddings_per_layer_model.xml"
+        if per_layer_emb_path.exists():
+            self.use_per_layer_embeddings_model = True
+            per_layer_emb_model = ov_core.read_model(str(per_layer_emb_path))
+            self.ov_per_layer_emb_compiled = ov_core.compile_model(
+                per_layer_emb_model, ov_device, perf_hint)
+            self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
+
     def _get_flat_kv_caches_template(
         self,
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
@@ -469,6 +479,9 @@ class OpenVINOCausalLM(nn.Module):
             if (self.ov_text_emb_compiled is not None
                     and hasattr(self, 'text_emb_request')):
                 self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
+            if (self.ov_per_layer_emb_compiled is not None
+                    and hasattr(self, 'per_layer_emb_request')):
+                self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
             states = self.ov_request.query_state()
             for state in states:
                 state_tensor = state.state
@@ -644,7 +657,6 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
             input_ids_np = model._as_numpy_no_copy(input_ids).reshape(1, -1)
             model.text_emb_request.infer([input_ids_np])
             inputs_embeds = model.text_emb_request.get_output_tensor(0)
-            # Text embeddings output: [1, seq_len, hidden] -> [seq_len, hidden]
             inputs_embeds_2d = inputs_embeds.data.reshape(
                 -1, inputs_embeds.shape[-1])
 
@@ -689,8 +701,26 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         inputs_dict[name] = model._as_numpy_no_copy(
                             positions).reshape(-1)
                 elif name == "attention_mask":
+                    pos_np = model._as_numpy_no_copy(positions)
+                    total_seq_len = (int(pos_np.max()) + 1
+                                     if pos_np.size > 0 else seq_len)
                     inputs_dict[name] = np.ones(
-                        (batch_size, seq_len), dtype=np.int64)
+                        (batch_size, total_seq_len), dtype=np.int64)
+                elif name == "per_layer_inputs":
+                    if model.use_per_layer_embeddings_model:
+                        ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
+                        model.per_layer_emb_request.infer([ple_input_ids])
+                        ple_out = model.per_layer_emb_request.get_output_tensor(0)
+                        ple_data = ple_out.data.reshape(
+                            1, -1, ple_out.shape[2], ple_out.shape[3])
+                        inputs_dict[name] = ple_data
+                    else:
+                        p_shape = shape
+                        p_layers = p_shape[2] if p_shape[2] is not None else 1
+                        p_emb = p_shape[3] if p_shape[3] is not None else 256
+                        inputs_dict[name] = np.zeros(
+                            (batch_size, seq_len, p_layers, p_emb),
+                            dtype=np.float32)
                 elif name == "beam_idx":
                     inputs_dict[name] = np.zeros(
                         batch_size, dtype=np.int32)
@@ -732,8 +762,26 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         inputs_dict[name] = model._as_numpy_no_copy(
                             positions).reshape(-1)
                 elif name == "attention_mask":
+                    pos_np = model._as_numpy_no_copy(positions)
+                    total_seq_len = (int(pos_np.max()) + 1
+                                     if pos_np.size > 0 else seq_len)
                     inputs_dict[name] = np.ones(
-                        (batch_size, seq_len), dtype=np.int64)
+                        (batch_size, total_seq_len), dtype=np.int64)
+                elif name == "per_layer_inputs":
+                    if model.use_per_layer_embeddings_model:
+                        ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
+                        model.per_layer_emb_request.infer([ple_input_ids])
+                        ple_out = model.per_layer_emb_request.get_output_tensor(0)
+                        ple_data = ple_out.data.reshape(
+                            1, -1, ple_out.shape[2], ple_out.shape[3])
+                        inputs_dict[name] = ple_data
+                    else:
+                        p_shape = shape
+                        p_layers = p_shape[2] if p_shape[2] is not None else 1
+                        p_emb = p_shape[3] if p_shape[3] is not None else 256
+                        inputs_dict[name] = np.zeros(
+                            (batch_size, seq_len, p_layers, p_emb),
+                            dtype=np.float32)
                 elif name == "beam_idx":
                     inputs_dict[name] = np.zeros(
                         batch_size, dtype=np.int32)
