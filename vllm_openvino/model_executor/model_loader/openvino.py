@@ -178,6 +178,7 @@ class OpenVINOInputBuilder(ABC):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        num_requests: int | None = None,
     ) -> list | dict:
         """Build and return inputs for the OpenVINO inference request.
 
@@ -189,6 +190,7 @@ class OpenVINOInputBuilder(ABC):
             conv_caches: Optional convolution cache tensors (hybrid models).
             pixel_values: Optional pixel values for vision embeddings.
             image_position_ids: Optional image position indices.
+            num_requests: Actual number of requests in batch.
 
         Returns:
             A list or dict suitable for ``ov_request.infer()``.
@@ -520,6 +522,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        num_requests: int | None = None,
     ) -> list:
         """Build list-based inputs for a PA-transformed model inference request."""
         model = self.model
