@@ -475,6 +475,17 @@ class OpenVINOCausalLM(nn.Module):
         return logits
 
 
+    def reset_states(self) -> None:
+        if self._has_kv_cache_inputs:
+            return
+        try:
+            states = self.ov_request.query_state()
+            for state in states:
+                state.state.data[:] = 0
+            logger.info("[OV-STATE] Reset %d state tensors", len(states))
+        except Exception as e:
+            logger.warning("[OV-STATE] reset_states failed: %s", e)
+
     def recreate_infer_request(self) -> None:
         if self._has_kv_cache_inputs:
             return
@@ -518,6 +529,24 @@ class OpenVINOCausalLM(nn.Module):
     ) -> SamplerOutput | None:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
+
+    def shutdown(self) -> None:
+        try:
+            if hasattr(self, 'ov_request') and self.ov_request is not None:
+                self.ov_request = None
+            if hasattr(self, 'ov_compiled') and self.ov_compiled is not None:
+                self.ov_compiled.release_memory()
+                self.ov_compiled = None
+            if (hasattr(self, 'ov_text_emb_compiled')
+                    and self.ov_text_emb_compiled is not None):
+                self.ov_text_emb_compiled.release_memory()
+                self.ov_text_emb_compiled = None
+            if (hasattr(self, 'ov_per_layer_emb_compiled')
+                    and self.ov_per_layer_emb_compiled is not None):
+                self.ov_per_layer_emb_compiled.release_memory()
+                self.ov_per_layer_emb_compiled = None
+        except Exception as e:
+            logger.warning("[OV-MODEL] shutdown failed: %s", e)
 
 
 class PAInputBuilder(OpenVINOInputBuilder):

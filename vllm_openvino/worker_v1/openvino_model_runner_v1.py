@@ -394,8 +394,8 @@ class OpenVINOModelRunnerV1:
             has_running = any(req_id not in self._new_req_ids for req_id in new_req_ids if req_id is not None)
             has_new = any(req_id in self._new_req_ids for req_id in new_req_ids if req_id is not None)
             if has_new and not has_running:
-                logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
-                self.model.recreate_infer_request()
+                logger.info("[OV-RUNNER] All slots are new requests, resetting states")
+                self.model.reset_states()
             self._new_req_ids.clear()
 
         (

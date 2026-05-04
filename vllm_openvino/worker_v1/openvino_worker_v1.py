@@ -676,6 +676,12 @@ class OpenVINOWorkerV1(WorkerBase):
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not supported.")
 
+    def shutdown(self) -> None:
+        logger.info("[OV-WORKER] Shutting down OpenVINO worker")
+        model = getattr(self.model_runner, 'model', None)
+        if model is not None and hasattr(model, 'shutdown'):
+            model.shutdown()
+
     def determine_num_available_blocks(self) -> tuple[int, int]:
         raise NotImplementedError(
             "Use determine_available_memory() instead. "
