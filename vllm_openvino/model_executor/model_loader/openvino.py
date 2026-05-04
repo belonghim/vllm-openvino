@@ -310,6 +310,7 @@ class OpenVINOCausalLM(nn.Module):
         self.ov_request = ov_compiled.create_infer_request()
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
         self._use_grouped_block_table_inputs: bool | None = None
+        self._input_builder: OpenVINOInputBuilder | None = None
 
         # Detect if model has external KV cache inputs (PA-transformed)
         self._has_kv_cache_inputs = any(
@@ -398,6 +399,9 @@ class OpenVINOCausalLM(nn.Module):
             self.ov_request.infer(inputs)
             self.recreate_infer_request()
             logger.info("[OV-WARMUP] Stateful model warmup completed")
+        except RuntimeError as e:
+            logger.warning("[OV-WARMUP] Warmup failed: %s", e)
+            raise
         except Exception as e:
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
 
@@ -480,10 +484,12 @@ class OpenVINOCausalLM(nn.Module):
         - PA-transformed models (have KV cache inputs) -> PAInputBuilder
         - Stateful models (no KV cache inputs) -> StatefulInputBuilder
         """
-        if self._has_kv_cache_inputs:
-            return PAInputBuilder(self)
-        else:
-            return StatefulInputBuilder(self)
+        if self._input_builder is None:
+            if self._has_kv_cache_inputs:
+                self._input_builder = PAInputBuilder(self)
+            else:
+                self._input_builder = StatefulInputBuilder(self)
+        return self._input_builder
 
     def forward(
         self,
@@ -586,6 +592,9 @@ class OpenVINOCausalLM(nn.Module):
                     and hasattr(self, 'per_layer_emb_request')):
                 self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
             logger.info("[OV-STATE] Recreated infer request")
+        except RuntimeError as e:
+            logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
+            raise
         except Exception as e:
             logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
             raise
@@ -628,6 +637,8 @@ class OpenVINOCausalLM(nn.Module):
                     and self.ov_per_layer_emb_compiled is not None):
                 self.ov_per_layer_emb_compiled.release_memory()
                 self.ov_per_layer_emb_compiled = None
+        except RuntimeError as e:
+            logger.warning("[OV-MODEL] shutdown failed: %s", e)
         except Exception as e:
             logger.warning("[OV-MODEL] shutdown failed: %s", e)
 
@@ -729,8 +740,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 self.batch_size = max(first_fixed_dims)
         else:
             self.batch_size = 1
-        logger.info("StatefulInputBuilder shape registry: %s, batch_size: %d",
-                    self.input_shapes, self.batch_size)
+        if logger.isEnabledFor(10):
+            logger.debug("StatefulInputBuilder shape registry: %s, batch_size: %d",
+                         self.input_shapes, self.batch_size)
 
     def build_inputs(
         self,

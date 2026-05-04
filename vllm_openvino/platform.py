@@ -29,23 +29,15 @@ def _is_stateful_model(model_path: str) -> bool:
         return False
     try:
         ov_model = ov.Core().read_model(str(ir_path))
-        has_readvalue = any(
-            op.get_type_name() == "ReadValue" for op in ov_model.get_ops()
+        from vllm_openvino.model_executor.model_loader.openvino import (
+            detect_model_type, HYBRID_MAMBA, STATEFUL,
         )
-        if has_readvalue:
-            return True
-        has_pa = any(
-            op.get_type_name() == "PagedAttentionExtension"
-            for op in ov_model.get_ops()
-        )
-        if has_pa:
-            return False
-        has_sdpa = any(
-            op.get_type_name() == "ScaledDotProductAttention"
-            for op in ov_model.get_ops()
-        )
-        return not has_sdpa
-    except Exception:
+        model_type = detect_model_type(ov_model)
+        return model_type in (STATEFUL, HYBRID_MAMBA)
+    except (RuntimeError, ValueError):
+        return False
+    except Exception as e:
+        logger.warning("Unexpected error in _is_stateful_model: %s", e)
         return False
 
 

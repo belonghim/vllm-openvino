@@ -24,7 +24,7 @@ def determine_num_available_blocks(current_platform, cache_config, cache_block_s
         else:
             try:
                 kv_cache_size = profile_run_func()
-            except Exception as err:
+            except (RuntimeError, ValueError) as err:
                 raise RuntimeError(
                     "The error occurred during profile run. This might be "
                     "due to insufficient GPU memory. Consider decreasing "
