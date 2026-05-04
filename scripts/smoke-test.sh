@@ -114,6 +114,32 @@ print(text.strip())
     fi
   done
 
+  # Vision test (only if model has a vision embedding component)
+  if [[ -f "$model_dir/openvino_vision_embeddings_model.xml" ]]; then
+    local vision_response
+    vision_response=$(curl -sf "$API_URL/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -d '{"model":"/models","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}},{"type":"text","text":"What color is this?"}]}],"max_tokens":16}' 2>/dev/null || true)
+
+    if [[ -z "$vision_response" ]]; then
+      echo "  FAIL: vision -> No response"
+      ((model_failed++))
+    elif echo "$vision_response" | python3 -c "import sys,json; j=json.load(sys.stdin); sys.exit(0 if j.get('choices') else 1)" 2>/dev/null; then
+      local vision_content
+      vision_content=$(echo "$vision_response" | python3 -c "import sys,json; j=json.load(sys.stdin); print(j['choices'][0]['message']['content'] if j.get('choices') and j['choices'][0].get('message') else '')" 2>/dev/null || true)
+      if [[ -n "$vision_content" ]]; then
+        echo "  PASS: vision -> '$vision_content'"
+        ((model_passed++))
+      else
+        echo "  FAIL: vision -> Empty content"
+        ((model_failed++))
+      fi
+    else
+      echo "  FAIL: vision -> Error response"
+      ((model_failed++))
+    fi
+  fi
+
   cleanup_container
 
   if (( model_failed == 0 )); then

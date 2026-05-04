@@ -394,6 +394,8 @@ class OpenVINOCausalLM(nn.Module):
                     inputs[name] = np.ones(shape, dtype=dtype)
                 elif name == "position_ids":
                     inputs[name] = np.zeros(shape, dtype=dtype)
+                elif name == "token_type_ids":
+                    inputs[name] = np.zeros(shape, dtype=dtype)
                 elif name == "beam_idx":
                     inputs[name] = np.zeros(shape, dtype=dtype)
                 elif name == "per_layer_inputs":
@@ -432,6 +434,37 @@ class OpenVINOCausalLM(nn.Module):
             f"_as_numpy_no_copy: unhandled type {type(tensor_like)}"
         return np.asarray(tensor_like)
 
+    def _prepare_vision_inputs(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor | None = None,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        pixel_values_np = self._as_numpy_no_copy(pixel_values)
+        if pixel_values_np.ndim == 2:
+            pixel_values_np = pixel_values_np[np.newaxis, :, :]
+        if pixel_values_np.ndim == 5 and pixel_values_np.shape[1] == 1:
+            pixel_values_np = pixel_values_np.squeeze(1)
+
+        image_pos_np = None
+        if pixel_position_ids is not None:
+            pix_pos_np = self._as_numpy_no_copy(pixel_position_ids)
+            if pix_pos_np.ndim == 2:
+                pix_pos_np = pix_pos_np[np.newaxis, :, :]
+            second_col = pix_pos_np[0, :, 1]
+            valid_y = second_col[second_col >= 0]
+            unique_y = np.unique(valid_y) if valid_y.size > 0 else [0]
+            if len(unique_y) == 1 and unique_y[0] == 0:
+                num_patches = pix_pos_np.shape[1]
+                image_pos_np = np.stack(
+                    [np.arange(num_patches), np.zeros(num_patches)],
+                    axis=1,
+                ).astype(np.int64)
+                image_pos_np = image_pos_np[np.newaxis, :, :]
+            else:
+                image_pos_np = pix_pos_np
+
+        return pixel_values_np, image_pos_np
+
     def _prepare_embeddings(
         self,
         input_ids: torch.Tensor,
@@ -446,31 +479,8 @@ class OpenVINOCausalLM(nn.Module):
             -1, inputs_embeds.shape[-1])
 
         if self.use_vision_embeddings_model and pixel_values is not None:
-            pixel_values_np = self._as_numpy_no_copy(pixel_values)
-
-            # Vision embedding model expects 3D inputs: add batch dim if needed
-            if pixel_values_np.ndim == 2:
-                pixel_values_np = pixel_values_np[np.newaxis, :, :]
-            # Some models (e.g. Gemma-3) provide 5D pixel_values
-            # (batch, num_images, channels, height, width). Squeeze the
-            # num_images dimension when it equals 1.
-            if pixel_values_np.ndim == 5 and pixel_values_np.shape[1] == 1:
-                pixel_values_np = pixel_values_np.squeeze(1)
-
-            if pixel_position_ids is not None:
-                pix_pos_np = self._as_numpy_no_copy(pixel_position_ids)
-                if pix_pos_np.ndim == 2:
-                    pix_pos_np = pix_pos_np[np.newaxis, :, :]
-                # The exported vision model expects 1D patch indices [idx, 0]
-                # rather than 2D spatial coordinates [px, py].
-                num_patches = pix_pos_np.shape[1]
-                image_pos_np = np.stack(
-                    [np.arange(num_patches), np.zeros(num_patches)],
-                    axis=1,
-                ).astype(np.int64)
-                image_pos_np = image_pos_np[np.newaxis, :, :]
-            else:
-                image_pos_np = None
+            pixel_values_np, image_pos_np = self._prepare_vision_inputs(
+                pixel_values, pixel_position_ids)
 
             if image_pos_np is not None:
                 self.vision_emb_request.infer(
