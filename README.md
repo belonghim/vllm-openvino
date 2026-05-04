@@ -153,10 +153,11 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
 - Gemma 4 text and multimodal (text + image)
+- Qwen3.5 (hybrid Mamba/attention architecture)
 
 ## Limitations
 
 - LoRA serving is not supported.
-- Stateful models (e.g., Gemma-4 without PA transformation) require `max_num_seqs=1` as they do not support batched inference.
+- Stateful models (e.g., Gemma-4, Qwen3.5) require `max_num_seqs=1` as they do not support batched inference.
 - Single socket only; tensor/pipeline parallelism is not supported.
 - vLLM V1 engine only (vLLM 0.19.1).
