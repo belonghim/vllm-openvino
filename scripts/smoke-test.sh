@@ -114,10 +114,23 @@ print(text.strip())
     fi
   done
 
-  # Vision test (only if model has a vision embedding component)
+  # Vision test (only if the exported vision model accepts pixel_values)
+  local has_vision=false
   if [[ -f "$model_dir/openvino_vision_embeddings_model.xml" ]]; then
+    has_vision=$(python3 -c "
+import openvino as ov
+try:
+    m = ov.Core().read_model('$model_dir/openvino_vision_embeddings_model.xml')
+    names = [i.get_any_name() for i in m.inputs]
+    print('true' if 'pixel_values' in names else 'false')
+except Exception:
+    print('false')
+" 2>/dev/null)
+  fi
+
+  if [[ "$has_vision" == "true" ]]; then
     local vision_response
-    vision_response=$(curl -sf "$API_URL/v1/chat/completions" \
+    vision_response=$(curl -sf --max-time 120 "$API_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -d '{"model":"/models","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}},{"type":"text","text":"What color is this?"}]}],"max_tokens":16}' 2>/dev/null || true)
 

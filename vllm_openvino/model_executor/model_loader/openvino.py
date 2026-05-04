@@ -242,6 +242,7 @@ class OpenVINOCausalLM(nn.Module):
             vision_emb_path = model_dir / "openvino_vision_embeddings_model.xml"
             if vision_emb_path.exists():
                 self.use_vision_embeddings_model = True
+            self._vision_warning_logged = False
         else:
             ir_filename = "openvino_model.xml"
 
@@ -510,10 +511,12 @@ class OpenVINOCausalLM(nn.Module):
                     if num_patches <= 0:
                         continue
                     if avail < num_patches:
-                        logger.warning(
-                            "[OV-VISION] Vision output (%d) shorter than "
-                            "text slots (%d), padding with zeros",
-                            avail, num_patches)
+                        if not self._vision_warning_logged:
+                            logger.warning(
+                                "[OV-VISION] Vision output (%d) shorter than "
+                                "text slots (%d), padding with zeros",
+                                avail, num_patches)
+                            self._vision_warning_logged = True
                         inputs_embeds_2d[start:end] = 0
                         inputs_embeds_2d[start:start + avail] = \
                             vision_embeds_2d[patch_offset:patch_offset + avail]
