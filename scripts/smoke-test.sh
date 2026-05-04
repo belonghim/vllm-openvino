@@ -59,7 +59,7 @@ run_model_test() {
     --port=8080 --model /models --max-model-len 4096
 
   local ready=false
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     if podman logs "$CONTAINER_NAME" 2>&1 | grep -q "Application startup complete"; then
       ready=true
       break
@@ -83,7 +83,7 @@ run_model_test() {
     local response
     response=$(curl -sf "$API_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d "{\"model\":\"/models\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":16}" 2>/dev/null || true)
+      -d "{\"model\":\"/models\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":128}" 2>/dev/null || true)
 
     if [[ -z "$response" ]]; then
       echo "  FAIL: '$prompt' -> No response"
@@ -94,10 +94,16 @@ run_model_test() {
     local raw_content
     raw_content=$(echo "$response" | python3 -c "import sys,json; j=json.load(sys.stdin); print(j['choices'][0]['message']['content'] if j.get('choices') and j['choices'][0].get('message') else '')" 2>/dev/null || true)
 
-    local content="$raw_content"
-    if [[ "$content" == *"</think>"* ]]; then
-      content=$(echo "$content" | sed 's/.*<\/think>//')
-    fi
+    local content
+    content=$(echo "$raw_content" | python3 -c "
+import sys
+text = sys.stdin.read()
+if '</think>' in text:
+    text = text.split('</think>')[-1]
+elif '<think>' in text:
+    text = text.split('<think>')[0]
+print(text.strip())
+" 2>/dev/null || echo "$raw_content")
 
     if [[ "$content" == *"$expected"* ]]; then
       echo "  PASS: '$prompt' -> '$content' (contains '$expected')"

@@ -277,6 +277,7 @@ class OpenVINOModelRunnerV1:
 
         multi_modal_kwargs = {}
         all_pixel_values = []
+        all_pixel_position_ids = []
         all_image_position_ids = []
 
         mm_req_ids = [
@@ -299,7 +300,11 @@ class OpenVINOModelRunnerV1:
                             if hasattr(elem.data, 'shape'):
                                 all_pixel_values.append(elem.data)
                                 break
-                # Convert PlaceholderRange to (start, end) tuple
+                    # Extract pixel_position_ids for vision model
+                    if "pixel_position_ids" in mm_item:
+                        all_pixel_position_ids.append(
+                            mm_item["pixel_position_ids"].data)
+                # Convert PlaceholderRange to (start, end) tuple for text insertion
                 pos = mm_feature.mm_position
                 all_image_position_ids.append(
                     (pos.offset, pos.offset + pos.length))
@@ -309,6 +314,12 @@ class OpenVINOModelRunnerV1:
             if pixel_values.device != self.device:
                 pixel_values = pixel_values.to(self.device)
             multi_modal_kwargs["pixel_values"] = pixel_values
+
+            if all_pixel_position_ids:
+                pixel_position_ids = torch.stack(all_pixel_position_ids)
+                if pixel_position_ids.device != self.device:
+                    pixel_position_ids = pixel_position_ids.to(self.device)
+                multi_modal_kwargs["pixel_position_ids"] = pixel_position_ids
 
             image_position_ids = torch.tensor(
                 all_image_position_ids, dtype=torch.int64)

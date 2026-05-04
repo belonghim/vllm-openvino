@@ -170,7 +170,7 @@ Models without SDPA ops (Gemma-4) or with hybrid Mamba/attention layers (Qwen3.5
 The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
-- Gemma 4 text and multimodal (text + image)
+- Gemma 3 and Gemma 4 text and multimodal (text + image)
 - Qwen3.5 (hybrid Mamba/attention architecture)
 
 ## Limitations

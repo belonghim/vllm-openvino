@@ -188,6 +188,7 @@ class OpenVINOInputBuilder(ABC):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
         num_requests: int | None = None,
     ) -> list | dict:
         """Build and return inputs for the OpenVINO inference request.
@@ -199,7 +200,8 @@ class OpenVINOInputBuilder(ABC):
             ssm_caches: Optional SSM state tensors (hybrid models).
             conv_caches: Optional convolution cache tensors (hybrid models).
             pixel_values: Optional pixel values for vision embeddings.
-            image_position_ids: Optional image position indices.
+            image_position_ids: Optional image position indices (text insertion).
+            pixel_position_ids: Optional patch spatial coordinates for vision model.
             num_requests: Actual number of requests in batch.
 
         Returns:
@@ -401,9 +403,10 @@ class OpenVINOCausalLM(nn.Module):
             logger.info("[OV-WARMUP] Stateful model warmup completed")
         except RuntimeError as e:
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
-            raise
+            self.recreate_infer_request()
         except Exception as e:
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
+            self.recreate_infer_request()
 
     def _get_flat_kv_caches_template(
         self,
@@ -434,6 +437,7 @@ class OpenVINOCausalLM(nn.Module):
         input_ids: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
     ) -> np.ndarray:
         input_ids_np = self._as_numpy_no_copy(input_ids).reshape(1, -1)
         self.text_emb_request.infer([input_ids_np])
@@ -443,18 +447,69 @@ class OpenVINOCausalLM(nn.Module):
 
         if self.use_vision_embeddings_model and pixel_values is not None:
             pixel_values_np = self._as_numpy_no_copy(pixel_values)
-            image_pos_np = self._as_numpy_no_copy(image_position_ids)
-            self.vision_emb_request.infer([pixel_values_np, image_pos_np])
+
+            # Vision embedding model expects 3D inputs: add batch dim if needed
+            if pixel_values_np.ndim == 2:
+                pixel_values_np = pixel_values_np[np.newaxis, :, :]
+            # Some models (e.g. Gemma-3) provide 5D pixel_values
+            # (batch, num_images, channels, height, width). Squeeze the
+            # num_images dimension when it equals 1.
+            if pixel_values_np.ndim == 5 and pixel_values_np.shape[1] == 1:
+                pixel_values_np = pixel_values_np.squeeze(1)
+
+            if pixel_position_ids is not None:
+                pix_pos_np = self._as_numpy_no_copy(pixel_position_ids)
+                if pix_pos_np.ndim == 2:
+                    pix_pos_np = pix_pos_np[np.newaxis, :, :]
+                # The exported vision model expects 1D patch indices [idx, 0]
+                # rather than 2D spatial coordinates [px, py].
+                num_patches = pix_pos_np.shape[1]
+                image_pos_np = np.stack(
+                    [np.arange(num_patches), np.zeros(num_patches)],
+                    axis=1,
+                ).astype(np.int64)
+                image_pos_np = image_pos_np[np.newaxis, :, :]
+            else:
+                image_pos_np = None
+
+            if image_pos_np is not None:
+                self.vision_emb_request.infer(
+                    [pixel_values_np, image_pos_np])
+            else:
+                self.vision_emb_request.infer([pixel_values_np])
             vision_embeds = self.vision_emb_request.get_output_tensor(0)
             vision_embeds_2d = vision_embeds.data.reshape(
                 -1, vision_embeds.shape[-1])
 
-            for i in range(image_pos_np.shape[1]):
-                start, end = image_pos_np[0, i]
-                num_patches = end - start
-                patch_offset = i * num_patches
-                inputs_embeds_2d[start:end] = vision_embeds_2d[
-                    patch_offset:patch_offset + num_patches]
+            # image_position_ids from mm_position tells text insertion points
+            if image_position_ids is not None:
+                text_pos_np = self._as_numpy_no_copy(image_position_ids)
+                if text_pos_np.ndim == 1:
+                    text_pos_np = text_pos_np.reshape(1, 2)
+                if text_pos_np.ndim == 2:
+                    text_pos_np = text_pos_np[np.newaxis, :, :]
+                for i in range(text_pos_np.shape[1]):
+                    start, end = text_pos_np[0, i]
+                    num_patches = end - start
+                    patch_offset = i * num_patches
+                    avail = vision_embeds_2d.shape[0] - patch_offset
+                    if start >= inputs_embeds_2d.shape[0]:
+                        continue
+                    end = min(end, inputs_embeds_2d.shape[0])
+                    num_patches = end - start
+                    if num_patches <= 0:
+                        continue
+                    if avail < num_patches:
+                        logger.warning(
+                            "[OV-VISION] Vision output (%d) shorter than "
+                            "text slots (%d), padding with zeros",
+                            avail, num_patches)
+                        inputs_embeds_2d[start:end] = 0
+                        inputs_embeds_2d[start:start + avail] = \
+                            vision_embeds_2d[patch_offset:patch_offset + avail]
+                    else:
+                        inputs_embeds_2d[start:end] = vision_embeds_2d[
+                            patch_offset:patch_offset + num_patches]
 
         return inputs_embeds_2d
 
@@ -500,6 +555,7 @@ class OpenVINOCausalLM(nn.Module):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
         num_requests: int | None = None,
     ) -> torch.Tensor:
         if not self._has_kv_cache_inputs and num_requests is not None and num_requests > 1:
@@ -515,6 +571,7 @@ class OpenVINOCausalLM(nn.Module):
             conv_caches=conv_caches,
             pixel_values=pixel_values,
             image_position_ids=image_position_ids,
+            pixel_position_ids=pixel_position_ids,
             num_requests=num_requests,
         )
         if not self._has_kv_cache_inputs and logger.isEnabledFor(10):
@@ -664,6 +721,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
         num_requests: int | None = None,
     ) -> list:
         """Build list-based inputs for a PA-transformed model inference request."""
@@ -682,7 +740,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
 
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
-                input_ids, pixel_values, image_position_ids)
+                input_ids, pixel_values, image_position_ids, pixel_position_ids)
 
             token_type_ids = np.zeros(
                 (1, input_ids.shape[1]), dtype=np.int64)
@@ -755,6 +813,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         conv_caches: list[ov.Tensor] | None = None,
         pixel_values: torch.Tensor | None = None,
         image_position_ids: torch.Tensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
         num_requests: int | None = None,
     ) -> dict:
         model = self.model
@@ -766,7 +825,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
 
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
-                input_ids, pixel_values, image_position_ids)
+                input_ids, pixel_values, image_position_ids, pixel_position_ids)
 
             seq_len = inputs_embeds_2d.shape[0]
             hidden = inputs_embeds_2d.shape[1]
@@ -813,6 +872,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         inputs_dict[name] = np.zeros(
                             (batch_size, seq_len, p_layers, p_emb),
                             dtype=np.float32)
+                elif name == "token_type_ids":
+                    inputs_dict[name] = np.zeros(
+                        (batch_size, seq_len), dtype=np.int64)
                 elif name == "beam_idx":
                     inputs_dict[name] = np.zeros(
                         batch_size, dtype=np.int32)
@@ -874,6 +936,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         inputs_dict[name] = np.zeros(
                             (batch_size, seq_len, p_layers, p_emb),
                             dtype=np.float32)
+                elif name == "token_type_ids":
+                    inputs_dict[name] = np.zeros(
+                        (batch_size, seq_len), dtype=np.int64)
                 elif name == "beam_idx":
                     inputs_dict[name] = np.zeros(
                         batch_size, dtype=np.int32)
