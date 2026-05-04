@@ -15,49 +15,32 @@ else:
 logger = init_logger(__name__)
 
 
-_MODEL_PRESETS: dict[str, dict[str, int]] = {
-    "gemma-4": {"min_kv_cache_gb": 32},
-    "gemma4": {"min_kv_cache_gb": 32},
-    "qwen3.5": {"min_kv_cache_gb": 16},
-    "qwen3_5": {"min_kv_cache_gb": 16},
-    "qwen-3.5": {"min_kv_cache_gb": 16},
-}
-
-
-def _inspect_model(model_path: str) -> dict:
-    result = {"is_stateful": False, "preset": None}
-    path_lower = model_path.lower()
-    for key, preset in _MODEL_PRESETS.items():
-        if key in path_lower:
-            result["preset"] = preset
-            break
+def _is_stateful_model(model_path: str) -> bool:
     if ov is None:
-        return result
+        return False
     from pathlib import Path
     model_dir = Path(model_path)
     if not model_dir.is_dir():
-        return result
+        return False
     ir_path = model_dir / "openvino_language_model.xml"
     if not ir_path.exists():
         ir_path = model_dir / "openvino_model.xml"
     if not ir_path.exists():
-        return result
+        return False
     try:
         ov_model = ov.Core().read_model(str(ir_path))
         has_readvalue = any(
             op.get_type_name() == "ReadValue" for op in ov_model.get_ops()
         )
         if has_readvalue:
-            result["is_stateful"] = True
-        else:
-            has_sdpa = any(
-                op.get_type_name() == "ScaledDotProductAttention"
-                for op in ov_model.get_ops()
-            )
-            result["is_stateful"] = not has_sdpa
+            return True
+        has_sdpa = any(
+            op.get_type_name() == "ScaledDotProductAttention"
+            for op in ov_model.get_ops()
+        )
+        return not has_sdpa
     except Exception:
-        pass
-    return result
+        return False
 
 
 # Constants for memory and block size configuration
@@ -129,11 +112,9 @@ class OpenVinoPlatform(Platform):
                 "the eager mode.")
             model_config.enforce_eager = True
 
-        inspection = _inspect_model(model_config.model)
-
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         if scheduler_config and scheduler_config.max_num_seqs != 1:
-            if inspection["is_stateful"]:
+            if _is_stateful_model(model_config.model):
                 logger.warning(
                     "Stateful OpenVINO model detected. Overriding "
                     "max_num_seqs from %d to 1.",
@@ -179,30 +160,19 @@ class OpenVinoPlatform(Platform):
                 cache_config.block_size = GPU_BLOCK_SIZE
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
-        preset = inspection["preset"]
         if kv_cache_space >= 0:
-            if kv_cache_space == 0:
-                if preset and preset.get("min_kv_cache_gb", 0) > DEFAULT_CPU_KV_CACHE_GB:
-                    recommended = preset["min_kv_cache_gb"]
-                    cache_config.openvino_kvcache_space_bytes = (
-                        recommended * GIB_BYTES)  # type: ignore
-                    logger.warning(
-                        "%s model detected. Auto-setting "
-                        "VLLM_OPENVINO_KVCACHE_SPACE to %d GB. "
-                        "Override with the env var if needed.",
-                        model_config.model, recommended)
-                elif OpenVinoPlatform.is_openvino_cpu():
-                    cache_config.openvino_kvcache_space_bytes = (
-                        DEFAULT_CPU_KV_CACHE_GB * GIB_BYTES)  # type: ignore
-                    logger.warning(
-                        "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
-                        "for OpenVINO backend is not set, using 4 by default.")
-                else:
-                    cache_config.openvino_kvcache_space_bytes = 0  # type: ignore
-                    logger.info(
-                        "VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU device. "
-                        "KV cache size will be determined automatically via "
-                        "profiling run.")
+            if kv_cache_space == 0 and OpenVinoPlatform.is_openvino_cpu():
+                cache_config.openvino_kvcache_space_bytes = (
+                    DEFAULT_CPU_KV_CACHE_GB * GIB_BYTES)  # type: ignore
+                logger.warning(
+                    "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
+                    "for OpenVINO backend is not set, using 4 by default.")
+            elif kv_cache_space == 0:
+                cache_config.openvino_kvcache_space_bytes = 0  # type: ignore
+                logger.info(
+                    "VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU device. "
+                    "KV cache size will be determined automatically via "
+                    "profiling run.")
             else:
                 cache_config.openvino_kvcache_space_bytes = (
                     kv_cache_space * GIB_BYTES)  # type: ignore
