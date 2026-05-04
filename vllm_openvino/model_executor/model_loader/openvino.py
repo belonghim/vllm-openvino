@@ -51,6 +51,7 @@ def has_op_with_type(function: ov.Model, type_name: str):
 
 ATTENTION_ONLY = "attention_only"
 HYBRID_MAMBA = "hybrid_mamba"
+STATEFUL = "stateful"
 
 
 def detect_model_type(ov_model: ov.Model) -> str:
@@ -59,6 +60,7 @@ def detect_model_type(ov_model: ov.Model) -> str:
             var_id = op.get_variable_id()
             if var_id and ("ssm" in var_id or "conv" in var_id):
                 return HYBRID_MAMBA
+            return STATEFUL
     return ATTENTION_ONLY
 
 
@@ -91,6 +93,7 @@ def apply_selective_paged_attention_transformation(model: ov.Model, model_type: 
     For HYBRID_MAMBA models: PA transformation is skipped due to PrevSequenceLengthPattern
     crash on SSM Gather/Reshape nodes. The model runs with internal KV cache.
     For ATTENTION_ONLY models: apply PA transformation only if SDPA ops exist.
+    For STATEFUL models: skip PA transformation; model manages KV cache via ReadValue/Assign.
     """
     if model_type == ATTENTION_ONLY:
         if not _has_sdpa_ops(model):
@@ -101,6 +104,13 @@ def apply_selective_paged_attention_transformation(model: ov.Model, model_type: 
             )
             return
         paged_attention_transformation(model)
+        return
+
+    if model_type == STATEFUL:
+        logger.info(
+            "Stateful model detected (ReadValue/Assign ops). "
+            "Skipping PagedAttention transformation."
+        )
         return
 
     # For hybrid models: skip PA transformation entirely due to C++ pattern matcher
@@ -255,7 +265,7 @@ class OpenVINOCausalLM(nn.Module):
             if perf_mode == "LATENCY" else {hints.performance_mode: hints.PerformanceMode.THROUGHPUT}
 
         if ov_device_upper == "CPU":
-            cpu_hint: dict[Any, Any] = {}
+            cpu_hint: dict[str, Any] = {}
 
             cpu_threads_num = envs.VLLM_OPENVINO_CPU_THREADS_NUM
             if cpu_threads_num > 0:
@@ -386,6 +396,7 @@ class OpenVINOCausalLM(nn.Module):
                 elif name == "per_layer_inputs":
                     inputs[name] = np.zeros(shape, dtype=dtype)
             self.ov_request.infer(inputs)
+            self.recreate_infer_request()
             logger.info("[OV-WARMUP] Stateful model warmup completed")
         except Exception as e:
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
@@ -400,7 +411,7 @@ class OpenVINOCausalLM(nn.Module):
         return list(self._flat_kv_caches_template)
 
     @staticmethod
-    def _as_numpy_no_copy(tensor_like: np.ndarray | ov.Tensor | torch.Tensor | Any) -> np.ndarray:
+    def _as_numpy_no_copy(tensor_like: np.ndarray | ov.Tensor | torch.Tensor) -> np.ndarray:
         if isinstance(tensor_like, np.ndarray):
             return tensor_like
         if isinstance(tensor_like, ov.Tensor):
@@ -413,6 +424,35 @@ class OpenVINOCausalLM(nn.Module):
         assert not isinstance(tensor_like, (ov.Tensor, torch.Tensor)), \
             f"_as_numpy_no_copy: unhandled type {type(tensor_like)}"
         return np.asarray(tensor_like)
+
+    def _prepare_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+        image_position_ids: torch.Tensor | None = None,
+    ) -> np.ndarray:
+        input_ids_np = self._as_numpy_no_copy(input_ids).reshape(1, -1)
+        self.text_emb_request.infer([input_ids_np])
+        inputs_embeds = self.text_emb_request.get_output_tensor(0)
+        inputs_embeds_2d = inputs_embeds.data.reshape(
+            -1, inputs_embeds.shape[-1])
+
+        if self.use_vision_embeddings_model and pixel_values is not None:
+            pixel_values_np = self._as_numpy_no_copy(pixel_values)
+            image_pos_np = self._as_numpy_no_copy(image_position_ids)
+            self.vision_emb_request.infer([pixel_values_np, image_pos_np])
+            vision_embeds = self.vision_emb_request.get_output_tensor(0)
+            vision_embeds_2d = vision_embeds.data.reshape(
+                -1, vision_embeds.shape[-1])
+
+            for i in range(image_pos_np.shape[1]):
+                start, end = image_pos_np[0, i]
+                num_patches = end - start
+                patch_offset = i * num_patches
+                inputs_embeds_2d[start:end] = vision_embeds_2d[
+                    patch_offset:patch_offset + num_patches]
+
+        return inputs_embeds_2d
 
     def _iter_block_table_inputs(self, attn_metadata):
         if self._use_grouped_block_table_inputs is None:
@@ -518,13 +558,26 @@ class OpenVINOCausalLM(nn.Module):
                     state.state.data[:] = 0
                     reset_count += 1
             logger.info("[OV-STATE] Reset %d/%d state tensors", reset_count, len(states))
+            self._state_reset_failed = False
+        except RuntimeError as e:
+            self._state_reset_failed = True
+            logger.warning("[OV-STATE] reset_states failed with RuntimeError: %s", e)
         except Exception as e:
+            self._state_reset_failed = True
             logger.warning("[OV-STATE] reset_states failed: %s", e)
+            raise
 
     def recreate_infer_request(self) -> None:
         if self._has_kv_cache_inputs:
             return
         try:
+            if hasattr(self, 'ov_request') and self.ov_request is not None:
+                self.ov_request = None
+            if hasattr(self, 'text_emb_request') and self.text_emb_request is not None:
+                self.text_emb_request = None
+            if hasattr(self, 'per_layer_emb_request') and self.per_layer_emb_request is not None:
+                self.per_layer_emb_request = None
+
             self.ov_request = self.ov_compiled.create_infer_request()
             if (self.ov_text_emb_compiled is not None
                     and hasattr(self, 'text_emb_request')):
@@ -532,29 +585,10 @@ class OpenVINOCausalLM(nn.Module):
             if (self.ov_per_layer_emb_compiled is not None
                     and hasattr(self, 'per_layer_emb_request')):
                 self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
-            states = self.ov_request.query_state()
-            for state in states:
-                state_tensor = state.state
-                shape = list(state_tensor.shape)
-                needs_resize = shape[0] == 0
-                if needs_resize:
-                    shape[0] = self._batch_size
-                np_dtype = {
-                    ov.Type.f32: np.float32,
-                    ov.Type.f16: np.float16,
-                    ov.Type.bf16: np.float32,
-                    ov.Type.i32: np.int32,
-                    ov.Type.i64: np.int64,
-                }.get(state_tensor.get_element_type(), np.float32)
-                if needs_resize:
-                    zeros = np.zeros(shape, dtype=np_dtype)
-                    state.state = ov.Tensor(zeros)
-                else:
-                    state.state.data[:] = 0
-            logger.info("[OV-STATE] Recreated infer request and zeroed %d states",
-                        len(states))
+            logger.info("[OV-STATE] Recreated infer request")
         except Exception as e:
             logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
+            raise
 
     @torch._dynamo.disable
     def sample(
@@ -569,6 +603,16 @@ class OpenVINOCausalLM(nn.Module):
         try:
             if hasattr(self, 'ov_request') and self.ov_request is not None:
                 self.ov_request = None
+            if (hasattr(self, 'text_emb_request')
+                    and self.text_emb_request is not None):
+                self.text_emb_request = None
+            if (hasattr(self, 'vision_emb_request')
+                    and self.vision_emb_request is not None):
+                self.vision_emb_request = None
+            if (hasattr(self, 'per_layer_emb_request')
+                    and self.per_layer_emb_request is not None):
+                self.per_layer_emb_request = None
+
             if hasattr(self, 'ov_compiled') and self.ov_compiled is not None:
                 self.ov_compiled.release_memory()
                 self.ov_compiled = None
@@ -576,6 +620,10 @@ class OpenVINOCausalLM(nn.Module):
                     and self.ov_text_emb_compiled is not None):
                 self.ov_text_emb_compiled.release_memory()
                 self.ov_text_emb_compiled = None
+            if (hasattr(self, 'ov_vision_emb_compiled')
+                    and self.ov_vision_emb_compiled is not None):
+                self.ov_vision_emb_compiled.release_memory()
+                self.ov_vision_emb_compiled = None
             if (hasattr(self, 'ov_per_layer_emb_compiled')
                     and self.ov_per_layer_emb_compiled is not None):
                 self.ov_per_layer_emb_compiled.release_memory()
@@ -620,30 +668,11 @@ class PAInputBuilder(OpenVINOInputBuilder):
             block_table_inputs.extend((block_indices, block_indices_begins))
 
         if model.use_text_embeddings_model:
-            # Gemma 3 style: language model takes inputs_embeds, not input_ids.
-            # Run text embeddings model first: input_ids (1D) → inputs_embeds.
-            input_ids_np = model._as_numpy_no_copy(input_ids).reshape(1, -1)
-            model.text_emb_request.infer([input_ids_np])
-            inputs_embeds = model.text_emb_request.get_output_tensor(0)
-            # inputs_embeds shape: [1, seq_len, hidden] → flatten to [seq_len, hidden]
-            inputs_embeds_2d = inputs_embeds.data.reshape(-1, inputs_embeds.shape[-1])
-
-            if model.use_vision_embeddings_model and pixel_values is not None:
-                pixel_values_np = model._as_numpy_no_copy(pixel_values)
-                image_pos_np = model._as_numpy_no_copy(image_position_ids)
-                model.vision_emb_request.infer([pixel_values_np, image_pos_np])
-                vision_embeds = model.vision_emb_request.get_output_tensor(0)
-                vision_embeds_2d = vision_embeds.data.reshape(
-                    -1, vision_embeds.shape[-1])
-
-                for i in range(image_pos_np.shape[1]):
-                    start, end = image_pos_np[0, i]
-                    num_patches = end - start
-                    patch_offset = i * num_patches
-                    inputs_embeds_2d[start:end] = vision_embeds_2d[patch_offset:patch_offset+num_patches]
+            inputs_embeds_2d = model._prepare_embeddings(
+                input_ids, pixel_values, image_position_ids)
 
             token_type_ids = np.zeros(
-                (1, input_ids_np.shape[1]), dtype=np.int64)
+                (1, input_ids.shape[1]), dtype=np.int64)
             inputs = [
                 positions,
                 token_type_ids,
@@ -722,27 +751,8 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                                if input_ids_np.ndim > 0 else 1))
 
         if model.use_text_embeddings_model:
-            input_ids_np = model._as_numpy_no_copy(input_ids).reshape(1, -1)
-            model.text_emb_request.infer([input_ids_np])
-            inputs_embeds = model.text_emb_request.get_output_tensor(0)
-            inputs_embeds_2d = inputs_embeds.data.reshape(
-                -1, inputs_embeds.shape[-1])
-
-            if model.use_vision_embeddings_model and pixel_values is not None:
-                pixel_values_np = model._as_numpy_no_copy(pixel_values)
-                image_pos_np = model._as_numpy_no_copy(image_position_ids)
-                model.vision_emb_request.infer(
-                    [pixel_values_np, image_pos_np])
-                vision_embeds = model.vision_emb_request.get_output_tensor(0)
-                vision_embeds_2d = vision_embeds.data.reshape(
-                    -1, vision_embeds.shape[-1])
-
-                for i in range(image_pos_np.shape[1]):
-                    start, end = image_pos_np[0, i]
-                    num_patches = end - start
-                    patch_offset = i * num_patches
-                    inputs_embeds_2d[start:end] = vision_embeds_2d[
-                        patch_offset:patch_offset + num_patches]
+            inputs_embeds_2d = model._prepare_embeddings(
+                input_ids, pixel_values, image_position_ids)
 
             seq_len = inputs_embeds_2d.shape[0]
             hidden = inputs_embeds_2d.shape[1]

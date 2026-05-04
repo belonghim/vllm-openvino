@@ -32,7 +32,7 @@ from vllm_openvino.model_executor.model_loader.openvino import HYBRID_MAMBA
 
 logger = init_logger(__name__)
 
-str_to_torch_type = {
+str_to_torch_type: dict[str, torch.dtype] = {
     "u8": torch.uint8,
     "i8": torch.int8,
     "fp16": torch.float16,
@@ -42,7 +42,7 @@ str_to_torch_type = {
     "fp32": torch.float32
 }
 
-USED_MEMORY_THRESHOLD = 1.1
+USED_MEMORY_THRESHOLD = 1.1  # 10% overhead for unaccounted memory
 
 
 class OpenVINOWorkerV1(WorkerBase):

@@ -47,7 +47,7 @@ class OpenVINOModelRunnerV1:
         self.input_batch = self._create_input_batch(self.num_cache_groups)
 
         # KV cache — set by worker after initialize_cache
-        self.kv_caches: list = []
+        self.kv_caches: list[tuple[ov.Tensor, ov.Tensor]] = []
         self.ssm_caches: list[ov.Tensor] = []
         self.conv_caches: list[ov.Tensor] = []
         self.block_size: int = 0
@@ -390,12 +390,12 @@ class OpenVINOModelRunnerV1:
         self.input_batch.refresh_metadata()
         new_req_ids = list(self.input_batch.req_ids)
 
-        if not self.model._has_kv_cache_inputs:
+        if self.model is not None and not self.model._has_kv_cache_inputs:
             has_running = any(req_id not in self._new_req_ids for req_id in new_req_ids if req_id is not None)
             has_new = any(req_id in self._new_req_ids for req_id in new_req_ids if req_id is not None)
             if has_new and not has_running:
-                logger.info("[OV-RUNNER] All slots are new requests, resetting states")
-                self.model.reset_states()
+                logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
+                self.model.recreate_infer_request()
             self._new_req_ids.clear()
 
         (

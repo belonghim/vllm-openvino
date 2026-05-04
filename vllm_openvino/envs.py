@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
 
+KV_CACHE_PRECISION_MAP: dict[str, str] = {
+    "u8": "u8", "i8": "i8",
+    "f16": "f16", "fp16": "f16",
+    "bf16": "bf16",
+    "f32": "f32", "fp32": "f32",
+}
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection
     # default is CPU

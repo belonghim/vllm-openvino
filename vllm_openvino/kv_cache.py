@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
-from typing import Any
-
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
@@ -14,7 +12,7 @@ try:
 except ImportError:
     ov = None  # type: ignore[assignment]
 
-str_to_ov_type: dict[str, Any] = {
+str_to_ov_type: dict[str, ov.Type] = {
     "u8": ov.Type.u8,
     "i8": ov.Type.i8,
     "fp16": ov.Type.f16,
@@ -68,7 +66,13 @@ class OpenVINOCacheEngine:
 
         # OpenVINO uses its own attention backend directly (no vLLM standard backend needed).
 
-        self.ov_cache_dtype = str_to_ov_type[self.cache_config.cache_dtype]
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype not in str_to_ov_type:
+            raise ValueError(
+                f"Invalid cache_dtype '{cache_dtype}' for OpenVINO backend. "
+                f"Valid options are: {list(str_to_ov_type.keys())}"
+            )
+        self.ov_cache_dtype = str_to_ov_type[cache_dtype]
 
         # Initialize the cache.
         self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_kv_cache(

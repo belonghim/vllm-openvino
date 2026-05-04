@@ -34,6 +34,12 @@ def _is_stateful_model(model_path: str) -> bool:
         )
         if has_readvalue:
             return True
+        has_pa = any(
+            op.get_type_name() == "PagedAttentionExtension"
+            for op in ov_model.get_ops()
+        )
+        if has_pa:
+            return False
         has_sdpa = any(
             op.get_type_name() == "ScaledDotProductAttention"
             for op in ov_model.get_ops()
@@ -45,9 +51,9 @@ def _is_stateful_model(model_path: str) -> bool:
 
 # Constants for memory and block size configuration
 GIB_BYTES = 1024 ** 3
-CPU_BLOCK_SIZE = 32
-GPU_BLOCK_SIZE = 16
-DEFAULT_CPU_KV_CACHE_GB = 4
+CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
+GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
+DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limited RAM
 
 try:
     import openvino as ov
@@ -126,14 +132,8 @@ class OpenVinoPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = GPU_BLOCK_SIZE
 
-        _kv_precision_map = {
-            "u8": "u8", "i8": "i8",
-            "f16": "f16", "fp16": "f16",
-            "bf16": "bf16",
-            "f32": "f32", "fp32": "f32",
-        }
         precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
-        cache_dtype = _kv_precision_map.get(precision_key or "")
+        cache_dtype = envs.KV_CACHE_PRECISION_MAP.get(precision_key or "")
         if cache_dtype is not None:
             logger.info(
                 "KV cache type is overridden to %s via "

@@ -77,9 +77,9 @@ class OpenVINOAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_tensor: ov.Tensor,
         dst_tensor: ov.Tensor,
-        src_to_dists: list[tuple[int, int]],
+        src_to_dsts: list[tuple[int, int]],
     ) -> None:
-        for src, dst in src_to_dists:
+        for src, dst in src_to_dsts:
             copy_cache_block(src_tensor, dst_tensor, src, dst)
 
     @staticmethod
