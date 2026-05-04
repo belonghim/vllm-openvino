@@ -85,9 +85,9 @@ class OpenVINOAttentionBackend(AttentionBackend):
     @staticmethod
     def copy_blocks(
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
-        src_to_dists: list[tuple[int, int]],
+        src_to_dsts: list[tuple[int, int]],
     ) -> None:
-        for src, dst in src_to_dists:
+        for src, dst in src_to_dsts:
             if src == dst:
                 continue
             for key_cache, value_cache in kv_caches:
