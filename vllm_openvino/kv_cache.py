@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
+from vllm_openvino import envs
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -15,11 +16,9 @@ except ImportError:
 str_to_ov_type: dict[str, ov.Type] = {
     "u8": ov.Type.u8,
     "i8": ov.Type.i8,
-    "fp16": ov.Type.f16,
     "f16": ov.Type.f16,
     "bf16": ov.Type.bf16,
     "f32": ov.Type.f32,
-    "fp32": ov.Type.f32,
     "dynamic": ov.Type.dynamic,
 } if ov is not None else {}
 
@@ -67,12 +66,13 @@ class OpenVINOCacheEngine:
         # OpenVINO uses its own attention backend directly (no vLLM standard backend needed).
 
         cache_dtype = self.cache_config.cache_dtype
-        if cache_dtype not in str_to_ov_type:
+        normalized = envs.KV_CACHE_PRECISION_MAP.get(cache_dtype, cache_dtype)
+        if normalized not in str_to_ov_type:
             raise ValueError(
                 f"Invalid cache_dtype '{cache_dtype}' for OpenVINO backend. "
                 f"Valid options are: {list(str_to_ov_type.keys())}"
             )
-        self.ov_cache_dtype = str_to_ov_type[cache_dtype]
+        self.ov_cache_dtype = str_to_ov_type[normalized]
 
         # Initialize the cache.
         self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_kv_cache(
@@ -230,6 +230,8 @@ class OpenVINOCacheEngine:
         conv_cache_config: list[ov.PartialShape] | None = None,
         block_size: int = 1,
     ) -> int:
+        normalized = envs.KV_CACHE_PRECISION_MAP.get(cache_dtype, cache_dtype)
+
         def _dim_len(dim, idx: int = -1):
             if dim.is_static:
                 return dim.get_length()
@@ -248,7 +250,7 @@ class OpenVINOCacheEngine:
                 ssm_elements = 1
                 for dim_idx, dim in enumerate(ssm_shape[1:], start=1):
                     ssm_elements *= _dim_len(dim, dim_idx)
-                total_elements += ssm_elements * (4 / str_to_ov_type[cache_dtype].size)
+                total_elements += ssm_elements * (4 / str_to_ov_type[normalized].size)
 
         # Add conv state size (fp32 = 4 bytes)
         if conv_cache_config:
@@ -256,9 +258,9 @@ class OpenVINOCacheEngine:
                 conv_elements = 1
                 for dim_idx, dim in enumerate(conv_shape[1:], start=1):
                     conv_elements *= _dim_len(dim, dim_idx)
-                total_elements += conv_elements * (4 / str_to_ov_type[cache_dtype].size)
+                total_elements += conv_elements * (4 / str_to_ov_type[normalized].size)
 
-        return str_to_ov_type[cache_dtype].size * total_elements
+        return str_to_ov_type[normalized].size * total_elements
 
     # --- KVCache Interface Methods ---
 

@@ -576,6 +576,8 @@ class OpenVINOCausalLM(nn.Module):
     def recreate_infer_request(self) -> None:
         if self._has_kv_cache_inputs:
             return
+        # OpenVINO 2026.1.0 enforces strict stride checks on state tensor
+        # resize; creating a fresh infer request is safer than in-place resize.
         try:
             if hasattr(self, 'ov_request') and self.ov_request is not None:
                 self.ov_request = None
