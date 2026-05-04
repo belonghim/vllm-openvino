@@ -14,6 +14,35 @@ else:
 
 logger = init_logger(__name__)
 
+
+def _is_stateful_model(model_path: str) -> bool:
+    if ov is None:
+        return False
+    from pathlib import Path
+    model_dir = Path(model_path)
+    if not model_dir.is_dir():
+        return False
+    ir_path = model_dir / "openvino_language_model.xml"
+    if not ir_path.exists():
+        ir_path = model_dir / "openvino_model.xml"
+    if not ir_path.exists():
+        return False
+    try:
+        ov_model = ov.Core().read_model(str(ir_path))
+        has_readvalue = any(
+            op.get_type_name() == "ReadValue" for op in ov_model.get_ops()
+        )
+        if has_readvalue:
+            return True
+        has_sdpa = any(
+            op.get_type_name() == "ScaledDotProductAttention"
+            for op in ov_model.get_ops()
+        )
+        return not has_sdpa
+    except Exception:
+        return False
+
+
 # Constants for memory and block size configuration
 GIB_BYTES = 1024 ** 3
 CPU_BLOCK_SIZE = 32
@@ -82,6 +111,15 @@ class OpenVinoPlatform(Platform):
                 "CUDA graph is not supported on OpenVINO backend, fallback to "
                 "the eager mode.")
             model_config.enforce_eager = True
+
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        if scheduler_config and scheduler_config.max_num_seqs != 1:
+            if _is_stateful_model(model_config.model):
+                logger.warning(
+                    "Stateful OpenVINO model detected. Overriding "
+                    "max_num_seqs from %d to 1.",
+                    scheduler_config.max_num_seqs)
+                scheduler_config.max_num_seqs = 1
 
         # check and update cache config
         cache_config = vllm_config.cache_config
