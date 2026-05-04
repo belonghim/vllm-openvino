@@ -24,40 +24,40 @@ _MODEL_PRESETS: dict[str, dict[str, int]] = {
 }
 
 
-def _match_model_preset(model_path: str) -> dict[str, int] | None:
+def _inspect_model(model_path: str) -> dict:
+    result = {"is_stateful": False, "preset": None}
     path_lower = model_path.lower()
     for key, preset in _MODEL_PRESETS.items():
         if key in path_lower:
-            return preset
-    return None
-
-
-def _is_stateful_model(model_path: str) -> bool:
+            result["preset"] = preset
+            break
     if ov is None:
-        return False
+        return result
     from pathlib import Path
     model_dir = Path(model_path)
     if not model_dir.is_dir():
-        return False
+        return result
     ir_path = model_dir / "openvino_language_model.xml"
     if not ir_path.exists():
         ir_path = model_dir / "openvino_model.xml"
     if not ir_path.exists():
-        return False
+        return result
     try:
         ov_model = ov.Core().read_model(str(ir_path))
         has_readvalue = any(
             op.get_type_name() == "ReadValue" for op in ov_model.get_ops()
         )
         if has_readvalue:
-            return True
-        has_sdpa = any(
-            op.get_type_name() == "ScaledDotProductAttention"
-            for op in ov_model.get_ops()
-        )
-        return not has_sdpa
+            result["is_stateful"] = True
+        else:
+            has_sdpa = any(
+                op.get_type_name() == "ScaledDotProductAttention"
+                for op in ov_model.get_ops()
+            )
+            result["is_stateful"] = not has_sdpa
     except Exception:
-        return False
+        pass
+    return result
 
 
 # Constants for memory and block size configuration
@@ -129,9 +129,11 @@ class OpenVinoPlatform(Platform):
                 "the eager mode.")
             model_config.enforce_eager = True
 
+        inspection = _inspect_model(model_config.model)
+
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         if scheduler_config and scheduler_config.max_num_seqs != 1:
-            if _is_stateful_model(model_config.model):
+            if inspection["is_stateful"]:
                 logger.warning(
                     "Stateful OpenVINO model detected. Overriding "
                     "max_num_seqs from %d to 1.",
@@ -177,7 +179,7 @@ class OpenVinoPlatform(Platform):
                 cache_config.block_size = GPU_BLOCK_SIZE
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
-        preset = _match_model_preset(model_config.model)
+        preset = inspection["preset"]
         if kv_cache_space >= 0:
             if kv_cache_space == 0:
                 if preset and preset.get("min_kv_cache_gb", 0) > DEFAULT_CPU_KV_CACHE_GB:

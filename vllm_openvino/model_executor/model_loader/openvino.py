@@ -359,6 +359,37 @@ class OpenVINOCausalLM(nn.Module):
                 per_layer_emb_model, ov_device, perf_hint)
             self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
 
+    def warmup(self) -> None:
+        if self._has_kv_cache_inputs:
+            return
+        try:
+            compiled = self.ov_request.get_compiled_model()
+            inputs = {}
+            for inp in compiled.inputs:
+                name = inp.get_any_name()
+                shape = [1 if d.is_dynamic else d.get_length()
+                         for d in inp.get_partial_shape()]
+                dtype = {
+                    ov.Type.i64: np.int64,
+                    ov.Type.i32: np.int32,
+                    ov.Type.f32: np.float32,
+                    ov.Type.f16: np.float16,
+                }.get(inp.get_element_type(), np.float32)
+                if name in ("input_ids", "inputs_embeds"):
+                    inputs[name] = np.zeros(shape, dtype=dtype)
+                elif name == "attention_mask":
+                    inputs[name] = np.ones(shape, dtype=dtype)
+                elif name == "position_ids":
+                    inputs[name] = np.zeros(shape, dtype=dtype)
+                elif name == "beam_idx":
+                    inputs[name] = np.zeros(shape, dtype=dtype)
+                elif name == "per_layer_inputs":
+                    inputs[name] = np.zeros(shape, dtype=dtype)
+            self.ov_request.infer(inputs)
+            logger.info("[OV-WARMUP] Stateful model warmup completed")
+        except Exception as e:
+            logger.warning("[OV-WARMUP] Warmup failed: %s", e)
+
     def _get_flat_kv_caches_template(
         self,
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
@@ -480,9 +511,13 @@ class OpenVINOCausalLM(nn.Module):
             return
         try:
             states = self.ov_request.query_state()
+            reset_count = 0
             for state in states:
-                state.state.data[:] = 0
-            logger.info("[OV-STATE] Reset %d state tensors", len(states))
+                name = state.name.lower()
+                if any(k in name for k in ("past_key_values", "key", "value", "ssm", "conv")):
+                    state.state.data[:] = 0
+                    reset_count += 1
+            logger.info("[OV-STATE] Reset %d/%d state tensors", reset_count, len(states))
         except Exception as e:
             logger.warning("[OV-STATE] reset_states failed: %s", e)
 

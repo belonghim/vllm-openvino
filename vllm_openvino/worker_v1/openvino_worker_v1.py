@@ -190,7 +190,11 @@ class OpenVINOWorkerV1(WorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-        compiled_model = self.model_runner.get_model().ov_request.get_compiled_model()
+        model = self.model_runner.get_model()
+        if hasattr(model, 'warmup'):
+            model.warmup()
+
+        compiled_model = model.ov_request.get_compiled_model()
 
         self.ssm_cache_config = []
         self.conv_cache_config = []

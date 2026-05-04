@@ -147,6 +147,24 @@ To measure throughput/latency improvements, use the provided benchmark script:
 
 The script runs a warmed-up benchmark against the local OpenAI-compatible endpoint and reports tokens/sec.
 
+## Serving Modes
+
+The plugin supports two serving paths depending on the model architecture:
+
+### PagedAttention (default)
+
+Models with `ScaledDotProductAttention` ops (e.g., Llama 3, Qwen2.5) are transformed to use vLLM's PagedAttention mechanism. This enables:
+- Concurrent request batching
+- External KV cache management
+- Full vLLM scheduler features
+
+### Stateful Path
+
+Models without SDPA ops (Gemma-4) or with hybrid Mamba/attention layers (Qwen3.5) run via OpenVINO's internal state management (`ReadValue`/`Assign`). Characteristics:
+- Sequential request processing (`max_num_seqs=1`)
+- Internal KV cache managed by OpenVINO runtime
+- Automatic detection and configuration — no manual flags needed
+
 ## Compatibility
 
 The following vLLM features are compatible with the OpenVINO backend:
@@ -158,6 +176,5 @@ The following vLLM features are compatible with the OpenVINO backend:
 ## Limitations
 
 - LoRA serving is not supported.
-- Stateful models (e.g., Gemma-4, Qwen3.5) require `max_num_seqs=1` as they do not support batched inference.
 - Single socket only; tensor/pipeline parallelism is not supported.
 - vLLM V1 engine only (vLLM 0.19.1).
