@@ -65,6 +65,32 @@ curl -s http://localhost:8080/v1/chat/completions \
 - `vllm_openvino/` 소스만 마운트로 교체 — vLLM core 등은 이미지 내 버전 사용
 - 이미지 내 `vllm_openvino`는 `/opt/app-root/vllm_openvino`에 설치됨
 
+## Vision (multimodal) 테스트
+
+Gemma-3/4와 같은 multimodal 모델은 이미지 입력을 처리할 수 있습니다. CPU에서 vision 추론은 매우 느립니다:
+
+- **Prefill**: 272 tokens 처리에 ~8-10초 (vision embedding 생성 포함)
+- **Decode**: 토큰당 ~15-30초 (CPU 제한)
+- **전체 요청**: max_tokens=16 기준 ~3-4분 소요
+
+```bash
+# Vision 요청 테스트
+# 1x1 PNG 이미지 (base64) + 질문
+curl -s --max-time 240 http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/models",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+        {"type": "text", "text": "What color is this?"}
+      ]
+    }],
+    "max_tokens": 16
+  }'
+```
+
 ---
 
 ## 테스트 인프라

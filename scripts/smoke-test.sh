@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # smoke-test.sh — Regression smoke test for vllm-openvino
 # Tests all available models with simple arithmetic prompts.
-# Usage: ./scripts/smoke-test.sh
+# Usage: ./scripts/smoke-test.sh [--vision]
 
 set -uo pipefail
+
+ENABLE_VISION=false
+for arg in "$@"; do
+  if [[ "$arg" == "--vision" ]]; then
+    ENABLE_VISION=true
+  fi
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -128,7 +135,7 @@ except Exception:
 " 2>/dev/null)
   fi
 
-  if [[ "$has_vision" == "true" ]]; then
+  if [[ "$ENABLE_VISION" == "true" && "$has_vision" == "true" ]]; then
     local vision_response
     vision_response=$(curl -sf --max-time 120 "$API_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \

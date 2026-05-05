@@ -452,9 +452,10 @@ class OpenVINOCausalLM(nn.Module):
             if pix_pos_np.ndim == 2:
                 pix_pos_np = pix_pos_np[np.newaxis, :, :]
             second_col = pix_pos_np[0, :, 1]
-            valid_y = second_col[second_col >= 0]
-            unique_y = np.unique(valid_y) if valid_y.size > 0 else [0]
-            if len(unique_y) == 1 and unique_y[0] == 0:
+            # Heuristic: if >90% of entries have Y=0 (ignoring padding),
+            # vLLM provided (patch_idx, 0) format.
+            non_neg = second_col[second_col >= 0]
+            if non_neg.size > 0 and np.mean(non_neg == 0) > 0.9:
                 num_patches = pix_pos_np.shape[1]
                 image_pos_np = np.stack(
                     [np.arange(num_patches), np.zeros(num_patches)],
