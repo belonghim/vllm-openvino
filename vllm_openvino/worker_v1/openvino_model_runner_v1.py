@@ -286,25 +286,24 @@ class OpenVINOModelRunnerV1:
         ]
         mm_req_ids.sort(key=self.input_batch.req_id_to_index.__getitem__)
         for req_id in mm_req_ids:
+            req_index = self.input_batch.req_id_to_index[req_id]
+            num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
+            if num_computed > 0:
+                continue
             request = self.requests[req_id]
             for mm_feature in request.mm_features:
-                # mm_feature.data is MultiModalKwargsItem (dict-like) in vLLM 0.19.1
                 mm_item = mm_feature.data
                 if mm_item is not None:
-                    # Extract pixel_values tensor from MultiModalKwargsItem
                     if "pixel_values" in mm_item:
                         all_pixel_values.append(mm_item["pixel_values"].data)
                     else:
-                        # Fallback: use first available tensor key
                         for _key, elem in mm_item.items():
                             if hasattr(elem.data, 'shape'):
                                 all_pixel_values.append(elem.data)
                                 break
-                    # Extract pixel_position_ids for vision model
                     if "pixel_position_ids" in mm_item:
                         all_pixel_position_ids.append(
                             mm_item["pixel_position_ids"].data)
-                # Convert PlaceholderRange to (start, end) tuple for text insertion
                 pos = mm_feature.mm_position
                 all_image_position_ids.append(
                     (pos.offset, pos.offset + pos.length))
