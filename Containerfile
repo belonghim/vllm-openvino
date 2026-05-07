@@ -10,7 +10,7 @@ RUN pip install -U pip setuptools wheel && \
     pip uninstall -y triton && \
     pip cache purge
 WORKDIR /opt/vllm
-COPY pyproject.toml vllm_openvino ./
+COPY pyproject.toml ./
 RUN pip install --no-deps --no-cache-dir .
 FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
 RUN microdnf install -y python3 shadow-utils && microdnf clean all
@@ -18,6 +18,7 @@ COPY --from=builder /opt/vllm-env /opt/vllm-env
 ENV VIRTUAL_ENV=/opt/vllm-env
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
+COPY vllm_openvino ./vllm_openvino
 RUN mkdir /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
-ENV VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU
+ENV PYTHONPATH=/opt/app-root VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_DEVICE=CPU
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
