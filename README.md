@@ -34,17 +34,17 @@ pip uninstall -y triton
 Build the Docker image:
 
 ```bash
-docker build -f Containerfile -t vllm-openvino .
+podman build -f Containerfile -t quay.io/joopark/vllm-openvino .
 ```
 
 Run the Docker container:
 
 ```bash
-docker run -d --name vllm-server -p 8000:8000 \
+podman run -d --name vllm-server -p 8000:8000 \
   -e VLLM_OPENVINO_DEVICE=CPU \
   -e TORCH_COMPILE_DISABLE=1 \
   -e VLLM_OPENVINO_KVCACHE_SPACE=8 \
-  vllm-openvino \
+  quay.io/joopark/vllm-openvino \
   --model <model_id>
 ```
 
