@@ -55,12 +55,6 @@ class OpenVINOAttentionBackend(AttentionBackend):
         return OpenVINOAttentionMetadataBuilder
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
-        raise NotImplementedError
-
-
-
-    @staticmethod
     def make_openvino_metadata(*args, **kwargs) -> "OpenVINOAttentionMetadata":
         return OpenVINOAttentionMetadata(*args, **kwargs)
 
