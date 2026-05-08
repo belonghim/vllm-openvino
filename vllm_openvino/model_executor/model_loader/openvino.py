@@ -376,6 +376,7 @@ class OpenVINOCausalLM(nn.Module):
     def warmup(self) -> None:
         if self._has_kv_cache_inputs:
             return
+        warmup_failed = False
         try:
             compiled = self.ov_request.get_compiled_model()
             inputs = {}
@@ -405,11 +406,27 @@ class OpenVINOCausalLM(nn.Module):
             self.recreate_infer_request()
             logger.info("[OV-WARMUP] Stateful model warmup completed")
         except RuntimeError as e:
+            warmup_failed = True
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
-            self.recreate_infer_request()
+            try:
+                self.recreate_infer_request()
+            except Exception as recreate_error:
+                logger.warning(
+                    "[OV-WARMUP] recreate_infer_request failed after warmup RuntimeError: %s",
+                    recreate_error,
+                )
         except Exception as e:
+            warmup_failed = True
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
-            self.recreate_infer_request()
+            try:
+                self.recreate_infer_request()
+            except Exception as recreate_error:
+                logger.warning(
+                    "[OV-WARMUP] recreate_infer_request failed after warmup failure: %s",
+                    recreate_error,
+                )
+        if warmup_failed:
+            logger.warning("[OV-WARMUP] Warmup encountered recoverable failure")
 
     def _get_flat_kv_caches_template(
         self,
@@ -641,7 +658,11 @@ class OpenVINOCausalLM(nn.Module):
             logger.warning("[OV-STATE] reset_states failed with RuntimeError: %s", e)
         except Exception as e:
             self._state_reset_failed = True
-            logger.warning("[OV-STATE] reset_states failed: %s", e)
+            logger.error(
+                "[OV-STATE] reset_states failed: %s. State may be partially reset/invalid; "
+                "do not continue inference on this request.",
+                e,
+            )
             raise
 
     def recreate_infer_request(self) -> None:
@@ -711,9 +732,11 @@ class OpenVINOCausalLM(nn.Module):
                 self.ov_per_layer_emb_compiled.release_memory()
                 self.ov_per_layer_emb_compiled = None
         except RuntimeError as e:
-            logger.warning("[OV-MODEL] shutdown failed: %s", e)
+            logger.error("[OV-MODEL] shutdown failed: %s", e)
+            raise
         except Exception as e:
-            logger.warning("[OV-MODEL] shutdown failed: %s", e)
+            logger.error("[OV-MODEL] shutdown failed: %s", e)
+            raise
 
 
 class PAInputBuilder(OpenVINOInputBuilder):

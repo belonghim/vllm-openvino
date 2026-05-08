@@ -14,6 +14,12 @@ else:
 
 logger = init_logger(__name__)
 
+try:
+    import openvino as ov
+except ImportError as e:
+    ov = None  # type: ignore[assignment]
+    logger.warning("Failed to import OpenVINO with %r", e)
+
 
 def _is_stateful_model(model_path: str) -> bool:
     if ov is None:

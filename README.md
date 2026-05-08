@@ -178,3 +178,14 @@ The following vLLM features are compatible with the OpenVINO backend:
 - LoRA serving is not supported.
 - Single socket only; tensor/pipeline parallelism is not supported.
 - vLLM V1 engine only (vLLM 0.19.1).
+
+## Future OpenVINO Support
+
+OpenVINO 2026.x release notes indicate that **stateful model support will be deprecated** in future versions. The stateful execution path (used for Gemma-4 and hybrid Mamba models) relies on OpenVINO's `ReadValue`/`Assign` operations, which may not be available in OpenVINO 2027.0+.
+
+**Action items** for users:
+- Prefer PagedAttention-compatible models (Llama 3, Qwen 2.5, etc.) for long-term support
+- Plan migration away from stateful models (Gemma-4, Qwen3.5) by end of 2026
+- Monitor [OpenVINO GitHub releases](https://github.com/openvinotoolkit/openvino/releases) for deprecation timeline
+
+See `docs/compatibility.md` for current support matrix.
