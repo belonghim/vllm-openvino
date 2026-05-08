@@ -109,6 +109,11 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 
 > ⚠️ **참고**: OpenCode 에이전트는 `AGENTS.md`만 자동으로 읽습니다. `docs/` 하위 파일은 에이전트가 직접 읽지 않으므로, 본 문서에 명시된 제약 사항(설계 원칙, 의사결정 체크리스트, ⛔ 항목)이 에이전트의 **유일한 보장된 컨텍스트**입니다.
 
+## Git 및 Commits 정책
+
+- **Co-authored-by 미사용**: AI agent는 commits를 할 때 `Co-authored-by` trailer를 추가하지 않습니다. 모든 commits은 belonghim 계정의 이름으로만 기록됩니다.
+- **사유**: GitHub contributor 목록의 명확성을 위해. 실제 코드 개발은 사용자(belonghim)이고, AI agent는 개발 보조 도구입니다.
+
 ## 참조 문서
 
 | 문서 | 내용 |
