@@ -403,7 +403,6 @@ class OpenVINOModelRunnerV1:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        old_req_ids = list(self.input_batch.req_ids)
         self.input_batch.condense()
         self.input_batch.refresh_metadata()
         new_req_ids = list(self.input_batch.req_ids)
@@ -462,8 +461,6 @@ class OpenVINOModelRunnerV1:
         logprobs_lists = sampler_output.logprobs_tensors.tolists() \
             if sampler_output.logprobs_tensors is not None else None
 
-        valid_sampled_tokens = sampled_tokens
-
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             req_index = self.input_batch.req_id_to_index[req_id]
@@ -486,12 +483,12 @@ class OpenVINOModelRunnerV1:
             # Ignore the sampled token for partial prefills (chunked prefill).
             # seq_len < num_prompt_tokens means we haven't finished the prompt.
             if seq_len < req_state.num_prompt_tokens:
-                valid_sampled_tokens[i] = []
+                sampled_tokens[i] = []
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=valid_sampled_tokens,
+            sampled_token_ids=sampled_tokens,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
             pooler_output=None,

@@ -647,31 +647,6 @@ class OpenVINOCausalLM(nn.Module):
         return logits
 
 
-    def reset_states(self) -> None:
-        if self._has_kv_cache_inputs:
-            return
-        try:
-            states = self.ov_request.query_state()
-            reset_count = 0
-            for state in states:
-                name = state.name.lower()
-                if any(k in name for k in ("past_key_values", "key", "value", "ssm", "conv")):
-                    state.state.data[:] = 0
-                    reset_count += 1
-            logger.info("[OV-STATE] Reset %d/%d state tensors", reset_count, len(states))
-            self._state_reset_failed = False
-        except RuntimeError as e:
-            self._state_reset_failed = True
-            logger.warning("[OV-STATE] reset_states failed with RuntimeError: %s", e)
-        except Exception as e:
-            self._state_reset_failed = True
-            logger.error(
-                "[OV-STATE] reset_states failed: %s. State may be partially reset/invalid; "
-                "do not continue inference on this request.",
-                e,
-            )
-            raise
-
     def recreate_infer_request(self) -> None:
         if self._has_kv_cache_inputs:
             return

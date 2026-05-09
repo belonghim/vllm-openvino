@@ -53,12 +53,6 @@ CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
 GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
 DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limited RAM
 
-try:
-    import openvino as ov
-except ImportError as e:
-    ov = None  # type: ignore[assignment]
-    logger.warning("Failed to import OpenVINO with %r", e)
-
 
 class OpenVinoPlatform(Platform):
     # PlatformEnum.CPU is used because PlatformEnum.OPENVINO may not exist in
