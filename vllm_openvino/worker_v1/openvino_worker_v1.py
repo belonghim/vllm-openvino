@@ -28,7 +28,9 @@ import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
 from vllm_openvino.kv_cache import OpenVINOCacheEngine
 from vllm_openvino.utils import determine_num_available_blocks, get_max_allocatable_memory_gpu, format_memory_size
-from vllm_openvino.model_executor.model_loader.openvino import HYBRID_MAMBA
+from vllm_openvino.model_executor.model_loader.openvino import (
+    ATTENTION_ONLY, HYBRID_MAMBA, STATEFUL,
+)
 
 logger = init_logger(__name__)
 
@@ -166,6 +168,18 @@ class OpenVINOWorkerV1(WorkerBase):
             self.value_cache_config = value_cache_config
             if cache_dtype is not None:
                 self.cache_dtype = cache_dtype
+
+            if ssm_cache_config or conv_cache_config:
+                self._preloaded_model_type = HYBRID_MAMBA
+            elif key_cache_config or value_cache_config:
+                self._preloaded_model_type = STATEFUL
+            else:
+                self._preloaded_model_type = ATTENTION_ONLY
+            self._preloaded_ssm_state_shapes = {
+                "ssm": list(zip(ssm_cache_config, ssm_cache_dtypes)),
+                "conv": list(zip(conv_cache_config, conv_cache_dtypes)),
+            }
+
             if self.ssm_cache_config or self.conv_cache_config:
                 logger.info(
                     "Preloaded hybrid cache shapes from %s: ssm=%d conv=%d",
@@ -188,7 +202,10 @@ class OpenVINOWorkerV1(WorkerBase):
             )
 
     def load_model(self):
-        self.model_runner.load_model()
+        self.model_runner.load_model(
+            preloaded_model_type=getattr(self, '_preloaded_model_type', None),
+            preloaded_ssm_state_shapes=getattr(self, '_preloaded_ssm_state_shapes', None),
+        )
 
         model = self.model_runner.get_model()
         if hasattr(model, 'warmup'):
@@ -304,6 +321,8 @@ class OpenVINOWorkerV1(WorkerBase):
             ov_device,
             self.ssm_cache_config,
             self.conv_cache_config,
+            self.ssm_cache_dtypes,
+            self.conv_cache_dtypes,
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache

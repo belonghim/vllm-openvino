@@ -42,6 +42,8 @@ class OpenVINOCacheEngine:
         ov_device: str,
         ssm_cache_config: list[ov.PartialShape] | None = None,
         conv_cache_config: list[ov.PartialShape] | None = None,
+        ssm_cache_dtypes: list[str] | None = None,
+        conv_cache_dtypes: list[str] | None = None,
     ) -> None:
         # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
         # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
@@ -54,6 +56,8 @@ class OpenVINOCacheEngine:
         self.value_cache_config = value_cache_config
         self.ssm_cache_config = ssm_cache_config if ssm_cache_config is not None else []
         self.conv_cache_config = conv_cache_config if conv_cache_config is not None else []
+        self.ssm_cache_dtypes = ssm_cache_dtypes if ssm_cache_dtypes is not None else []
+        self.conv_cache_dtypes = conv_cache_dtypes if conv_cache_dtypes is not None else []
         self.num_layers = len(self.value_cache_config)
 
         self.block_size = cache_config.block_size
@@ -138,19 +142,21 @@ class OpenVINOCacheEngine:
         """Allocates SSM state cache for hybrid models."""
         ssm_cache: list[ov.Tensor] = []
 
-        for ssm_pshape in self.ssm_cache_config:
+        for idx, ssm_pshape in enumerate(self.ssm_cache_config):
             ssm_dims = [
                 num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
                 for i, dim in enumerate(ssm_pshape)
             ]
             ssm_shape = ov.PartialShape(ssm_dims).to_shape()
+            dtype_str = self.ssm_cache_dtypes[idx] if idx < len(self.ssm_cache_dtypes) else "f32"
+            ssm_ov_type = str_to_ov_type.get(dtype_str, ov.Type.f32)
 
             if current_platform.is_openvino_cpu():
-                ssm_tensor = ov.Tensor(ov.Type.f32, ssm_shape)
+                ssm_tensor = ov.Tensor(ssm_ov_type, ssm_shape)
                 ssm_tensor.data.fill(0)
             else:
                 remote_context = ov_core.get_default_context(ov_device)
-                ssm_tensor = remote_context.create_tensor(ov.Type.f32, ssm_shape, {})
+                ssm_tensor = remote_context.create_tensor(ssm_ov_type, ssm_shape, {})
             ssm_cache.append(ssm_tensor)
 
         return ssm_cache
@@ -164,19 +170,21 @@ class OpenVINOCacheEngine:
         """Allocates conv state cache for hybrid models."""
         conv_cache: list[ov.Tensor] = []
 
-        for conv_pshape in self.conv_cache_config:
+        for idx, conv_pshape in enumerate(self.conv_cache_config):
             conv_dims = [
                 num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
                 for i, dim in enumerate(conv_pshape)
             ]
             conv_shape = ov.PartialShape(conv_dims).to_shape()
+            dtype_str = self.conv_cache_dtypes[idx] if idx < len(self.conv_cache_dtypes) else "f32"
+            conv_ov_type = str_to_ov_type.get(dtype_str, ov.Type.f32)
 
             if current_platform.is_openvino_cpu():
-                conv_tensor = ov.Tensor(ov.Type.f32, conv_shape)
+                conv_tensor = ov.Tensor(conv_ov_type, conv_shape)
                 conv_tensor.data.fill(0)
             else:
                 remote_context = ov_core.get_default_context(ov_device)
-                conv_tensor = remote_context.create_tensor(ov.Type.f32, conv_shape, {})
+                conv_tensor = remote_context.create_tensor(conv_ov_type, conv_shape, {})
             conv_cache.append(conv_tensor)
 
         return conv_cache

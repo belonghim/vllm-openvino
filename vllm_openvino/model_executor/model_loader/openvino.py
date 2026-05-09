@@ -216,6 +216,8 @@ class OpenVINOCausalLM(nn.Module):
         self,
         ov_core: ov.Core,
         model_config: ModelConfig,
+        preloaded_model_type: str | None = None,
+        preloaded_ssm_state_shapes: dict | None = None,
     ) -> None:
         super().__init__()
         self.logits_processor = LogitsProcessor(
@@ -248,9 +250,14 @@ class OpenVINOCausalLM(nn.Module):
 
         ov_model = ov_core.read_model(str(model_dir / ir_filename))
 
-        # Detect model type before PA transformation
-        self.model_type = detect_model_type(ov_model)
-        self.ssm_state_shapes = get_ssm_state_shapes(ov_model)
+        if preloaded_model_type is not None:
+            self.model_type = preloaded_model_type
+        else:
+            self.model_type = detect_model_type(ov_model)
+        if preloaded_ssm_state_shapes is not None:
+            self.ssm_state_shapes = preloaded_ssm_state_shapes
+        else:
+            self.ssm_state_shapes = get_ssm_state_shapes(ov_model)
 
         apply_selective_paged_attention_transformation(ov_model, self.model_type)
         if has_op_with_type(ov_model, "PagedAttentionExtension"):
@@ -780,7 +787,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
                 input_ids, pixel_values, image_position_ids, pixel_position_ids)
 
             token_type_ids = np.zeros(
-                (1, input_ids.shape[1]), dtype=np.int64)
+                (1, input_ids.shape[0]), dtype=np.int64)
             inputs = [
                 positions,
                 token_type_ids,
@@ -931,8 +938,15 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
 def get_model(
     vllm_config: VllmConfig,
     ov_core: ov.Core,
+    preloaded_model_type: str | None = None,
+    preloaded_ssm_state_shapes: dict | None = None,
 ) -> torch.nn.Module:
     with set_current_vllm_config(vllm_config):
-        return OpenVINOCausalLM(ov_core, vllm_config.model_config)
+        return OpenVINOCausalLM(
+            ov_core,
+            vllm_config.model_config,
+            preloaded_model_type=preloaded_model_type,
+            preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
+        )
 
  

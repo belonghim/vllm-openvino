@@ -132,9 +132,17 @@ class OpenVINOModelRunnerV1:
         self.input_batch = self._create_input_batch(self.num_cache_groups)
         self._init_block_index_tensors()
 
-    def load_model(self) -> None:
-        self.model = get_model(vllm_config=self.vllm_config,
-                               ov_core=self.ov_core)
+    def load_model(
+        self,
+        preloaded_model_type: str | None = None,
+        preloaded_ssm_state_shapes: dict | None = None,
+    ) -> None:
+        self.model = get_model(
+            vllm_config=self.vllm_config,
+            ov_core=self.ov_core,
+            preloaded_model_type=preloaded_model_type,
+            preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
+        )
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -214,8 +222,8 @@ class OpenVINOModelRunnerV1:
 
         token_idx = 0
         pos_idx = 0
-        seq_lens = []
-        query_lens = []
+        max_seq_len = 0
+        max_query_len = 0
 
         n_reqs = 0
         self._subseq_begins_buf[0] = 0
@@ -257,9 +265,11 @@ class OpenVINOModelRunnerV1:
             num_tokens = num_tokens_total - num_computed
 
             seq_len = num_tokens_total
-            seq_lens.append(seq_len)
+            if seq_len > max_seq_len:
+                max_seq_len = seq_len
             query_len = num_tokens
-            query_lens.append(query_len)
+            if query_len > max_query_len:
+                max_query_len = query_len
             self._input_tokens_buf[token_idx:token_idx + num_tokens] = \
                 self.input_batch.token_ids_cpu[req_index, num_computed:num_tokens_total]
             token_idx += num_tokens
@@ -325,8 +335,7 @@ class OpenVINOModelRunnerV1:
                 image_position_ids = image_position_ids.to(self.device)
             multi_modal_kwargs["image_position_ids"] = image_position_ids
 
-        max_query_len = max(query_lens)
-        assert max_query_len > 0, "Invalid query_lens: {}".format(query_lens)
+        assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
 
         input_tokens = ov.Tensor(
             self._input_tokens_buf[:token_idx],
@@ -364,7 +373,7 @@ class OpenVINOModelRunnerV1:
                     n_reqs + 1,
                 )
             )
-        max_context_len_tensor = ov.Tensor(np.array(max(seq_lens), dtype=np.int32))
+        max_context_len_tensor = ov.Tensor(np.array(max_seq_len, dtype=np.int32))
 
         attn_metadata = OpenVINOAttentionMetadata(
             past_lens=past_lens_tensor,
