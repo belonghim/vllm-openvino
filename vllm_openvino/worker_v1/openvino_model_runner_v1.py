@@ -37,8 +37,11 @@ class OpenVINOModelRunnerV1:
         self.parallel_config = vllm_config.parallel_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
-        self.ov_core = ov_core or ov.Core()
-        self.ov_core.set_property({ov_props.enable_mmap: True})
+        if ov_core is not None:
+            self.ov_core = ov_core
+        else:
+            self.ov_core = ov.Core()
+            self.ov_core.set_property({ov_props.enable_mmap: True})
         self.model: nn.Module  # Set after load_model()
 
         # V1 state management
@@ -251,23 +254,19 @@ class OpenVINOModelRunnerV1:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
             num_tokens_total = num_computed + num_scheduled_tokens
-
-            tokens = self.input_batch.token_ids_cpu[
-                req_index, num_computed:num_tokens_total
-            ].tolist()
+            num_tokens = num_tokens_total - num_computed
 
             seq_len = num_tokens_total
             seq_lens.append(seq_len)
-            query_len = len(tokens)
+            query_len = num_tokens
             query_lens.append(query_len)
-            num_tokens = len(tokens)
-            self._input_tokens_buf[token_idx:token_idx + num_tokens] = tokens
+            self._input_tokens_buf[token_idx:token_idx + num_tokens] = \
+                self.input_batch.token_ids_cpu[req_index, num_computed:num_tokens_total]
             token_idx += num_tokens
 
-            positions_range = range(num_computed, num_tokens_total)
-            num_positions = len(positions_range)
-            self._input_positions_buf[pos_idx:pos_idx + num_positions] = list(positions_range)
-            pos_idx += num_positions
+            self._input_positions_buf[pos_idx:pos_idx + num_tokens] = np.arange(
+                num_computed, num_tokens_total, dtype=np.int64)
+            pos_idx += num_tokens
 
             self._past_lens_buf[n_reqs] = num_computed
             self._subseq_begins_buf[n_reqs + 1] = self._subseq_begins_buf[n_reqs] + query_len
@@ -401,8 +400,16 @@ class OpenVINOModelRunnerV1:
         new_req_ids = list(self.input_batch.req_ids)
 
         if self.model is not None and not self.model._has_kv_cache_inputs:
-            has_running = any(req_id not in self._new_req_ids for req_id in new_req_ids if req_id is not None)
-            has_new = any(req_id in self._new_req_ids for req_id in new_req_ids if req_id is not None)
+            has_running = has_new = False
+            for req_id in new_req_ids:
+                if req_id is None:
+                    continue
+                if req_id in self._new_req_ids:
+                    has_new = True
+                else:
+                    has_running = True
+                if has_running and has_new:
+                    break
             if has_new and not has_running:
                 logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
                 self.model.recreate_infer_request()
@@ -416,8 +423,7 @@ class OpenVINOModelRunnerV1:
             multi_modal_kwargs,
         ) = self._prepare_inputs(scheduler_output)
 
-        actual_num_requests = sum(
-            1 for req_id in self.input_batch.req_ids if req_id is not None)
+        actual_num_requests = len(self.input_batch.req_id_to_index)
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids": input_tokens,

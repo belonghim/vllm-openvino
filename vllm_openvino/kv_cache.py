@@ -139,9 +139,11 @@ class OpenVINOCacheEngine:
         ssm_cache: list[ov.Tensor] = []
 
         for ssm_pshape in self.ssm_cache_config:
-            ssm_shape = ssm_pshape
-            ssm_shape[0] = num_blocks
-            ssm_shape = ssm_shape.to_shape()
+            ssm_dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
+                for i, dim in enumerate(ssm_pshape)
+            ]
+            ssm_shape = ov.PartialShape(ssm_dims).to_shape()
 
             if current_platform.is_openvino_cpu():
                 ssm_tensor = ov.Tensor(ov.Type.f32, ssm_shape)
@@ -163,9 +165,11 @@ class OpenVINOCacheEngine:
         conv_cache: list[ov.Tensor] = []
 
         for conv_pshape in self.conv_cache_config:
-            conv_shape = conv_pshape
-            conv_shape[0] = num_blocks
-            conv_shape = conv_shape.to_shape()
+            conv_dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
+                for i, dim in enumerate(conv_pshape)
+            ]
+            conv_shape = ov.PartialShape(conv_dims).to_shape()
 
             if current_platform.is_openvino_cpu():
                 conv_tensor = ov.Tensor(ov.Type.f32, conv_shape)
@@ -192,13 +196,16 @@ class OpenVINOCacheEngine:
             "CPU device isn't supposed to have swap cache"
 
         for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
-            key_cache_shape = key_cache_pshape
-            value_cache_shape = value_cache_pshape
-            key_cache_shape[0] = num_blocks
-            value_cache_shape[0] = num_blocks
-
-            key_blocks = ov.Tensor(self.ov_cache_dtype, key_cache_shape.to_shape())
-            value_blocks = ov.Tensor(self.ov_cache_dtype, value_cache_shape.to_shape())
+            key_dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
+                for i, dim in enumerate(key_cache_pshape)
+            ]
+            value_dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
+                for i, dim in enumerate(value_cache_pshape)
+            ]
+            key_blocks = ov.Tensor(self.ov_cache_dtype, ov.PartialShape(key_dims).to_shape())
+            value_blocks = ov.Tensor(self.ov_cache_dtype, ov.PartialShape(value_dims).to_shape())
             swap_cache.append((key_blocks, value_blocks))
 
         return swap_cache

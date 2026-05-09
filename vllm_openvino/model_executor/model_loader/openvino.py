@@ -863,126 +863,67 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids)
-
             seq_len = inputs_embeds_2d.shape[0]
-            hidden = inputs_embeds_2d.shape[1]
+        else:
+            seq_len = input_ids_np.shape[0] if input_ids_np.ndim == 1 else input_ids_np.shape[1]
 
-            for name, shape in self.input_shapes.items():
-                if name == "inputs_embeds":
+        for name, shape in self.input_shapes.items():
+            if name == "inputs_embeds":
+                if model.use_text_embeddings_model:
                     inputs_dict[name] = np.tile(
                         inputs_embeds_2d[np.newaxis, :, :],
                         (batch_size, 1, 1))
-                elif name == "position_ids":
-                    if len(shape) == 3:
-                        pos = model._as_numpy_no_copy(positions)
-                        channels = shape[0] if shape[0] is not None else 1
-                        pos_3d = np.zeros((channels, batch_size, pos.shape[-1] if pos.ndim > 0 else 1), dtype=pos.dtype)
-                        pos_text = pos.reshape(1, 1, -1)
-                        if pos_text.shape[1] < batch_size:
-                            pos_text = np.tile(pos_text, (1, batch_size, 1))
-                        pos_3d[0:1, :, :] = pos_text
-                        inputs_dict[name] = pos_3d
-                    elif len(shape) == 2:
-                        pos = model._as_numpy_no_copy(positions)
-                        inputs_dict[name] = pos.reshape(batch_size, -1)
-                    else:
-                        inputs_dict[name] = model._as_numpy_no_copy(
-                            positions).reshape(-1)
-                elif name == "attention_mask":
-                    pos_np = model._as_numpy_no_copy(positions)
-                    total_seq_len = (int(pos_np.max()) + 1
-                                     if pos_np.size > 0 else seq_len)
-                    inputs_dict[name] = np.ones(
-                        (batch_size, total_seq_len), dtype=np.int64)
-                elif name == "per_layer_inputs":
-                    if model.use_per_layer_embeddings_model:
-                        ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
-                        model.per_layer_emb_request.infer([ple_input_ids])
-                        ple_out = model.per_layer_emb_request.get_output_tensor(0)
-                        ple_data = ple_out.data.reshape(
-                            1, -1, ple_out.shape[2], ple_out.shape[3])
-                        inputs_dict[name] = ple_data
-                    else:
-                        p_shape = shape
-                        p_layers = p_shape[2] if p_shape[2] is not None else 1
-                        p_emb = p_shape[3] if p_shape[3] is not None else 256
-                        inputs_dict[name] = np.zeros(
-                            (batch_size, seq_len, p_layers, p_emb),
-                            dtype=np.float32)
-                elif name == "token_type_ids":
-                    inputs_dict[name] = np.zeros(
-                        (batch_size, seq_len), dtype=np.int64)
-                elif name == "beam_idx":
-                    inputs_dict[name] = np.zeros(
-                        batch_size, dtype=np.int32)
                 else:
-                    logger.warning(
-                        "StatefulInputBuilder: unhandled input %s "
-                        "(shape %s), skipping", name, shape)
-        else:
-            if input_ids_np.ndim == 1:
-                seq_len = input_ids_np.shape[0]
-            else:
-                seq_len = input_ids_np.shape[1]
-
-            for name, shape in self.input_shapes.items():
-                if name == "input_ids":
-                    if len(shape) == 2:
-                        inputs_dict[name] = input_ids_np.reshape(
-                            batch_size, -1)
-                    else:
-                        inputs_dict[name] = input_ids_np.reshape(-1)
-                elif name == "inputs_embeds":
                     hidden = shape[-1] if shape[-1] is not None else 2048
                     inputs_dict[name] = np.zeros(
                         (batch_size, seq_len, hidden), dtype=np.float32)
-                elif name == "position_ids":
-                    if len(shape) == 3:
-                        pos = model._as_numpy_no_copy(positions)
-                        channels = shape[0] if shape[0] is not None else 1
-                        pos_3d = np.zeros((channels, batch_size, pos.shape[-1] if pos.ndim > 0 else 1), dtype=pos.dtype)
-                        pos_text = pos.reshape(1, 1, -1)
-                        if pos_text.shape[1] < batch_size:
-                            pos_text = np.tile(pos_text, (1, batch_size, 1))
-                        pos_3d[0:1, :, :] = pos_text
-                        inputs_dict[name] = pos_3d
-                    elif len(shape) == 2:
-                        pos = model._as_numpy_no_copy(positions)
-                        inputs_dict[name] = pos.reshape(batch_size, -1)
+            elif name == "input_ids":
+                if not model.use_text_embeddings_model:
+                    if len(shape) == 2:
+                        inputs_dict[name] = input_ids_np.reshape(batch_size, -1)
                     else:
-                        inputs_dict[name] = model._as_numpy_no_copy(
-                            positions).reshape(-1)
-                elif name == "attention_mask":
-                    pos_np = model._as_numpy_no_copy(positions)
-                    total_seq_len = (int(pos_np.max()) + 1
-                                     if pos_np.size > 0 else seq_len)
-                    inputs_dict[name] = np.ones(
-                        (batch_size, total_seq_len), dtype=np.int64)
-                elif name == "per_layer_inputs":
-                    if model.use_per_layer_embeddings_model:
-                        ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
-                        model.per_layer_emb_request.infer([ple_input_ids])
-                        ple_out = model.per_layer_emb_request.get_output_tensor(0)
-                        ple_data = ple_out.data.reshape(
-                            1, -1, ple_out.shape[2], ple_out.shape[3])
-                        inputs_dict[name] = ple_data
-                    else:
-                        p_shape = shape
-                        p_layers = p_shape[2] if p_shape[2] is not None else 1
-                        p_emb = p_shape[3] if p_shape[3] is not None else 256
-                        inputs_dict[name] = np.zeros(
-                            (batch_size, seq_len, p_layers, p_emb),
-                            dtype=np.float32)
-                elif name == "token_type_ids":
-                    inputs_dict[name] = np.zeros(
-                        (batch_size, seq_len), dtype=np.int64)
-                elif name == "beam_idx":
-                    inputs_dict[name] = np.zeros(
-                        batch_size, dtype=np.int32)
+                        inputs_dict[name] = input_ids_np.reshape(-1)
+            elif name == "position_ids":
+                if len(shape) == 3:
+                    pos = model._as_numpy_no_copy(positions)
+                    channels = shape[0] if shape[0] is not None else 1
+                    pos_3d = np.zeros((channels, batch_size, pos.shape[-1] if pos.ndim > 0 else 1), dtype=pos.dtype)
+                    pos_text = pos.reshape(1, 1, -1)
+                    if pos_text.shape[1] < batch_size:
+                        pos_text = np.tile(pos_text, (1, batch_size, 1))
+                    pos_3d[0:1, :, :] = pos_text
+                    inputs_dict[name] = pos_3d
+                elif len(shape) == 2:
+                    pos = model._as_numpy_no_copy(positions)
+                    inputs_dict[name] = pos.reshape(batch_size, -1)
                 else:
-                    logger.warning(
-                        "StatefulInputBuilder: unhandled input %s "
-                        "(shape %s), skipping", name, shape)
+                    inputs_dict[name] = model._as_numpy_no_copy(positions).reshape(-1)
+            elif name == "attention_mask":
+                pos_np = model._as_numpy_no_copy(positions)
+                total_seq_len = (int(pos_np.max()) + 1
+                                 if pos_np.size > 0 else seq_len)
+                inputs_dict[name] = np.ones(
+                    (batch_size, total_seq_len), dtype=np.int64)
+            elif name == "per_layer_inputs":
+                if model.use_per_layer_embeddings_model:
+                    ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
+                    model.per_layer_emb_request.infer([ple_input_ids])
+                    ple_out = model.per_layer_emb_request.get_output_tensor(0)
+                    inputs_dict[name] = ple_out.data.reshape(
+                        1, -1, ple_out.shape[2], ple_out.shape[3])
+                else:
+                    p_layers = shape[2] if shape[2] is not None else 1
+                    p_emb = shape[3] if shape[3] is not None else 256
+                    inputs_dict[name] = np.zeros(
+                        (batch_size, seq_len, p_layers, p_emb), dtype=np.float32)
+            elif name == "token_type_ids":
+                inputs_dict[name] = np.zeros((batch_size, seq_len), dtype=np.int64)
+            elif name == "beam_idx":
+                inputs_dict[name] = np.zeros(batch_size, dtype=np.int32)
+            else:
+                logger.warning(
+                    "StatefulInputBuilder: unhandled input %s "
+                    "(shape %s), skipping", name, shape)
 
         return inputs_dict
 

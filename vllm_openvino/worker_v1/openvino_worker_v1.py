@@ -550,7 +550,7 @@ class OpenVINOWorkerV1(WorkerBase):
         )
 
         for idx, (key_cache_shape, value_cache_shape) in enumerate(zip(key_cache_config, value_cache_config)):
-            kv_cache_spec["{}".format(idx)] = FullAttentionSpec(
+            kv_cache_spec[str(idx)] = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=max(key_cache_shape[1].get_length(), value_cache_shape[1].get_length()),
                 head_size=max(key_cache_shape[3].get_length(), value_cache_shape[3].get_length()),
