@@ -79,7 +79,7 @@ Gemma-3/4와 같은 multimodal 모델은 이미지 입력을 처리할 수 있�
 curl -s --max-time 240 http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "/models",
+    "model": "/models/<model_dir>",
     "messages": [{
       "role": "user",
       "content": [

@@ -84,10 +84,7 @@ curl -s http://localhost:8080/v1/completions \
 
 After changes to core modules (`platform.py`, `worker_v1/`, `model_executor/`), run the full test suite:
 
-```bash
-# See docs/podman-testing.md for comprehensive testing steps
-bash docs/podman-testing.md
-```
+See `docs/podman-testing.md` for comprehensive testing steps.
 
 ## Commits
 

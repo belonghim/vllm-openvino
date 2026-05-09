@@ -14,7 +14,7 @@ The OpenVINO backend was migrated from vLLM's V0 engine to V1-only architecture 
 
 ### Moved
 - `OpenVINOCacheEngine` → `vllm_openvino/kv_cache.py` (extracted from V0 worker)
-- `ModelInput` → `vllm_openvino/model.py` (extracted from V0 model runner)
+- `ModelInput` → `vllm_openvino/worker_v1/openvino_model_runner_v1.py` (extracted from V0 model runner)
 
 ### New Architecture
 - `OpenVINOModelRunnerV1` is standalone (no GPU inheritance)

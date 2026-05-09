@@ -54,6 +54,7 @@ vllm_openvino/
     ├── openvino_worker_v1.py            # OpenVINOWorkerV1 — 워커 (KV 캐시 할당, 프로파일링)
     └── openvino_model_runner_v1.py      # ModelRunner — 입력 준비 + 추론 실행
 scripts/benchmark.sh                     # 성능 벤치마크 스크립트
+scripts/smoke-test.sh                    # 회귀 테스트 스모크 테스트
 ```
 
 ## 테스트 방법
