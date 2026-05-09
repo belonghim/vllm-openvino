@@ -441,7 +441,8 @@ class OpenVINOCausalLM(nn.Module):
     ) -> list[ov.Tensor]:
         if self._flat_kv_caches_template is None:
             self._flat_kv_caches_template = _flatten_inputs(kv_caches)
-        # Return a shallow copy so per-forward state_tensors can be extended safely.
+        if self.model_type == ATTENTION_ONLY:
+            return self._flat_kv_caches_template
         return list(self._flat_kv_caches_template)
 
     @staticmethod

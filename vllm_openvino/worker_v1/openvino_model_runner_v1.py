@@ -69,6 +69,7 @@ class OpenVINOModelRunnerV1:
             self.scheduler_config.max_num_batched_tokens,
             dtype=np.int64,
         )
+        self._max_context_len_buf = np.zeros((), dtype=np.int32)
 
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
@@ -109,6 +110,8 @@ class OpenVINOModelRunnerV1:
             ov.Tensor(np.empty(0, dtype=np.int32))
             for _ in range(self.num_cache_groups)
         ]
+        self._block_indices_group_tensors_out = [None] * self.num_cache_groups
+        self._block_indices_begins_group_tensors_out = [None] * self.num_cache_groups
 
     @staticmethod
     def _slice_tensor(base_tensor: ov.Tensor, length: int) -> ov.Tensor:
@@ -157,11 +160,10 @@ class OpenVINOModelRunnerV1:
 
         # Remove unscheduled requests from batch (but keep cached state)
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
-        cached_req_ids = set(self.input_batch.req_id_to_index.keys())
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
-        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
-        for req_id in unscheduled_req_ids:
-            self.input_batch.remove_request(req_id)
+        for req_id in list(self.input_batch.req_id_to_index):
+            if req_id not in scheduled_req_ids or req_id in resumed_req_ids:
+                self.input_batch.remove_request(req_id)
 
         # Add new requests
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -274,8 +276,11 @@ class OpenVINOModelRunnerV1:
                 self.input_batch.token_ids_cpu[req_index, num_computed:num_tokens_total]
             token_idx += num_tokens
 
-            self._input_positions_buf[pos_idx:pos_idx + num_tokens] = np.arange(
-                num_computed, num_tokens_total, dtype=np.int64)
+            if num_tokens == 1:
+                self._input_positions_buf[pos_idx] = num_computed
+            else:
+                self._input_positions_buf[pos_idx:pos_idx + num_tokens] = np.arange(
+                    num_computed, num_tokens_total, dtype=np.int64)
             pos_idx += num_tokens
 
             self._past_lens_buf[n_reqs] = num_computed
@@ -285,55 +290,56 @@ class OpenVINOModelRunnerV1:
         self._sampled_idx_buf[:n_reqs] = self._subseq_begins_buf[1:n_reqs + 1] - 1
 
         multi_modal_kwargs = {}
-        all_pixel_values = []
-        all_pixel_position_ids = []
-        all_image_position_ids = []
+        if self._mm_req_ids:
+            all_pixel_values = []
+            all_pixel_position_ids = []
+            all_image_position_ids = []
 
-        mm_req_ids = [
-            req_id for req_id in self._mm_req_ids
-            if req_id in self.input_batch.req_id_to_index
-        ]
-        mm_req_ids.sort(key=self.input_batch.req_id_to_index.__getitem__)
-        for req_id in mm_req_ids:
-            req_index = self.input_batch.req_id_to_index[req_id]
-            num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
-            if num_computed > 0:
-                continue
-            request = self.requests[req_id]
-            for mm_feature in request.mm_features:
-                mm_item = mm_feature.data
-                if mm_item is not None:
-                    if "pixel_values" in mm_item:
-                        all_pixel_values.append(mm_item["pixel_values"].data)
-                    else:
-                        for _key, elem in mm_item.items():
-                            if hasattr(elem.data, 'shape'):
-                                all_pixel_values.append(elem.data)
-                                break
-                    if "pixel_position_ids" in mm_item:
-                        all_pixel_position_ids.append(
-                            mm_item["pixel_position_ids"].data)
-                pos = mm_feature.mm_position
-                all_image_position_ids.append(
-                    (pos.offset, pos.offset + pos.length))
+            mm_req_ids = [
+                req_id for req_id in self._mm_req_ids
+                if req_id in self.input_batch.req_id_to_index
+            ]
+            mm_req_ids.sort(key=self.input_batch.req_id_to_index.__getitem__)
+            for req_id in mm_req_ids:
+                req_index = self.input_batch.req_id_to_index[req_id]
+                num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
+                if num_computed > 0:
+                    continue
+                request = self.requests[req_id]
+                for mm_feature in request.mm_features:
+                    mm_item = mm_feature.data
+                    if mm_item is not None:
+                        if "pixel_values" in mm_item:
+                            all_pixel_values.append(mm_item["pixel_values"].data)
+                        else:
+                            for _key, elem in mm_item.items():
+                                if hasattr(elem.data, 'shape'):
+                                    all_pixel_values.append(elem.data)
+                                    break
+                        if "pixel_position_ids" in mm_item:
+                            all_pixel_position_ids.append(
+                                mm_item["pixel_position_ids"].data)
+                    pos = mm_feature.mm_position
+                    all_image_position_ids.append(
+                        (pos.offset, pos.offset + pos.length))
 
-        if all_pixel_values:
-            pixel_values = torch.stack(all_pixel_values)
-            if pixel_values.device != self.device:
-                pixel_values = pixel_values.to(self.device)
-            multi_modal_kwargs["pixel_values"] = pixel_values
+            if all_pixel_values:
+                pixel_values = torch.stack(all_pixel_values)
+                if pixel_values.device != self.device:
+                    pixel_values = pixel_values.to(self.device)
+                multi_modal_kwargs["pixel_values"] = pixel_values
 
-            if all_pixel_position_ids:
-                pixel_position_ids = torch.stack(all_pixel_position_ids)
-                if pixel_position_ids.device != self.device:
-                    pixel_position_ids = pixel_position_ids.to(self.device)
-                multi_modal_kwargs["pixel_position_ids"] = pixel_position_ids
+                if all_pixel_position_ids:
+                    pixel_position_ids = torch.stack(all_pixel_position_ids)
+                    if pixel_position_ids.device != self.device:
+                        pixel_position_ids = pixel_position_ids.to(self.device)
+                    multi_modal_kwargs["pixel_position_ids"] = pixel_position_ids
 
-            image_position_ids = torch.tensor(
-                all_image_position_ids, dtype=torch.int64)
-            if image_position_ids.device != self.device:
-                image_position_ids = image_position_ids.to(self.device)
-            multi_modal_kwargs["image_position_ids"] = image_position_ids
+                image_position_ids = torch.tensor(
+                    all_image_position_ids, dtype=torch.int64)
+                if image_position_ids.device != self.device:
+                    image_position_ids = image_position_ids.to(self.device)
+                multi_modal_kwargs["image_position_ids"] = image_position_ids
 
         assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
 
@@ -352,28 +358,26 @@ class OpenVINOModelRunnerV1:
 
         past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i32)
         subsequence_begins_tensor = ov.Tensor(self._subseq_begins_buf[:n_reqs + 1], ov.Shape([n_reqs + 1]), ov.Type.i32)
-        block_indices_group_tensors = []
-        block_indices_begins_group_tensors = []
         for group_idx in range(self.num_cache_groups):
             num_blocks = int(self._block_idx_group_offsets[group_idx])
             if num_blocks == 0:
-                block_indices_group_tensors.append(
+                self._block_indices_group_tensors_out[group_idx] = \
                     self._empty_block_indices_group_tensors[group_idx]
-                )
             else:
-                block_indices_group_tensors.append(
+                self._block_indices_group_tensors_out[group_idx] = \
                     self._slice_tensor(
                         self._block_indices_group_tensors_base[group_idx],
                         num_blocks,
                     )
-                )
-            block_indices_begins_group_tensors.append(
+            self._block_indices_begins_group_tensors_out[group_idx] = \
                 self._slice_tensor(
                     self._block_idx_begins_group_tensors_base[group_idx],
                     n_reqs + 1,
                 )
-            )
-        max_context_len_tensor = ov.Tensor(np.array(max_seq_len, dtype=np.int32))
+        block_indices_group_tensors = self._block_indices_group_tensors_out
+        block_indices_begins_group_tensors = self._block_indices_begins_group_tensors_out
+        self._max_context_len_buf[()] = max_seq_len
+        max_context_len_tensor = ov.Tensor(self._max_context_len_buf)
 
         attn_metadata = OpenVINOAttentionMetadata(
             past_lens=past_lens_tensor,
@@ -405,7 +409,7 @@ class OpenVINOModelRunnerV1:
 
         self.input_batch.condense()
         self.input_batch.refresh_metadata()
-        new_req_ids = list(self.input_batch.req_ids)
+        new_req_ids = self.input_batch.req_ids
 
         if self.model is not None and not self.model._has_kv_cache_inputs:
             has_running = has_new = False
