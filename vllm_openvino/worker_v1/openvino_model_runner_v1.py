@@ -71,6 +71,22 @@ class OpenVINOModelRunnerV1:
         )
         self._max_context_len_buf = np.zeros((), dtype=np.int32)
 
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        self._past_lens_tensor_base = ov.Tensor(
+            self._past_lens_buf, ov.Shape([max_seqs]), ov.Type.i32)
+        self._subseq_begins_tensor_base = ov.Tensor(
+            self._subseq_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
+        self._sampled_idx_tensor_base = ov.Tensor(
+            self._sampled_idx_buf, ov.Shape([max_seqs]), ov.Type.i64)
+        self._input_tokens_tensor_base = ov.Tensor(
+            self._input_tokens_buf,
+            ov.Shape([max_num_batched_tokens]),
+            ov.Type.i64)
+        self._input_positions_tensor_base = ov.Tensor(
+            self._input_positions_buf,
+            ov.Shape([max_num_batched_tokens]),
+            ov.Type.i64)
+
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
         self._new_req_ids: set[str] = set()
@@ -343,21 +359,11 @@ class OpenVINOModelRunnerV1:
 
         assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
 
-        input_tokens = ov.Tensor(
-            self._input_tokens_buf[:token_idx],
-            ov.Shape([token_idx]),
-            ov.Type.i64,
-        )
-
-        input_positions = ov.Tensor(
-            self._input_positions_buf[:pos_idx],
-            ov.Shape([pos_idx]),
-            ov.Type.i64,
-        )
-        sampled_token_indices_tensor = ov.Tensor(self._sampled_idx_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i64)
-
-        past_lens_tensor = ov.Tensor(self._past_lens_buf[:n_reqs], ov.Shape([n_reqs]), ov.Type.i32)
-        subsequence_begins_tensor = ov.Tensor(self._subseq_begins_buf[:n_reqs + 1], ov.Shape([n_reqs + 1]), ov.Type.i32)
+        input_tokens = self._slice_tensor(self._input_tokens_tensor_base, token_idx)
+        input_positions = self._slice_tensor(self._input_positions_tensor_base, pos_idx)
+        sampled_token_indices_tensor = self._slice_tensor(self._sampled_idx_tensor_base, n_reqs)
+        past_lens_tensor = self._slice_tensor(self._past_lens_tensor_base, n_reqs)
+        subsequence_begins_tensor = self._slice_tensor(self._subseq_begins_tensor_base, n_reqs + 1)
         for group_idx in range(self.num_cache_groups):
             num_blocks = int(self._block_idx_group_offsets[group_idx])
             if num_blocks == 0:

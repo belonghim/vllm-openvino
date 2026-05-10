@@ -220,6 +220,7 @@ class OpenVINOCausalLM(nn.Module):
         preloaded_ssm_state_shapes: dict | None = None,
     ) -> None:
         super().__init__()
+        self.model_config = model_config
         self.logits_processor = LogitsProcessor(
             model_config.get_vocab_size(), logits_as_input=True)
         self.sampler = SamplerV1()
@@ -319,7 +320,6 @@ class OpenVINOCausalLM(nn.Module):
         self.ov_compiled = ov_compiled
         self.ov_request = ov_compiled.create_infer_request()
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
-        self._use_grouped_block_table_inputs: bool | None = None
         self._input_builder: OpenVINOInputBuilder | None = None
 
         # Detect if model has external KV cache inputs (PA-transformed)
@@ -552,25 +552,6 @@ class OpenVINOCausalLM(nn.Module):
 
         return inputs_embeds_2d
 
-    def _iter_block_table_inputs(self, attn_metadata):
-        if self._use_grouped_block_table_inputs is None:
-            block_indices_groups = getattr(attn_metadata, "block_indices_groups", None)
-            block_indices_begins_groups = getattr(
-                attn_metadata, "block_indices_begins_groups", None)
-            self._use_grouped_block_table_inputs = (
-                block_indices_groups is not None
-                and block_indices_begins_groups is not None
-                and len(block_indices_groups) == len(block_indices_begins_groups)
-            )
-
-        if self._use_grouped_block_table_inputs:
-            return zip(
-                attn_metadata.block_indices_groups,
-                attn_metadata.block_indices_begins_groups,
-            )
-
-        return ((attn_metadata.block_indices, attn_metadata.block_indices_begins),)
-
     def _get_input_builder(self) -> OpenVINOInputBuilder:
         """Factory method that returns the appropriate input builder.
 
@@ -731,6 +712,12 @@ class PAInputBuilder(OpenVINOInputBuilder):
 
     def __init__(self, model: "OpenVINOCausalLM") -> None:
         self.model = model
+        self._use_grouped: bool | None = None
+        if model.use_text_embeddings_model:
+            self._token_type_ids_buf = np.zeros(
+                (1, model.model_config.max_model_len), dtype=np.int64)
+        else:
+            self._token_type_ids_buf = None
 
     def build_inputs(
         self,
@@ -754,16 +741,20 @@ class PAInputBuilder(OpenVINOInputBuilder):
                 state_tensors.extend(conv_caches)
 
         attn_metadata = get_forward_context().attn_metadata
-        block_table_inputs = []
-        for block_indices, block_indices_begins in model._iter_block_table_inputs(attn_metadata):
-            block_table_inputs.extend((block_indices, block_indices_begins))
+        if self._use_grouped is None:
+            block_indices_groups = getattr(attn_metadata, "block_indices_groups", None)
+            block_indices_begins_groups = getattr(
+                attn_metadata, "block_indices_begins_groups", None)
+            self._use_grouped = (
+                block_indices_groups is not None
+                and block_indices_begins_groups is not None
+                and len(block_indices_groups) == len(block_indices_begins_groups)
+            )
 
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids)
-
-            token_type_ids = np.zeros(
-                (1, input_ids.shape[0]), dtype=np.int64)
+            token_type_ids = self._token_type_ids_buf[:, :input_ids.shape[0]]
             inputs = [
                 positions,
                 token_type_ids,
@@ -771,8 +762,6 @@ class PAInputBuilder(OpenVINOInputBuilder):
                 *state_tensors,
                 attn_metadata.past_lens,
                 attn_metadata.subsequence_begins,
-                *block_table_inputs,
-                attn_metadata.max_context_len,
             ]
         else:
             inputs = [
@@ -781,10 +770,18 @@ class PAInputBuilder(OpenVINOInputBuilder):
                 *state_tensors,
                 attn_metadata.past_lens,
                 attn_metadata.subsequence_begins,
-                *block_table_inputs,
-                attn_metadata.max_context_len,
             ]
 
+        if self._use_grouped:
+            for bi, bib in zip(attn_metadata.block_indices_groups,
+                               attn_metadata.block_indices_begins_groups):
+                inputs.append(bi)
+                inputs.append(bib)
+        else:
+            inputs.append(attn_metadata.block_indices)
+            inputs.append(attn_metadata.block_indices_begins)
+
+        inputs.append(attn_metadata.max_context_len)
         inputs.append(attn_metadata.sampled_token_indices)
         return inputs
 
@@ -824,6 +821,11 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
             logger.debug("StatefulInputBuilder shape registry: %s, batch_size: %d",
                          self.input_shapes, self.batch_size)
 
+        max_seq = model.model_config.max_model_len
+        self._attention_mask_buf = np.ones((1, max_seq), dtype=np.int64)
+        self._token_type_ids_buf = np.zeros((1, max_seq), dtype=np.int64)
+        self._beam_idx_buf = np.zeros(1, dtype=np.int32)
+
     def build_inputs(
         self,
         input_ids: torch.Tensor,
@@ -853,9 +855,12 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         for name, shape in self.input_shapes.items():
             if name == "inputs_embeds":
                 if model.use_text_embeddings_model:
-                    inputs_dict[name] = np.tile(
-                        inputs_embeds_2d[np.newaxis, :, :],
-                        (batch_size, 1, 1))
+                    if batch_size == 1:
+                        inputs_dict[name] = inputs_embeds_2d[np.newaxis, :, :]
+                    else:
+                        inputs_dict[name] = np.tile(
+                            inputs_embeds_2d[np.newaxis, :, :],
+                            (batch_size, 1, 1))
                 else:
                     hidden = shape[-1] if shape[-1] is not None else 2048
                     inputs_dict[name] = np.zeros(
@@ -885,8 +890,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 pos_np = model._as_numpy_no_copy(positions)
                 total_seq_len = (int(pos_np.max()) + 1
                                  if pos_np.size > 0 else seq_len)
-                inputs_dict[name] = np.ones(
-                    (batch_size, total_seq_len), dtype=np.int64)
+                inputs_dict[name] = self._attention_mask_buf[:, :total_seq_len]
             elif name == "per_layer_inputs":
                 if model.use_per_layer_embeddings_model:
                     ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
@@ -900,9 +904,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     inputs_dict[name] = np.zeros(
                         (batch_size, seq_len, p_layers, p_emb), dtype=np.float32)
             elif name == "token_type_ids":
-                inputs_dict[name] = np.zeros((batch_size, seq_len), dtype=np.int64)
+                inputs_dict[name] = self._token_type_ids_buf[:, :seq_len]
             elif name == "beam_idx":
-                inputs_dict[name] = np.zeros(batch_size, dtype=np.int32)
+                inputs_dict[name] = self._beam_idx_buf
             else:
                 logger.warning(
                     "StatefulInputBuilder: unhandled input %s "

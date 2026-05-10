@@ -1,0 +1,12 @@
+{
+  "Qwen2.5-Coder-3B-Instruct-int4-ov": {
+    "total_ms": 114425,
+    "total_tokens": 956,
+    "avg_tps": 8.35
+  },
+  "gemma-4-E4B-it-int4-ov": {
+    "total_ms": 274130,
+    "total_tokens": 1142,
+    "avg_tps": 4.17
+  }
+}
