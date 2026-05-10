@@ -377,7 +377,7 @@ class OpenVINOModelRunnerV1:
         block_indices_group_tensors = self._block_indices_group_tensors_out
         block_indices_begins_group_tensors = self._block_indices_begins_group_tensors_out
         self._max_context_len_buf[()] = max_seq_len
-        max_context_len_tensor = ov.Tensor(self._max_context_len_buf)
+        max_context_len_tensor = ov.Tensor(self._max_context_len_buf, ov.Shape([1]), ov.Type.i32)
 
         attn_metadata = OpenVINOAttentionMetadata(
             past_lens=past_lens_tensor,
