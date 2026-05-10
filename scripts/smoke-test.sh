@@ -135,6 +135,7 @@ print(text[:160] + ('...' if len(text) > 160 else ''))
 import json, os, sys
 model_name, total_ms, total_tokens, avg_tps = sys.argv[1:5]
 results_file = os.environ["RESULTS_FILE"]
+git_sha = os.environ.get("GIT_SHA", "unknown")
 existing = {}
 if os.path.exists(results_file):
     try:
@@ -142,6 +143,7 @@ if os.path.exists(results_file):
             existing = json.load(f)
     except Exception:
         existing = {}
+existing["_meta"] = {"git_sha": git_sha}
 existing[model_name] = {
     "total_ms": int(total_ms),
     "total_tokens": int(total_tokens),
@@ -157,8 +159,9 @@ main() {
   echo "Models: ${MODELS[*]}"
   echo "Questions: ${#QUESTIONS[@]} | max_tokens=$MAX_TOKENS"
 
+  GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
   echo "{}" > "$RESULTS_FILE"
-  export RESULTS_FILE
+  export RESULTS_FILE GIT_SHA
 
   local any_failed=false
   for model in "${MODELS[@]}"; do
@@ -188,8 +191,13 @@ with open(results_file) as f:
     new = json.load(f)
 with open(baseline_file) as f:
     base = json.load(f)
+base_sha = base.get('_meta', {}).get('git_sha', 'unknown')
+new_sha = new.get('_meta', {}).get('git_sha', 'unknown')
+print(f'  Baseline: {base_sha} -> Current: {new_sha}')
 regressed = False
 for model, new_data in new.items():
+    if model.startswith('_'):
+        continue
     if model not in base:
         print(f'  {model}: NEW (no baseline)')
         continue

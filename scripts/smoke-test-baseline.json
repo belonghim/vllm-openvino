@@ -8,5 +8,8 @@
     "total_ms": 274130,
     "total_tokens": 1142,
     "avg_tps": 4.17
+  },
+  "_meta": {
+    "git_sha": "f5e6abe"
   }
 }

@@ -829,12 +829,13 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         self._token_type_ids_buf = np.zeros((1, max_seq), dtype=np.int64)
         self._beam_idx_buf = np.zeros(1, dtype=np.int32)
         self._pos_3d_buf: np.ndarray | None = None
+        self._pos_3d_channels: int = 0
+        self._inputs_dict: dict = {}
         if "position_ids" in self.input_shapes:
             pos_shape = self.input_shapes["position_ids"]
             if len(pos_shape) == 3:
-                channels = pos_shape[0] if pos_shape[0] is not None else 1
-                self._pos_3d_buf = np.zeros(
-                    (channels, 1, max_seq), dtype=np.int64)
+                self._pos_3d_channels = (
+                    pos_shape[0] if pos_shape[0] is not None else 1)
 
     def build_inputs(
         self,
@@ -849,7 +850,8 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         num_requests: int | None = None,
     ) -> dict:
         model = self.model
-        inputs_dict: dict[str, np.ndarray] = {}
+        inputs_dict = self._inputs_dict
+        inputs_dict.clear()
         input_ids_np = model._as_numpy_no_copy(input_ids)
         batch_size = (num_requests if num_requests is not None
                       else max(1, input_ids_np.shape[0]
@@ -885,6 +887,11 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 if len(shape) == 3:
                     pos = model._as_numpy_no_copy(positions)
                     seq_len_pos = pos.shape[-1] if pos.ndim > 0 else 1
+                    if self._pos_3d_buf is None and self._pos_3d_channels > 0:
+                        self._pos_3d_buf = np.zeros(
+                            (self._pos_3d_channels, 1,
+                             model.model_config.max_model_len),
+                            dtype=pos.dtype)
                     if (self._pos_3d_buf is not None
                             and seq_len_pos <= self._pos_3d_buf.shape[2]):
                         self._pos_3d_buf[0, 0, :seq_len_pos] = pos.reshape(-1)
