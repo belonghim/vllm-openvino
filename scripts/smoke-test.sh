@@ -5,6 +5,11 @@
 
 set -uo pipefail
 
+UPDATE_BASELINE=false
+for arg in "$@"; do
+  [[ "$arg" == "--update-baseline" ]] && UPDATE_BASELINE=true
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_FILE="$SCRIPT_DIR/smoke-test-results.json"
@@ -164,6 +169,13 @@ main() {
 
   echo ""
   echo "Results saved: $RESULTS_FILE"
+
+  if [[ "$UPDATE_BASELINE" == "true" ]]; then
+    cp "$RESULTS_FILE" "$BASELINE_FILE"
+    echo "Baseline updated: $BASELINE_FILE"
+    [[ "$any_failed" == true ]] && exit 1
+    exit 0
+  fi
 
   if [[ -f "$BASELINE_FILE" ]]; then
     echo ""

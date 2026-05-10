@@ -754,7 +754,10 @@ class PAInputBuilder(OpenVINOInputBuilder):
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids)
-            token_type_ids = self._token_type_ids_buf[:, :input_ids.shape[0]]
+            seq_len_ids = input_ids.shape[0]
+            token_type_ids = (self._token_type_ids_buf[:, :seq_len_ids]
+                              if seq_len_ids <= self._token_type_ids_buf.shape[1]
+                              else np.zeros((1, seq_len_ids), dtype=np.int64))
             inputs = [
                 positions,
                 token_type_ids,
@@ -825,6 +828,13 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         self._attention_mask_buf = np.ones((1, max_seq), dtype=np.int64)
         self._token_type_ids_buf = np.zeros((1, max_seq), dtype=np.int64)
         self._beam_idx_buf = np.zeros(1, dtype=np.int32)
+        self._pos_3d_buf: np.ndarray | None = None
+        if "position_ids" in self.input_shapes:
+            pos_shape = self.input_shapes["position_ids"]
+            if len(pos_shape) == 3:
+                channels = pos_shape[0] if pos_shape[0] is not None else 1
+                self._pos_3d_buf = np.zeros(
+                    (channels, 1, max_seq), dtype=np.int64)
 
     def build_inputs(
         self,
@@ -874,13 +884,17 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
             elif name == "position_ids":
                 if len(shape) == 3:
                     pos = model._as_numpy_no_copy(positions)
-                    channels = shape[0] if shape[0] is not None else 1
-                    pos_3d = np.zeros((channels, batch_size, pos.shape[-1] if pos.ndim > 0 else 1), dtype=pos.dtype)
-                    pos_text = pos.reshape(1, 1, -1)
-                    if pos_text.shape[1] < batch_size:
-                        pos_text = np.tile(pos_text, (1, batch_size, 1))
-                    pos_3d[0:1, :, :] = pos_text
-                    inputs_dict[name] = pos_3d
+                    seq_len_pos = pos.shape[-1] if pos.ndim > 0 else 1
+                    if (self._pos_3d_buf is not None
+                            and seq_len_pos <= self._pos_3d_buf.shape[2]):
+                        self._pos_3d_buf[0, 0, :seq_len_pos] = pos.reshape(-1)
+                        inputs_dict[name] = self._pos_3d_buf[:, :, :seq_len_pos]
+                    else:
+                        channels = shape[0] if shape[0] is not None else 1
+                        pos_3d = np.zeros(
+                            (channels, batch_size, seq_len_pos), dtype=pos.dtype)
+                        pos_3d[0, 0, :] = pos.reshape(-1)
+                        inputs_dict[name] = pos_3d
                 elif len(shape) == 2:
                     pos = model._as_numpy_no_copy(positions)
                     inputs_dict[name] = pos.reshape(batch_size, -1)
@@ -890,7 +904,11 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 pos_np = model._as_numpy_no_copy(positions)
                 total_seq_len = (int(pos_np.max()) + 1
                                  if pos_np.size > 0 else seq_len)
-                inputs_dict[name] = self._attention_mask_buf[:, :total_seq_len]
+                if total_seq_len <= self._attention_mask_buf.shape[1]:
+                    inputs_dict[name] = self._attention_mask_buf[:, :total_seq_len]
+                else:
+                    inputs_dict[name] = np.ones(
+                        (batch_size, total_seq_len), dtype=np.int64)
             elif name == "per_layer_inputs":
                 if model.use_per_layer_embeddings_model:
                     ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
@@ -904,7 +922,11 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     inputs_dict[name] = np.zeros(
                         (batch_size, seq_len, p_layers, p_emb), dtype=np.float32)
             elif name == "token_type_ids":
-                inputs_dict[name] = self._token_type_ids_buf[:, :seq_len]
+                if seq_len <= self._token_type_ids_buf.shape[1]:
+                    inputs_dict[name] = self._token_type_ids_buf[:, :seq_len]
+                else:
+                    inputs_dict[name] = np.zeros(
+                        (batch_size, seq_len), dtype=np.int64)
             elif name == "beam_idx":
                 inputs_dict[name] = self._beam_idx_buf
             else:
