@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_FILE="$SCRIPT_DIR/smoke-test-results.json"
 BASELINE_FILE="$SCRIPT_DIR/smoke-test-baseline.json"
-REGRESSION_THRESHOLD_PCT=20
+REGRESSION_THRESHOLD_PCT=10
 
 API_URL="http://localhost:8080"
 CONTAINER_NAME="vllm-smoke"

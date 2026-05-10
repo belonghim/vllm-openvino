@@ -825,6 +825,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                          self.input_shapes, self.batch_size)
 
         max_seq = model.model_config.max_model_len
+        self._max_seq = max_seq
         self._attention_mask_buf = np.ones((1, max_seq), dtype=np.int64)
         self._token_type_ids_buf = np.zeros((1, max_seq), dtype=np.int64)
         self._beam_idx_buf = np.zeros(1, dtype=np.int32)
@@ -889,8 +890,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     seq_len_pos = pos.shape[-1] if pos.ndim > 0 else 1
                     if self._pos_3d_buf is None and self._pos_3d_channels > 0:
                         self._pos_3d_buf = np.zeros(
-                            (self._pos_3d_channels, 1,
-                             model.model_config.max_model_len),
+                            (self._pos_3d_channels, 1, self._max_seq),
                             dtype=pos.dtype)
                     if (self._pos_3d_buf is not None
                             and seq_len_pos <= self._pos_3d_buf.shape[2]):
