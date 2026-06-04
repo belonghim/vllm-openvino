@@ -22,6 +22,8 @@ str_to_ov_type: dict[str, ov.Type] = {
     "dynamic": ov.Type.dynamic,
 } if ov is not None else {}
 
+FP32_BYTES = 4
+
 class OpenVINOCacheEngine:
     """Manages the KV cache for OpenVINO backend, implementing the V1 KVCache interface.
 
@@ -133,33 +135,43 @@ class OpenVINOCacheEngine:
 
         return kv_cache
 
+    def _allocate_state_cache(
+        self,
+        num_blocks: int,
+        ov_core: ov.Core,
+        ov_device: str,
+        cache_config: list["ov.PartialShape"],
+        cache_dtypes: list[str],
+    ) -> list[ov.Tensor]:
+        cache: list[ov.Tensor] = []
+        for idx, pshape in enumerate(cache_config):
+            dims = [
+                num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
+                for i, dim in enumerate(pshape)
+            ]
+            shape = ov.PartialShape(dims).to_shape()
+            dtype_str = cache_dtypes[idx] if idx < len(cache_dtypes) else "f32"
+            ov_type = str_to_ov_type.get(dtype_str, ov.Type.f32)
+
+            if current_platform.is_openvino_cpu():
+                tensor = ov.Tensor(ov_type, shape)
+                tensor.data.fill(0)
+            else:
+                remote_context = ov_core.get_default_context(ov_device)
+                tensor = remote_context.create_tensor(ov_type, shape, {})
+            cache.append(tensor)
+        return cache
+
     def _allocate_ssm_cache(
         self,
         num_blocks: int,
         ov_core: ov.Core,
         ov_device: str,
     ) -> list[ov.Tensor]:
-        """Allocates SSM state cache for hybrid models."""
-        ssm_cache: list[ov.Tensor] = []
-
-        for idx, ssm_pshape in enumerate(self.ssm_cache_config):
-            ssm_dims = [
-                num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
-                for i, dim in enumerate(ssm_pshape)
-            ]
-            ssm_shape = ov.PartialShape(ssm_dims).to_shape()
-            dtype_str = self.ssm_cache_dtypes[idx] if idx < len(self.ssm_cache_dtypes) else "f32"
-            ssm_ov_type = str_to_ov_type.get(dtype_str, ov.Type.f32)
-
-            if current_platform.is_openvino_cpu():
-                ssm_tensor = ov.Tensor(ssm_ov_type, ssm_shape)
-                ssm_tensor.data.fill(0)
-            else:
-                remote_context = ov_core.get_default_context(ov_device)
-                ssm_tensor = remote_context.create_tensor(ssm_ov_type, ssm_shape, {})
-            ssm_cache.append(ssm_tensor)
-
-        return ssm_cache
+        return self._allocate_state_cache(
+            num_blocks, ov_core, ov_device,
+            self.ssm_cache_config, self.ssm_cache_dtypes,
+        )
 
     def _allocate_conv_cache(
         self,
@@ -167,27 +179,10 @@ class OpenVINOCacheEngine:
         ov_core: ov.Core,
         ov_device: str,
     ) -> list[ov.Tensor]:
-        """Allocates conv state cache for hybrid models."""
-        conv_cache: list[ov.Tensor] = []
-
-        for idx, conv_pshape in enumerate(self.conv_cache_config):
-            conv_dims = [
-                num_blocks if i == 0 else (dim.get_length() if dim.is_static else 1)
-                for i, dim in enumerate(conv_pshape)
-            ]
-            conv_shape = ov.PartialShape(conv_dims).to_shape()
-            dtype_str = self.conv_cache_dtypes[idx] if idx < len(self.conv_cache_dtypes) else "f32"
-            conv_ov_type = str_to_ov_type.get(dtype_str, ov.Type.f32)
-
-            if current_platform.is_openvino_cpu():
-                conv_tensor = ov.Tensor(conv_ov_type, conv_shape)
-                conv_tensor.data.fill(0)
-            else:
-                remote_context = ov_core.get_default_context(ov_device)
-                conv_tensor = remote_context.create_tensor(conv_ov_type, conv_shape, {})
-            conv_cache.append(conv_tensor)
-
-        return conv_cache
+        return self._allocate_state_cache(
+            num_blocks, ov_core, ov_device,
+            self.conv_cache_config, self.conv_cache_dtypes,
+        )
 
     def _allocate_swap_cache(
         self,
@@ -259,23 +254,18 @@ class OpenVINOCacheEngine:
             total_elements += _dim_len(key_cache_shape[1]) * _dim_len(key_cache_shape[2], 2) * _dim_len(key_cache_shape[3])
             total_elements += _dim_len(value_cache_shape[1]) * _dim_len(value_cache_shape[2], 2) * _dim_len(value_cache_shape[3])
 
-        # Add SSM state size (fp32 = 4 bytes)
-        if ssm_cache_config:
-            for ssm_shape in ssm_cache_config:
-                ssm_elements = 1
-                for dim_idx, dim in enumerate(ssm_shape[1:], start=1):
-                    ssm_elements *= _dim_len(dim, dim_idx)
-                total_elements += ssm_elements * (4 / str_to_ov_type[normalized].size)
+        # SSM/conv state is always fp32 in OV IR; scale into KV-dtype units.
+        kv_type_size = str_to_ov_type[normalized].size
+        for state_cache in (ssm_cache_config, conv_cache_config):
+            if not state_cache:
+                continue
+            for state_shape in state_cache:
+                elements = 1
+                for dim_idx, dim in enumerate(state_shape[1:], start=1):
+                    elements *= _dim_len(dim, dim_idx)
+                total_elements += elements * (FP32_BYTES / kv_type_size)
 
-        # Add conv state size (fp32 = 4 bytes)
-        if conv_cache_config:
-            for conv_shape in conv_cache_config:
-                conv_elements = 1
-                for dim_idx, dim in enumerate(conv_shape[1:], start=1):
-                    conv_elements *= _dim_len(dim, dim_idx)
-                total_elements += conv_elements * (4 / str_to_ov_type[normalized].size)
-
-        return str_to_ov_type[normalized].size * total_elements
+        return kv_type_size * total_elements
 
     # --- KVCache Interface Methods ---
 
