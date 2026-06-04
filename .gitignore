@@ -15,3 +15,6 @@ build/
 .sisyphus/
 .git/
 scripts/smoke-test-results.json
+scripts/guidellm-results/
+scripts/*.log
+startup.log

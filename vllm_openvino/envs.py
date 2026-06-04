@@ -7,15 +7,13 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
+    VLLM_OPENVINO_PERFORMANCE_MODE: str = "LATENCY"
     VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
     VLLM_OPENVINO_CPU_BIND_THREAD: str | None = None
     VLLM_OPENVINO_NUM_STREAMS: str | int = "AUTO"
     VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
-    VLLM_OPENVINO_MEMORY_THRESHOLD: float = 1.1
-    VLLM_OPENVINO_CPU_BLOCK_SIZE: int = 32
-    VLLM_OPENVINO_GPU_BLOCK_SIZE: int = 16
 
 KV_CACHE_PRECISION_MAP: dict[str, str] = {
     "u8": "u8", "i8": "i8",
@@ -80,19 +78,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OPENVINO_ENABLE_CPU_PINNING":
     lambda: None if os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower() in ("", "auto") else
             os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "true").lower() == "true",
-
-    # Memory overhead threshold for KV cache allocation
-    # (1.1 = 10% overhead for internal OpenVINO allocations)
-    "VLLM_OPENVINO_MEMORY_THRESHOLD":
-    lambda: float(os.getenv("VLLM_OPENVINO_MEMORY_THRESHOLD", "1.1")),
-
-    # Block size for CPU device (default matches vLLM CPU default)
-    "VLLM_OPENVINO_CPU_BLOCK_SIZE":
-    lambda: int(os.getenv("VLLM_OPENVINO_CPU_BLOCK_SIZE", "32")),
-
-    # Block size for GPU device (default matches vLLM GPU default)
-    "VLLM_OPENVINO_GPU_BLOCK_SIZE":
-    lambda: int(os.getenv("VLLM_OPENVINO_GPU_BLOCK_SIZE", "16")),
 }
 
 # end-env-vars-definition

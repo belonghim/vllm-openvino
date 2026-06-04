@@ -55,6 +55,7 @@ vllm_openvino/
     └── openvino_model_runner_v1.py      # ModelRunner — 입력 준비 + 추론 실행
 scripts/benchmark.sh                     # 성능 벤치마크 스크립트
 scripts/smoke-test.sh                    # 회귀 테스트 스모크 테스트
+scripts/guidellm-benchmark.sh            # guidellm 기반 부하 벤치마크 스크립트
 ```
 
 ## 테스트 방법
