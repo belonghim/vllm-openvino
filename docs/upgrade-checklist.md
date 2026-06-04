@@ -82,7 +82,19 @@ vLLM 버전 업그레이드 시 다음 사항을 확인하세요.
 
 ---
 
-## 4. 검증 방법
+## 4. 🔴 알려진 시그니처 변경 (업그레이드 시 코드 수정 필요)
+
+특정 vLLM 버전 이후 메서드 시그니처가 바뀌어 **현재 구현이 런타임에 깨질 수 있는** 항목입니다.
+
+| 메서드 | 0.19.1 | 0.20.0+ | 영향 |
+|--------|--------|---------|------|
+| `WorkerBase.compile_or_warm_up_model()` | `-> None` (caller가 반환값 무시) | `-> CompilationTimes(language_model, encoder)` NamedTuple | 0.20+에서 caller가 `.language_model` 접근. 현재 `return 0.0` → `AttributeError`. 수정 필요: `return CompilationTimes(language_model=0.0, encoder=0.0)` |
+
+업그레이드 시점에 위 표를 우선 처리한 뒤 다른 import 변경을 진행하세요.
+
+---
+
+## 5. 검증 방법
 
 - `python3 -m py_compile vllm_openvino/**/*.py`를 실행하여 문법 오류를 확인합니다.
 - Podman 테스트 환경에서 실제 추론을 실행하여 기능적 회귀가 없는지 검증합니다.
