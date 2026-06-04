@@ -47,6 +47,13 @@ str_to_torch_type: dict[str, torch.dtype] = {
 USED_MEMORY_THRESHOLD = 1.1  # 10% overhead for unaccounted memory
 
 
+def _resolve_cache_dtype(dtype: str | None) -> str:
+    # vLLM uses "dynamic" / None to mean "backend chooses"; OV defaults to fp16.
+    if dtype is None or dtype == "dynamic":
+        return "fp16"
+    return dtype
+
+
 class OpenVINOWorkerV1(WorkerBase):
     """A worker class that executes the model on OpenVINO backend.
 
@@ -301,13 +308,8 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def _init_cache_engine(self) -> None:
         ov_device = envs.VLLM_OPENVINO_DEVICE
-        # Override precision in self.cache_config to one used during compile_model
-        # Use cache_dtype from config, falling back to dynamically detected value
-        detected_dtype = getattr(self, 'cache_dtype', None)
-        if detected_dtype is None:
-            detected_dtype = self.cache_config.cache_dtype
-        if detected_dtype == "dynamic":
-            detected_dtype = "fp16"
+        detected_dtype = _resolve_cache_dtype(
+            getattr(self, 'cache_dtype', None) or self.cache_config.cache_dtype)
         self.cache_config.cache_dtype = detected_dtype
 
         self.cache_engine = OpenVINOCacheEngine(
@@ -553,11 +555,8 @@ class OpenVINOWorkerV1(WorkerBase):
         key_cache_config = self.key_cache_config
         value_cache_config = self.value_cache_config
         block_size = self.cache_config.block_size
-        cache_type = self.cache_config.cache_dtype
-        # Handle "dynamic" dtype - convert to fp16 as default for OpenVINO
-        if cache_type == "dynamic":
-            cache_type = "fp16"
-        assert cache_type in str_to_torch_type.keys(), "Unexpected cache type {}".format(cache_type)
+        cache_type = _resolve_cache_dtype(self.cache_config.cache_dtype)
+        assert cache_type in str_to_torch_type, f"Unexpected cache type {cache_type}"
         kv_cache_spec = {}
 
         logger.info(
@@ -639,11 +638,8 @@ class OpenVINOWorkerV1(WorkerBase):
     def determine_available_memory(self) -> int:
         """Determines how much memory is needed for KV-cache
         """
-        cache_dtype = getattr(self, 'cache_dtype', None)
-        if cache_dtype is None:
-            cache_dtype = self.cache_config.cache_dtype
-        if cache_dtype == "dynamic":
-            cache_dtype = "fp16"
+        cache_dtype = _resolve_cache_dtype(
+            getattr(self, 'cache_dtype', None) or self.cache_config.cache_dtype)
         self.cache_config.cache_dtype = cache_dtype
         cache_block_size = self.get_cache_block_size_bytes()
         kv_space = getattr(self.cache_config, 'openvino_kvcache_space_bytes', 0)
@@ -680,9 +676,9 @@ class OpenVINOWorkerV1(WorkerBase):
         """Allocate NPU KV cache with the specified kv_cache_config."""
         self.initialize_cache(kv_cache_config.num_blocks, self.num_swap_blocks)
 
-    def compile_or_warm_up_model(self) -> None:
-        # Compile is performed on model loading stage
-        pass
+    def compile_or_warm_up_model(self) -> float:
+        # OpenVINO compiles in load_model(); callers ignore the return value.
+        return 0.0
 
     def get_supported_tasks(self) -> tuple[str, ...]:
         return ('generate',)
