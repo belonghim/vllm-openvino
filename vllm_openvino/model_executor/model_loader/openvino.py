@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ruff: noqa: SIM117
+import logging
 from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Any
@@ -594,7 +595,7 @@ class OpenVINOCausalLM(nn.Module):
             pixel_position_ids=pixel_position_ids,
             num_requests=num_requests,
         )
-        if not self._has_kv_cache_inputs and logger.isEnabledFor(10):
+        if not self._has_kv_cache_inputs and logger.isEnabledFor(logging.DEBUG):
             if isinstance(inputs, dict):
                 for k, v in inputs.items():
                     logger.debug("[OV-INPUT] %s: shape=%s, dtype=%s",
@@ -650,9 +651,6 @@ class OpenVINOCausalLM(nn.Module):
                     and hasattr(self, 'per_layer_emb_request')):
                 self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
             logger.info("[OV-STATE] Recreated infer request")
-        except RuntimeError as e:
-            logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
-            raise
         except Exception as e:
             logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
             raise
@@ -695,9 +693,6 @@ class OpenVINOCausalLM(nn.Module):
                     and self.ov_per_layer_emb_compiled is not None):
                 self.ov_per_layer_emb_compiled.release_memory()
                 self.ov_per_layer_emb_compiled = None
-        except RuntimeError as e:
-            logger.error("[OV-MODEL] shutdown failed: %s", e)
-            raise
         except Exception as e:
             logger.error("[OV-MODEL] shutdown failed: %s", e)
             raise
@@ -820,7 +815,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 self.batch_size = max(first_fixed_dims)
         else:
             self.batch_size = 1
-        if logger.isEnabledFor(10):
+        if logger.isEnabledFor(logging.DEBUG):
             logger.debug("StatefulInputBuilder shape registry: %s, batch_size: %d",
                          self.input_shapes, self.batch_size)
 
