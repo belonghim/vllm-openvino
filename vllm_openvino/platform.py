@@ -60,10 +60,12 @@ class OpenVinoPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "openvino"
     device_type: str = "cpu"
+    # Match upstream CpuPlatform; init_distributed_environment() uses gloo too.
+    dist_backend: str = "gloo"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config) -> str:
-        logger.info("Using OpenVINO Attention backend.")
+        logger.info("[OV-PLATFORM] Using OpenVINO Attention backend.")
         return "vllm_openvino.attention.backends.openvino.OpenVINOAttentionBackend"
 
     @classmethod
@@ -84,7 +86,7 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.debug("Pin memory is not supported on OpenVINO.")
+        logger.debug("[OV-PLATFORM] Pin memory is not supported on OpenVINO.")
         return False
 
     @classmethod
@@ -106,16 +108,16 @@ class OpenVinoPlatform(Platform):
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
             logger.warning(
-                "CUDA graph is not supported on OpenVINO backend, fallback to "
-                "the eager mode.")
+                "[OV-PLATFORM] CUDA graph is not supported on OpenVINO backend, "
+                "fallback to the eager mode.")
             model_config.enforce_eager = True
 
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         if scheduler_config and scheduler_config.max_num_seqs != 1:
             if _is_stateful_model(model_config.model):
                 logger.warning(
-                    "Stateful OpenVINO model detected. Overriding "
-                    "max_num_seqs from %d to 1.",
+                    "[OV-PLATFORM] Stateful OpenVINO model detected. "
+                    "Overriding max_num_seqs from %d to 1.",
                     scheduler_config.max_num_seqs)
                 scheduler_config.max_num_seqs = 1
 
@@ -128,12 +130,12 @@ class OpenVinoPlatform(Platform):
         cache_dtype = envs.KV_CACHE_PRECISION_MAP.get(precision_key or "")
         if cache_dtype is not None:
             logger.info(
-                "KV cache type is overridden to %s via "
+                "[OV-PLATFORM] KV cache type is overridden to %s via "
                 "VLLM_OPENVINO_KV_CACHE_PRECISION env var.", cache_dtype)
             cache_config.cache_dtype = cache_dtype
         else:
             logger.info(
-                "KV cache type is not specified via "
+                "[OV-PLATFORM] KV cache type is not specified via "
                 "VLLM_OPENVINO_KV_CACHE_PRECISION env var. "
                 "It will be determined automatically by a plugin")
             cache_config.cache_dtype = "dynamic"
@@ -141,14 +143,16 @@ class OpenVinoPlatform(Platform):
         if OpenVinoPlatform.is_openvino_cpu():
             if cache_config.block_size != CPU_BLOCK_SIZE:
                 logger.info(
-                    f"OpenVINO CPU optimal block size is {CPU_BLOCK_SIZE}, overriding "
-                    f"{cache_config.block_size} to {CPU_BLOCK_SIZE}")
+                    "[OV-PLATFORM] OpenVINO CPU optimal block size is %d, "
+                    "overriding %s to %d",
+                    CPU_BLOCK_SIZE, cache_config.block_size, CPU_BLOCK_SIZE)
                 cache_config.block_size = CPU_BLOCK_SIZE
         else:
             if cache_config.block_size != GPU_BLOCK_SIZE:
                 logger.info(
-                    f"OpenVINO GPU optimal block size is {GPU_BLOCK_SIZE}, overriding "
-                    f"{cache_config.block_size} to {GPU_BLOCK_SIZE}")
+                    "[OV-PLATFORM] OpenVINO GPU optimal block size is %d, "
+                    "overriding %s to %d",
+                    GPU_BLOCK_SIZE, cache_config.block_size, GPU_BLOCK_SIZE)
                 cache_config.block_size = GPU_BLOCK_SIZE
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
@@ -157,13 +161,14 @@ class OpenVinoPlatform(Platform):
                 cache_config.openvino_kvcache_space_bytes = (
                     DEFAULT_CPU_KV_CACHE_GB * GIB_BYTES)  # type: ignore
                 logger.warning(
-                    "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
-                    "for OpenVINO backend is not set, using 4 by default.")
+                    "[OV-PLATFORM] Environment variable VLLM_OPENVINO_KVCACHE_SPACE "
+                    "(GB) for OpenVINO backend is not set, using %d by default.",
+                    DEFAULT_CPU_KV_CACHE_GB)
             elif kv_cache_space == 0:
                 cache_config.openvino_kvcache_space_bytes = 0  # type: ignore
                 logger.info(
-                    "VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU device. "
-                    "KV cache size will be determined automatically via "
+                    "[OV-PLATFORM] VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU "
+                    "device. KV cache size will be determined automatically via "
                     "profiling run.")
             else:
                 cache_config.openvino_kvcache_space_bytes = (
