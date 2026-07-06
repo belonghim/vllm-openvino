@@ -9,7 +9,7 @@ name = "vllm-openvino"
 description = "OpenVINO plugin for vLLM"
 readme = "README.md"
 license = {text = "Apache-2.0"}
-version = "0.19.1"
+version = "0.24.0"
 authors = [
     {name = "belonghim"},
 ]
@@ -20,8 +20,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "openvino >= 2026.1.0",
-    "vllm == 0.19.1",
+    "openvino >= 2026.2.1",
+    "vllm == 0.24.0",
 ]
 requires-python = ">=3.10"
 

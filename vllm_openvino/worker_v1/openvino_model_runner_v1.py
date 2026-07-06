@@ -87,6 +87,9 @@ class OpenVINOModelRunnerV1:
             ov.Shape([max_num_batched_tokens]),
             ov.Type.i64)
 
+        self._position_range_buf = np.arange(
+            self.model_config.max_model_len, dtype=np.int64)
+
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
         self._new_req_ids: set[str] = set()
@@ -140,10 +143,10 @@ class OpenVINOModelRunnerV1:
             max_model_len=self.model_config.max_model_len,
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             device=self.device,
-            pin_memory=False,  # OpenVINO/CPU — no pin memory
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=block_sizes,
             kernel_block_sizes=block_sizes,
+            is_pooling_model=getattr(self.model_config, 'is_pooling_model', False),
         )
 
     def configure_cache_groups(self, num_cache_groups: int) -> None:
@@ -187,6 +190,8 @@ class OpenVINOModelRunnerV1:
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_embeds=getattr(new_req_data, 'prompt_embeds', None),
+                prompt_is_token_ids=getattr(new_req_data, 'prompt_is_token_ids', True),
                 mm_features=new_req_data.mm_features,
                 sampling_params=new_req_data.sampling_params,
                 pooling_params=new_req_data.pooling_params,
@@ -295,8 +300,8 @@ class OpenVINOModelRunnerV1:
             if num_tokens == 1:
                 self._input_positions_buf[pos_idx] = num_computed
             else:
-                self._input_positions_buf[pos_idx:pos_idx + num_tokens] = np.arange(
-                    num_computed, num_tokens_total, dtype=np.int64)
+                self._input_positions_buf[pos_idx:pos_idx + num_tokens] = \
+                    self._position_range_buf[num_computed:num_tokens_total]
             pos_idx += num_tokens
 
             self._past_lens_buf[n_reqs] = num_computed
@@ -428,10 +433,9 @@ class OpenVINOModelRunnerV1:
                     has_running = True
                 if has_running and has_new:
                     break
-            if has_new and not has_running:
+            if has_new and not has_running and hasattr(self.model, 'recreate_infer_request'):
                 logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
                 self.model.recreate_infer_request()
-            self._new_req_ids.clear()
 
         (
             input_tokens,
@@ -440,6 +444,7 @@ class OpenVINOModelRunnerV1:
             sampling_metadata,
             multi_modal_kwargs,
         ) = self._prepare_inputs(scheduler_output)
+        self._new_req_ids.clear()
 
         actual_num_requests = len(self.input_batch.req_id_to_index)
         model_executable = self.model

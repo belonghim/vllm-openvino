@@ -21,7 +21,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec, MambaSpec
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import WorkerBase, CompilationTimes
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 
 import vllm_openvino.envs as envs
@@ -78,12 +78,6 @@ class OpenVINOWorkerV1(WorkerBase):
         self.ov_core = ov.Core()
         self.ov_core.set_property({ov_props.enable_mmap: True})
         self.parallel_config.rank = rank
-        self.local_rank = local_rank
-        self.rank = rank
-        self.distributed_init_method = distributed_init_method
-        self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
-            assert self.rank == 0, "The driver worker must have rank 0."
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -101,6 +95,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self.cache_engine: OpenVINOCacheEngine
         self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]]
         self.num_swap_blocks = 0
+        self._pending_output: "ModelRunnerOutput | None" = None
 
         # Cache shape metadata (needed before determine_available_memory()).
         self.key_cache_config = []
@@ -220,11 +215,6 @@ class OpenVINOWorkerV1(WorkerBase):
 
         compiled_model = model.ov_request.get_compiled_model()
 
-        self.ssm_cache_config = []
-        self.conv_cache_config = []
-        self.ssm_cache_dtypes = []
-        self.conv_cache_dtypes = []
-
         ov_model_obj = self.model_runner.get_model()
         ssm_shapes = getattr(ov_model_obj, "ssm_state_shapes", {})
         self.ssm_cache_config = [shape for shape, dtype in ssm_shapes.get("ssm", [])]
@@ -291,10 +281,7 @@ class OpenVINOWorkerV1(WorkerBase):
                 "Try increasing `VLLM_OPENVINO_KVCACHE_SPACE` when "
                 "initializing the engine.")
 
-        model = getattr(self.model_runner, 'model', None)
-        is_stateful = model is not None and not getattr(
-            model, '_has_kv_cache_inputs', True)
-        if is_stateful:
+        if self._is_model_stateful():
             return
 
         max_seq_len = self.cache_config.block_size * num_blocks
@@ -351,6 +338,15 @@ class OpenVINOWorkerV1(WorkerBase):
                 prompt_logprobs_dict={},
                 pooler_output=None,
             )
+        new_block_ids_to_zero = getattr(scheduler_output, 'new_block_ids_to_zero', None)
+        if new_block_ids_to_zero and hasattr(self, 'kv_cache') and self.kv_cache:
+            for key_cache, value_cache in self.kv_cache:
+                k = key_cache.data
+                v = value_cache.data
+                for block_id in new_block_ids_to_zero:
+                    if block_id < k.shape[0]:
+                        k[block_id] = 0
+                        v[block_id] = 0
         self._pending_output = self.model_runner.execute_model(scheduler_output)
         return None
 
@@ -478,14 +474,12 @@ class OpenVINOWorkerV1(WorkerBase):
             self.model_runner.block_size = tmp_cache_config.block_size
 
             bind_kv_cache({}, self.compilation_config.static_forward_context, [])
-            # Run the model with the dummy inputs.
-            self.model_runner.execute_model(scheduler_output)
-
-            # Explicitly revert bind_kv_cache and delete temporary KV cache
-            # manager to free KV cache when real inputs will be passed to OV
-            bind_kv_cache({}, self.compilation_config.static_forward_context, [])
-            self.model_runner.kv_caches = prev_kv_caches
-            del profiling_cache_engine
+            try:
+                self.model_runner.execute_model(scheduler_output)
+            finally:
+                bind_kv_cache({}, self.compilation_config.static_forward_context, [])
+                self.model_runner.kv_caches = prev_kv_caches
+                del profiling_cache_engine
 
         logger.info(
             "Start profiling run with dummy inputs to evaluate "
@@ -652,10 +646,7 @@ class OpenVINOWorkerV1(WorkerBase):
                                                                             self.cache_config,
                                                                             cache_block_size,
                                                                             self.profile_run)
-        model = getattr(self.model_runner, 'model', None)
-        is_stateful = model is not None and not getattr(
-            model, '_has_kv_cache_inputs', True)
-        if is_stateful:
+        if self._is_model_stateful():
             max_needed = (
                 self.model_config.max_model_len + self.cache_config.block_size - 1
             ) // self.cache_config.block_size
@@ -676,9 +667,16 @@ class OpenVINOWorkerV1(WorkerBase):
         """Allocate NPU KV cache with the specified kv_cache_config."""
         self.initialize_cache(kv_cache_config.num_blocks, self.num_swap_blocks)
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # OpenVINO compiles in load_model(); callers ignore the return value.
-        return 0.0
+        return CompilationTimes(language_model=0.0, encoder=0.0)
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.model_config.max_model_len = max_model_len
+
+    def _is_model_stateful(self) -> bool:
+        model = getattr(self.model_runner, 'model', None)
+        return model is not None and not getattr(model, '_has_kv_cache_inputs', True)
 
     def get_supported_tasks(self) -> tuple[str, ...]:
         return ('generate',)

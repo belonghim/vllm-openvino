@@ -1,13 +1,11 @@
 # AGENTS.md — vllm-openvino
 
-> AI 에이전트가 이 프로젝트에서 작업할 때 반드시 읽어야 하는 컨텍스트 문서.
-
 ## 프로젝트 정체성
 
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO를 LLM 추론 백엔드로 추가합니다.
 
-- **vLLM 버전**: 0.19.1 (V1 엔진 전용, V0 엔진 완전 제거됨)
-- **OpenVINO 버전**: >= 2026.1.0
+- **vLLM 버전**: 0.24.0
+- **OpenVINO 버전**: >= 2026.2.1
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
 
@@ -108,8 +106,6 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 - **SSM/Mamba 지원** — hybrid model(Attention + SSM) 지원. `detect_model_type()`으로 모델 타입 탐지, PA 변환은 attention-only 모델에만 적용
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
-
-> ⚠️ **참고**: OpenCode 에이전트는 `AGENTS.md`만 자동으로 읽습니다. `docs/` 하위 파일은 에이전트가 직접 읽지 않으므로, 본 문서에 명시된 제약 사항(설계 원칙, 의사결정 체크리스트, ⛔ 항목)이 에이전트의 **유일한 보장된 컨텍스트**입니다.
 
 ## Git 및 Commits 정책
 

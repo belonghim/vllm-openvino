@@ -58,6 +58,10 @@ class OpenVINOAttentionBackend(AttentionBackend):
     def make_openvino_metadata(*args, **kwargs) -> "OpenVINOAttentionMetadata":
         return OpenVINOAttentionMetadata(*args, **kwargs)
 
+    @classmethod
+    def supports_kv_connector(cls) -> bool:
+        return False
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,

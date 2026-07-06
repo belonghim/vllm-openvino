@@ -85,9 +85,35 @@ class OpenVinoPlatform(Platform):
         return "GPU" in envs.VLLM_OPENVINO_DEVICE
 
     @classmethod
+    def import_ir_kernels(cls) -> None:
+        pass
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.manual_seed(seed)
+
+    @classmethod
+    def get_current_memory_usage(
+        cls, device: "torch.types.Device | None" = None
+    ) -> float:
+        return 0.0
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.debug("[OV-PLATFORM] Pin memory is not supported on OpenVINO.")
         return False
+
+    @classmethod
+    def check_if_supports_dtype(cls, dtype: torch.dtype) -> None:
+        return None
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return ""
+
+    @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        pass
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -128,6 +154,11 @@ class OpenVinoPlatform(Platform):
 
         precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
         cache_dtype = envs.KV_CACHE_PRECISION_MAP.get(precision_key or "")
+        if precision_key and cache_dtype is None:
+            logger.warning(
+                "[OV-PLATFORM] Unrecognized VLLM_OPENVINO_KV_CACHE_PRECISION=%r. "
+                "Valid values: %s. Falling back to automatic detection.",
+                precision_key, list(envs.KV_CACHE_PRECISION_MAP.keys()))
         if cache_dtype is not None:
             logger.info(
                 "[OV-PLATFORM] KV cache type is overridden to %s via "

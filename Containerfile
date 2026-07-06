@@ -6,7 +6,7 @@ RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN pip install -U pip setuptools wheel && \
     PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" \
-    pip install --no-cache-dir "torch==2.10.0+cpu" "torchvision==0.25.0+cpu" "openvino==2026.1.0" "transformers==5.5.3" "vllm==0.19.1" && \
+    pip install --no-cache-dir "torch==2.11.0+cpu" "torchvision==0.26.0+cpu" "openvino==2026.2.1" "transformers==5.5.3" "vllm==0.24.0" && \
     pip uninstall -y triton && \
     pip cache purge
 WORKDIR /opt/vllm

@@ -19,7 +19,6 @@ str_to_ov_type: dict[str, ov.Type] = {
     "f16": ov.Type.f16,
     "bf16": ov.Type.bf16,
     "f32": ov.Type.f32,
-    "dynamic": ov.Type.dynamic,
 } if ov is not None else {}
 
 FP32_BYTES = 4
