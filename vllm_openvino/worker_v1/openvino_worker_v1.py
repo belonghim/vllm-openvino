@@ -653,12 +653,10 @@ class OpenVINOWorkerV1(WorkerBase):
                                                                             cache_block_size,
                                                                             self.profile_run)
         if self._is_model_stateful():
-            if self.ssm_cache_config or self.conv_cache_config:
-                max_needed = self.scheduler_config.max_num_seqs
-            else:
-                max_needed = (
-                    self.model_config.max_model_len + self.cache_config.block_size - 1
-                ) // self.cache_config.block_size
+            blocks_per_seq = (
+                self.model_config.max_model_len + self.cache_config.block_size - 1
+            ) // self.cache_config.block_size
+            max_needed = blocks_per_seq * self.scheduler_config.max_num_seqs
             if num_device_blocks > max_needed:
                 logger.info(
                     "[OV-WORKER] Capping stateful num_blocks %d -> %d",
