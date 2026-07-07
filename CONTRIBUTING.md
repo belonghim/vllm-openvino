@@ -66,7 +66,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   -v /path/to/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino \
   -v /path/to/models:/models:Z \
   vllm-openvino \
-  --port 8080 --model /models/<model_dir> --max-model-len 4096
+  --port 8080 --model <model_dir> --max-model-len 4096
 
 # Test API
 curl -s http://localhost:8080/v1/completions \

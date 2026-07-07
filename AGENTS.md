@@ -74,10 +74,10 @@ python3 -m py_compile <file>
 
 # podman 소스 마운트 테스트
 podman run --replace -d --name vllm-server -p 8080:8080 \
-  -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino \
+  -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v /home/user/hf:/models:Z \
   quay.io/joopark/vllm-openvino \
-  --port=8080 --model /models/<model_dir> --max-model-len 4096
+  --port=8080 --model <model_dir> --max-model-len 4096
 ```
 
 ## ⛔ 하지 말아야 할 것들 (요약)

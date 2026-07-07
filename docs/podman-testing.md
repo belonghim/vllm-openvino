@@ -7,10 +7,10 @@
 ```bash
 # 서버 시작 (소스 마운트 + 모델 마운트)
 podman run --replace -d --name vllm-server -p 8080:8080 \
-  -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino \
+  -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v /home/user/hf:/models:Z \
   quay.io/joopark/vllm-openvino \
-  --port=8080 --model /models/<model_dir> --max-model-len 4096
+  --port=8080 --model <model_dir> --max-model-len 4096
 
 # 서버 시작 대기 (Application startup complete 메시지 확인)
 for i in $(seq 1 30); do
@@ -56,7 +56,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 ## 모델 경로 규칙
 
 - 호스트: `~/hf/<model_dir>`
-- 컨테이너: `/models/<model_dir>`
+- 컨테이너: `<model_dir>`
 - `-v /home/user/hf:/models:Z` 마운트로 연결 (`:Z` = SELinux 레이블)
 
 ## 주의사항
