@@ -226,15 +226,21 @@ class OpenVINOWorkerV1(WorkerBase):
         self.model_runner.configure_cache_groups(num_cache_groups)
 
         has_external_kv = False
+        new_key_cache_config = []
+        new_value_cache_config = []
         for input_port in compiled_model.inputs:
             input_name = input_port.get_any_name()
 
             if input_name.startswith("key_cache."):
                 has_external_kv = True
                 self.cache_dtype = input_port.get_element_type().to_string()
-                self.key_cache_config.append(input_port.get_partial_shape())
+                new_key_cache_config.append(input_port.get_partial_shape())
             if input_name.startswith("value_cache."):
-                self.value_cache_config.append(input_port.get_partial_shape())
+                new_value_cache_config.append(input_port.get_partial_shape())
+
+        if has_external_kv:
+            self.key_cache_config = new_key_cache_config
+            self.value_cache_config = new_value_cache_config
 
         if not has_external_kv:
             logger.info(
@@ -647,9 +653,12 @@ class OpenVINOWorkerV1(WorkerBase):
                                                                             cache_block_size,
                                                                             self.profile_run)
         if self._is_model_stateful():
-            max_needed = (
-                self.model_config.max_model_len + self.cache_config.block_size - 1
-            ) // self.cache_config.block_size
+            if self.ssm_cache_config or self.conv_cache_config:
+                max_needed = self.scheduler_config.max_num_seqs
+            else:
+                max_needed = (
+                    self.model_config.max_model_len + self.cache_config.block_size - 1
+                ) // self.cache_config.block_size
             if num_device_blocks > max_needed:
                 logger.info(
                     "[OV-WORKER] Capping stateful num_blocks %d -> %d",

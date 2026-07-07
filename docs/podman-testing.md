@@ -35,12 +35,12 @@ curl -s http://localhost:8080/v1/models | python3 -m json.tool
 # 추론 테스트 (completions)
 curl -s http://localhost:8080/v1/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"/models/<model_dir>","prompt":"Hello","max_tokens":32}'
+  -d '{"model":"<model_dir>","prompt":"Hello","max_tokens":32}'
 
 # 추론 테스트 (chat)
 curl -s http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"/models/<model_dir>","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+  -d '{"model":"<model_dir>","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
 ## 반복 디버그 루프 패턴
@@ -79,7 +79,7 @@ Gemma-3/4와 같은 multimodal 모델은 이미지 입력을 처리할 수 있�
 curl -s --max-time 240 http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "/models/<model_dir>",
+    "model": "<model_dir>",
     "messages": [{
       "role": "user",
       "content": [
