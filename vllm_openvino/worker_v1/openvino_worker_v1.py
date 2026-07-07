@@ -584,7 +584,11 @@ class OpenVINOWorkerV1(WorkerBase):
                     len(self.conv_cache_config),
                 )
 
-            mamba_block_size = getattr(self.cache_config, "mamba_block_size", None) or block_size
+            if self._is_model_stateful():
+                # block_size=max_model_len makes ceil(max_model_len/block_size)=1, satisfying full_sequence_must_fit with 1 slot.
+                mamba_block_size = self.model_config.max_model_len
+            else:
+                mamba_block_size = getattr(self.cache_config, "mamba_block_size", None) or block_size
             mamba_cache_mode = getattr(self.cache_config, "mamba_cache_mode", "none")
             if mamba_cache_mode != "none":
                 logger.warning(
@@ -653,10 +657,7 @@ class OpenVINOWorkerV1(WorkerBase):
                                                                             cache_block_size,
                                                                             self.profile_run)
         if self._is_model_stateful():
-            blocks_per_seq = (
-                self.model_config.max_model_len + self.cache_config.block_size - 1
-            ) // self.cache_config.block_size
-            max_needed = blocks_per_seq * self.scheduler_config.max_num_seqs
+            max_needed = self.scheduler_config.max_num_seqs + 1
             if num_device_blocks > max_needed:
                 logger.info(
                     "[OV-WORKER] Capping stateful num_blocks %d -> %d",
