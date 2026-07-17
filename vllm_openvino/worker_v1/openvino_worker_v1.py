@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import math
 from pathlib import Path
 from typing import Set
 
@@ -657,7 +658,9 @@ class OpenVINOWorkerV1(WorkerBase):
                                                                             cache_block_size,
                                                                             self.profile_run)
         if self._is_model_stateful():
-            max_needed = self.scheduler_config.max_num_seqs + 1
+            blocks_per_seq = math.ceil(
+                self.model_config.max_model_len / self.cache_config.block_size)
+            max_needed = blocks_per_seq * self.scheduler_config.max_num_seqs + 1
             if num_device_blocks > max_needed:
                 logger.info(
                     "[OV-WORKER] Capping stateful num_blocks %d -> %d",
