@@ -345,14 +345,14 @@ class OpenVINOWorkerV1(WorkerBase):
                 pooler_output=None,
             )
         new_block_ids_to_zero = getattr(scheduler_output, 'new_block_ids_to_zero', None)
-        if new_block_ids_to_zero and hasattr(self, 'kv_cache') and self.kv_cache:
+        if new_block_ids_to_zero and self.kv_cache:
             for key_cache, value_cache in self.kv_cache:
                 k = key_cache.data
                 v = value_cache.data
-                for block_id in new_block_ids_to_zero:
-                    if block_id < k.shape[0]:
-                        k[block_id] = 0
-                        v[block_id] = 0
+                valid_ids = [bid for bid in new_block_ids_to_zero if bid < k.shape[0]]
+                if valid_ids:
+                    k[valid_ids] = 0
+                    v[valid_ids] = 0
         self._pending_output = self.model_runner.execute_model(scheduler_output)
         return None
 
@@ -536,12 +536,12 @@ class OpenVINOWorkerV1(WorkerBase):
             self.scheduler_config.max_num_batched_tokens,
             used_device_memory_str)
 
-        if used_device_mem >= total_device_memory:
+        if used_device_mem >= total_device_memory * memory_utilization:
             raise RuntimeError(
                 f"The required memory size {used_device_memory_str} for model "
-                f"is higher than the total available device "
-                f"memory {total_device_memory_str}. Please consider to "
-                f"decrease `max_num_batched_tokens` or increase "
+                f"is higher than the available device "
+                f"memory {total_device_memory_str} * {memory_utilization} utilization. "
+                f"Please consider to decrease `max_num_batched_tokens` or increase "
                 f"`gpu_memory_utilization`")
 
         # Reset input batch

@@ -48,7 +48,10 @@ class OpenVINOCacheEngine:
     ) -> None:
         # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
         # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
-        assert device_config.device_type == "cpu"
+        if device_config.device_type != "cpu":
+            raise ValueError(
+                f"OpenVINO backend requires device_type='cpu' in DeviceConfig, "
+                f"got '{device_config.device_type}'")
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -158,6 +161,10 @@ class OpenVINOCacheEngine:
             else:
                 remote_context = ov_core.get_default_context(ov_device)
                 tensor = remote_context.create_tensor(ov_type, shape, {})
+                try:
+                    tensor.data.fill(0)
+                except (AttributeError, RuntimeError):
+                    pass
             cache.append(tensor)
         return cache
 
@@ -194,8 +201,8 @@ class OpenVINOCacheEngine:
         if num_blocks == 0:
             return swap_cache
 
-        assert not current_platform.is_openvino_cpu(), \
-            "CPU device isn't supposed to have swap cache"
+        if current_platform.is_openvino_cpu():
+            raise RuntimeError("CPU device isn't supposed to have swap cache")
 
         for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
             key_dims = [

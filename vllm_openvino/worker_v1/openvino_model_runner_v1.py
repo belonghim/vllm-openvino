@@ -422,7 +422,7 @@ class OpenVINOModelRunnerV1:
         self.input_batch.refresh_metadata()
         new_req_ids = self.input_batch.req_ids
 
-        if self.model is not None and not self.model._has_kv_cache_inputs:
+        if self.model is not None and not getattr(self.model, '_has_kv_cache_inputs', True):
             has_running = has_new = False
             for req_id in new_req_ids:
                 if req_id is None:

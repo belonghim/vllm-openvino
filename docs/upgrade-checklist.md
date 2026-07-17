@@ -98,3 +98,50 @@ vLLM 버전 업그레이드 시 다음 사항을 확인하세요.
 
 - `python3 -m py_compile vllm_openvino/**/*.py`를 실행하여 문법 오류를 확인합니다.
 - Podman 테스트 환경에서 실제 추론을 실행하여 기능적 회귀가 없는지 검증합니다.
+
+---
+
+## 6. v0.24.0 → v0.25.0 분석 (2026-07-17)
+
+### 배경
+
+vLLM v0.25.0 (2026-07-11)는 558 commits, 232 contributors 포함. v0.25.1 (2026-07-14)는 TorchCodec import 지연, mixed-dtype allreduce RMSNorm guard 패치.
+
+릴리즈 주요 테마: MRv2 기본 활성화 (dense 모델), PagedAttention 삭제, Platform memory API 마이그레이션, device selection 리팩토링.
+
+### 소스 레벨 diff 결과
+
+모든 plugin-facing v1 내부 API는 v0.24.0과 **정확히 동일**:
+- `WorkerBase.__init__()` — 5개 파라미터 (vllm_config, local_rank, rank, distributed_init_method, is_driver_worker)
+- `WorkerBase.init_device()`, `execute_model()`, `sample_tokens()`, `compile_or_warm_up_model()` — 시그니처 불변
+- `ModelRunnerOutput` dataclass — 모든 필드 불변 (req_ids, req_id_to_index, sampled_token_ids, logprobs, etc.)
+- `SchedulerOutput`, `NewRequestData`, `CachedRequestData` dataclass — 모든 필드 불변
+- `FullAttentionSpec`, `AttentionSpec`, `KVCacheSpec` — 하위 호환: `KVQuantMode.INT4_PER_TOKEN_HEAD`, `RSWASpec` 추가만 있음
+- `AttentionBackend` ABC — 새 추상 메서드 없음. `rswa_prefix_lens`, `lse_base_on_e`, `token_to_req_indices()` 추가 (모두 선택적)
+
+### 잠재적 리스크 (v0.25.0 현재는 문제 아님)
+
+| 항목 | 상태 | 설명 |
+|------|------|------|
+| `execute_model()` → `None` 반환 가능 | 📌 모니터링 | v0.25.0에도 return type에 `None` 포함. 플러그인은 `None` 반환 안 함. **향후 vLLM이 이 패턴 강제 시 호환성 이슈 가능** |
+| `sample_tokens()` 신규 추상 메서드화 | 📌 모니터링 | 현재는 `raise NotImplementedError` 기본값. **향후 추상 메서드로 변경 시 플러그인에 구현 추가 필요** |
+| MRv2 기본 활성화 (#44443) | 🟢 영향 없음 | 플러그인은 V1 ModelRunner 자체 구현 (`OpenVINOModelRunnerV1`) 사용 |
+| PagedAttention 삭제 (#47361) | 🟢 영향 없음 | 플러그인은 V0 PagedAttention 미사용. V1 `AttentionBackend` 인터페이스 사용 |
+| `mem_get_info` 제거 (#44825) | 🟢 영향 없음 | 플러그인은 `is_openvino_cpu()` 커스텀 메서드만 사용, `mem_get_info()` 미호출 |
+| `CUDA_VISIBLE_DEVICES` 중단 (#45026) | 🟢 영향 없음 | `WorkerBase.__init__()` 시그니처 불변. 변경사항은 `WorkerWrapperBase.init_worker()`에서 `kwargs.pop()` 처리 |
+
+### 업그레이드 권장사항
+
+1. v0.25.0으로 업그레이드해도 **plugin 코드 수정 불필요**
+2. `docs/upgrade-checklist.md`의 import 목록(섹션 2-3) 여전히 유효
+3. 다음 v0.26.0 릴리즈에서 `execute_model`/`sample_tokens` 분리 강제 여부 확인 필요
+4. vLLM issue [#41286](https://github.com/vllm-project/vllm/issues/41286) (Model Runner V2 migration) 지속 모니터링
+
+### 검증 완료 파일 (permalink 기반)
+
+각 인터페이스의 v0.24.0과 v0.25.0 태그를 직접 비교하여 diff 확인:
+- `vllm/v1/worker/worker_base.py` — diff 없음
+- `vllm/v1/outputs.py` — diff 없음
+- `vllm/v1/core/sched/output.py` — diff 없음
+- `vllm/v1/kv_cache_interface.py` — INT4_PER_TOKEN_HEAD, RSWASpec 추가 (하위 호환)
+- `vllm/v1/attention/backend.py` — rswa_prefix_lens, lse_base_on_e, token_to_req_indices 추가 (하위 호환)

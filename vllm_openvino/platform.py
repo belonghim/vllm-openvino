@@ -22,8 +22,6 @@ except ImportError as e:
 
 
 def _is_stateful_model(model_path: str) -> bool:
-    if ov is None:
-        return False
     from pathlib import Path
     model_dir = Path(model_path)
     if not model_dir.is_dir():
@@ -34,16 +32,13 @@ def _is_stateful_model(model_path: str) -> bool:
     if not ir_path.exists():
         return False
     try:
-        ov_model = ov.Core().read_model(str(ir_path))
-        from vllm_openvino.model_executor.model_loader.openvino import (
-            detect_model_type, HYBRID_MAMBA, STATEFUL,
-        )
-        model_type = detect_model_type(ov_model)
-        return model_type in (STATEFUL, HYBRID_MAMBA)
-    except (RuntimeError, ValueError):
+        with open(ir_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                if b'type="ReadValue"' in chunk:
+                    return True
         return False
-    except Exception as e:
-        logger.warning("Unexpected error in _is_stateful_model: %s", e)
+    except (IOError, OSError) as e:
+        logger.warning("_is_stateful_model: could not read %s: %s", ir_path, e)
         return False
 
 
@@ -123,8 +118,8 @@ class OpenVinoPlatform(Platform):
                 "Install with: pip install openvino>=2026.1.0")
 
         parallel_config = vllm_config.parallel_config
-        assert (parallel_config.world_size == 1
-                ), "OpenVINO only supports single CPU socket currently."
+        if parallel_config.world_size != 1:
+            raise ValueError("OpenVINO only supports single CPU socket currently.")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = \
@@ -153,7 +148,7 @@ class OpenVinoPlatform(Platform):
             cache_config.block_size = GPU_BLOCK_SIZE
 
         precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
-        cache_dtype = envs.KV_CACHE_PRECISION_MAP.get(precision_key or "")
+        cache_dtype = envs.KV_CACHE_PRECISION_MAP.get((precision_key or "").lower())
         if precision_key and cache_dtype is None:
             logger.warning(
                 "[OV-PLATFORM] Unrecognized VLLM_OPENVINO_KV_CACHE_PRECISION=%r. "
@@ -171,20 +166,13 @@ class OpenVinoPlatform(Platform):
                 "It will be determined automatically by a plugin")
             cache_config.cache_dtype = "dynamic"
 
-        if OpenVinoPlatform.is_openvino_cpu():
-            if cache_config.block_size != CPU_BLOCK_SIZE:
-                logger.info(
-                    "[OV-PLATFORM] OpenVINO CPU optimal block size is %d, "
-                    "overriding %s to %d",
-                    CPU_BLOCK_SIZE, cache_config.block_size, CPU_BLOCK_SIZE)
-                cache_config.block_size = CPU_BLOCK_SIZE
-        else:
-            if cache_config.block_size != GPU_BLOCK_SIZE:
-                logger.info(
-                    "[OV-PLATFORM] OpenVINO GPU optimal block size is %d, "
-                    "overriding %s to %d",
-                    GPU_BLOCK_SIZE, cache_config.block_size, GPU_BLOCK_SIZE)
-                cache_config.block_size = GPU_BLOCK_SIZE
+        target_block_size = CPU_BLOCK_SIZE if OpenVinoPlatform.is_openvino_cpu() else GPU_BLOCK_SIZE
+        if cache_config.block_size != target_block_size:
+            logger.info(
+                "[OV-PLATFORM] OpenVINO optimal block size is %d, "
+                "overriding %s to %d",
+                target_block_size, cache_config.block_size, target_block_size)
+            cache_config.block_size = target_block_size
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
         if kv_cache_space >= 0:
@@ -214,9 +202,9 @@ class OpenVinoPlatform(Platform):
         vllm_config.compilation_config.level = 0
         vllm_config.compilation_config.mode = CompilationMode.NONE
 
-        assert vllm_config.lora_config is None, \
-            "OpenVINO backend doesn't support LoRA"
-        assert cls.is_openvino_cpu() or \
-            cls.is_openvino_gpu() or \
-            "empty" in envs.VLLM_OPENVINO_DEVICE, \
-            "OpenVINO backend supports only CPU, GPU and empty devices"
+        if vllm_config.lora_config is not None:
+            raise ValueError("OpenVINO backend doesn't support LoRA")
+        if not (cls.is_openvino_cpu() or cls.is_openvino_gpu()
+                or "empty" in envs.VLLM_OPENVINO_DEVICE):
+            raise ValueError(
+                "OpenVINO backend supports only CPU, GPU and empty devices")

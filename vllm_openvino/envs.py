@@ -64,8 +64,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CPU-only: enable/disable hyperthreading. When disabled, uses 1 thread
     # per physical core instead of 2 (useful on oversubscription-prone systems).
     "VLLM_OPENVINO_ENABLE_HYPER_THREADING":
-    lambda: None if os.getenv("VLLM_OPENVINO_ENABLE_HYPER_THREADING", "").lower() in ("", "auto") else
-            os.getenv("VLLM_OPENVINO_ENABLE_HYPER_THREADING", "true").lower() == "true",
+    lambda: (lambda v: None if v in ("", "auto") else v == "true")(
+        os.getenv("VLLM_OPENVINO_ENABLE_HYPER_THREADING", "").lower()),
 
     # CPU-only: inference precision hint (f32, f16, bf16). Forces specific
     # precision for matmul operations. On CPUs without int8 acceleration, this
@@ -76,8 +76,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CPU-only: enable/disable CPU core pinning. When enabled, threads are
     # pinned to specific CPU cores to avoid migration penalties.
     "VLLM_OPENVINO_ENABLE_CPU_PINNING":
-    lambda: None if os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower() in ("", "auto") else
-            os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "true").lower() == "true",
+    lambda: (lambda v: None if v in ("", "auto") else v == "true")(
+        os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower()),
 }
 
 # end-env-vars-definition

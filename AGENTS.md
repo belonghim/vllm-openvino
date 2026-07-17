@@ -67,7 +67,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 | 비동기 추론 파이프라인 | 불가 | vLLM 스케줄러가 순차 동작. 플러그인 레벨 비동기는 구조적으로 불가 |
 | Structured outputs (문법 유도 디코딩) | 수요 없음 | outlines 통합 필요. 단순히 `sample_tokens()` 수정으로는 불가 |
 | `openvino._offline_transformations` 교체 | 불필요 | `paged_attention_transformation`은 대체 불가. 2026.0.0에서 여전히 정상 동작 확인됨 |
-| stateful path 기반 신규 기능 | 금지 | OpenVINO 2027.0+에서 ReadValue/Assign deprecated 예정. stateful path는 유지보수 모드로만 유지 |
+| stateful path 기반 신규 기능 추가 | 금지 | OpenVINO Model Server(OVMS)에서 stateful model serving deprecated 예정. Runtime ReadValue/Assign ops 자체는 유지되나 장기 방향성 불확실. stateful path는 유지보수 모드로만 유지. 버그 수정은 허용 |
 
 ## 기술적 특이사항 (코드 수정 시 참고)
 
@@ -75,19 +75,38 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 
 - **`TORCH_COMPILE_DISABLE=1` 필수** — torch.compile/Inductor가 OpenVINO와 비호환
 - **bf16 → float32 변환** — `_as_numpy_no_copy()`에서 torch bfloat16을 numpy float32로 캐스팅. OpenVINO는 bf16 numpy 미지원
-- **KV 캐시 `.fill(0)` 제거 금지** — `_allocate_kv_cache()`에서 `.fill(0)` 제거는 의도된 최적화. 되돌리면 OOM 유발
+- **KV 캐시 `.fill(0)` 복원 금지** — `_allocate_kv_cache()`에 `.fill(0)` 없는 것이 정상(의도된 최적화). 추가하면 OOM 유발. SSM/conv 캐시(`_allocate_state_cache()`)에는 `.fill(0)` 유지됨
 - **Pin memory 미지원** / **LoRA 미지원** / **단일 소켓만 지원**
 - **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 import 시점에 raise하지 말 것. vLLM 플러그인 디스커버리 메커니즘 때문
-- **서빙 경로 2가지** — `detect_model_type()`으로 탐지:
-  - **PagedAttention path**: `ScaledDotProductAttention` op 있는 모델 (Llama 3, Qwen2.5 등). PA 변환 적용, 동시 요청 배칭 가능.
-  - **Stateful path**: SDPA op 없는 모델 (Gemma-4) 또는 hybrid Mamba/attention (Qwen3.5). `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
+- **서빙 경로 2가지** — `detect_model_type()`으로 탐지 (기준: `ReadValue` op 유무):
+  - **PagedAttention path**: `ReadValue` op 없는 모델(ATTENTION_ONLY) 중 `ScaledDotProductAttention` op도 있는 모델 (Llama 3, Qwen2.5 등). PA 변환 적용, 동시 요청 배칭 가능.
+  - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5). `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
-- **모델 포맷 필수** — OpenVINO IR 포맷(`openvino_model.xml` + `openvino_model.bin`) 사전 변환 필요. HuggingFace 원본 모델 직접 로딩 불가.
+- **모델 포맷 필수** — OpenVINO IR 포맷 사전 변환 필요. HuggingFace 원본 모델 직접 로딩 불가. 파일명 규칙: 일반 모델은 `openvino_model.xml`, 멀티모달 모델(Gemma 3 등)은 `openvino_language_model.xml` + `openvino_text_embeddings_model.xml` + `openvino_vision_embeddings_model.xml`.
 
 ## Git 및 Commits 정책
 
 - **Co-authored-by 미사용**: AI agent는 commits를 할 때 `Co-authored-by` trailer를 추가하지 않습니다. 모든 commits은 belonghim 계정의 이름으로만 기록됩니다.
 - **사유**: GitHub contributor 목록의 명확성을 위해. 실제 코드 개발은 사용자(belonghim)이고, AI agent는 개발 보조 도구입니다.
+- 완료시 git push 까지 진행한다
 
+## vLLM 버전 호환성
 
+| 버전 | 플러그인 호환성 | 비고 |
+|------|---------------|------|
+| **v0.24.0** (2026-06-29) | ✅ 현재 타겟 | AGENTS.md 기준 |
+| **v0.25.0** (2026-07-11) | ✅ **호환됨** (소스 레벨) | 모든 plugin 인터페이스 동일: WorkerBase, ModelRunnerOutput, SchedulerOutput, AttentionBackend, KVCacheSpec |
+| **v0.25.1** (2026-07-14) | ✅ 호환됨 | TorchCodec import, mixed-dtype allreduce RMSNorm 패치만 포함 |
+
+### v0.24.0 → v0.25.0 인터페이스 diff 요약
+
+| 인터페이스 | 파일 | Diff 결과 |
+|-----------|------|-----------|
+| `WorkerBase` | `worker_base.py` | **변경 없음** — 생성자, `__init__`, `init_device`, `execute_model()`, `sample_tokens()` 모두 동일 |
+| `ModelRunnerOutput` | `outputs.py` | **변경 없음** — 모든 dataclass 필드 동일 |
+| `SchedulerOutput` / `NewRequestData` / `CachedRequestData` | `core/sched/output.py` | **변경 없음** — 모든 dataclass 필드 동일 |
+| `KVCacheSpec` / `FullAttentionSpec` / `AttentionSpec` | `kv_cache_interface.py` | **하위 호환** — `KVQuantMode.INT4_PER_TOKEN_HEAD` (새 값), `RSWASpec` (새 dataclass). 기존 `FullAttentionSpec` 필드 불변 |
+| `AttentionBackend` | `attention/backend.py` | **하위 호환** — `rswa_prefix_lens` 필드, `lse_base_on_e` 속성, `token_to_req_indices()` 메서드 추가. 새 추상 메서드 없음 |
+
+**결론**: v0.25.0으로 업그레이드해도 plugin 코드 수정 불필요. 현재 AGENTS.md의 v0.24.0 타겟 유지 또는 v0.25.0으로 업데이트 모두 가능.

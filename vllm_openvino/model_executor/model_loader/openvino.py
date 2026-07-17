@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 import openvino as ov
+import openvino.properties as props
+import openvino.properties.hint as hints
 import torch
 from statistics import StatisticsError, mode
 
@@ -55,29 +57,38 @@ HYBRID_MAMBA = "hybrid_mamba"
 STATEFUL = "stateful"
 
 
-def detect_model_type(ov_model: ov.Model) -> str:
-    for op in ov_model.get_ops():
-        if op.get_type_name() == "ReadValue":
-            var_id = op.get_variable_id()
-            if var_id and ("ssm" in var_id or "conv" in var_id):
-                return HYBRID_MAMBA
-            return STATEFUL
-    return ATTENTION_ONLY
-
-
-def get_ssm_state_shapes(ov_model: ov.Model) -> dict[str, list]:
+def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, list]]:
+    """Single-pass detection of model type and SSM/conv state shapes."""
     ssm_shapes = []
     conv_shapes = []
+    has_non_ssm_readvalue = False
     for op in ov_model.get_ops():
-        if op.get_type_name() == "ReadValue":
-            var_id = op.get_variable_id()
-            if not var_id:
-                continue
-            if "ssm" in var_id:
-                ssm_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
-            elif "conv" in var_id:
-                conv_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
-    return {"ssm": ssm_shapes, "conv": conv_shapes}
+        if op.get_type_name() != "ReadValue":
+            continue
+        var_id = op.get_variable_id()
+        if not var_id:
+            has_non_ssm_readvalue = True
+            continue
+        if "ssm" in var_id:
+            ssm_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
+        elif "conv" in var_id:
+            conv_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
+        else:
+            has_non_ssm_readvalue = True
+
+    if ssm_shapes or conv_shapes:
+        model_type = HYBRID_MAMBA
+    elif has_non_ssm_readvalue:
+        model_type = STATEFUL
+    else:
+        model_type = ATTENTION_ONLY
+
+    return model_type, {"ssm": ssm_shapes, "conv": conv_shapes}
+
+
+def detect_model_type(ov_model: ov.Model) -> str:
+    model_type, _ = detect_model_type_and_shapes(ov_model)
+    return model_type
 
 
 def _has_sdpa_ops(model: ov.Model) -> bool:
@@ -252,14 +263,13 @@ class OpenVINOCausalLM(nn.Module):
 
         ov_model = ov_core.read_model(str(model_dir / ir_filename))
 
-        if preloaded_model_type is not None:
+        if preloaded_model_type is not None and preloaded_ssm_state_shapes is not None:
             self.model_type = preloaded_model_type
-        else:
-            self.model_type = detect_model_type(ov_model)
-        if preloaded_ssm_state_shapes is not None:
             self.ssm_state_shapes = preloaded_ssm_state_shapes
         else:
-            self.ssm_state_shapes = get_ssm_state_shapes(ov_model)
+            detected_type, detected_shapes = detect_model_type_and_shapes(ov_model)
+            self.model_type = preloaded_model_type if preloaded_model_type is not None else detected_type
+            self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
         apply_selective_paged_attention_transformation(ov_model, self.model_type)
         if has_op_with_type(ov_model, "PagedAttentionExtension"):
@@ -271,8 +281,6 @@ class OpenVINOCausalLM(nn.Module):
 
         perf_mode = envs.VLLM_OPENVINO_PERFORMANCE_MODE
         ov_device_upper = ov_device.upper()
-        import openvino.properties.hint as hints
-        import openvino.properties as props
         perf_hint = {hints.performance_mode: hints.PerformanceMode.LATENCY} \
             if perf_mode == "LATENCY" else {hints.performance_mode: hints.PerformanceMode.THROUGHPUT}
 
@@ -344,7 +352,6 @@ class OpenVINOCausalLM(nn.Module):
                 if len(shape) > 0 and shape[0].is_static:
                     first_fixed_dims.append(shape[0].get_length())
             if first_fixed_dims:
-                from statistics import mode, StatisticsError
                 try:
                     self._batch_size = mode(first_fixed_dims)
                 except StatisticsError:
@@ -364,12 +371,13 @@ class OpenVINOCausalLM(nn.Module):
                 text_emb_model, ov_device, perf_hint)
             self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
 
+        self.ov_vision_emb_compiled = None
         if self.use_vision_embeddings_model:
             vision_emb_model = ov_core.read_model(
                 str(model_dir / "openvino_vision_embeddings_model.xml"))
-            ov_vision_emb_compiled = ov_core.compile_model(
+            self.ov_vision_emb_compiled = ov_core.compile_model(
                 vision_emb_model, ov_device, perf_hint)
-            self.vision_emb_request = ov_vision_emb_compiled.create_infer_request()
+            self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
 
         self.use_per_layer_embeddings_model = False
         self.ov_per_layer_emb_compiled = None
@@ -413,16 +421,6 @@ class OpenVINOCausalLM(nn.Module):
             self.ov_request.infer(inputs)
             self.recreate_infer_request()
             logger.info("[OV-WARMUP] Stateful model warmup completed")
-        except RuntimeError as e:
-            warmup_failed = True
-            logger.warning("[OV-WARMUP] Warmup failed: %s", e)
-            try:
-                self.recreate_infer_request()
-            except Exception as recreate_error:
-                logger.warning(
-                    "[OV-WARMUP] recreate_infer_request failed after warmup RuntimeError: %s",
-                    recreate_error,
-                )
         except Exception as e:
             warmup_failed = True
             logger.warning("[OV-WARMUP] Warmup failed: %s", e)
@@ -457,8 +455,6 @@ class OpenVINOCausalLM(nn.Module):
             if tensor.dtype == torch.bfloat16:
                 tensor = tensor.to(torch.float32)
             return tensor.numpy()
-        assert not isinstance(tensor_like, (ov.Tensor, torch.Tensor)), \
-            f"_as_numpy_no_copy: unhandled type {type(tensor_like)}"
         return np.asarray(tensor_like)
 
     def _prepare_vision_inputs(
@@ -640,15 +636,17 @@ class OpenVINOCausalLM(nn.Module):
                 self.ov_request = None
             if hasattr(self, 'text_emb_request') and self.text_emb_request is not None:
                 self.text_emb_request = None
+            if hasattr(self, 'vision_emb_request') and self.vision_emb_request is not None:
+                self.vision_emb_request = None
             if hasattr(self, 'per_layer_emb_request') and self.per_layer_emb_request is not None:
                 self.per_layer_emb_request = None
 
             self.ov_request = self.ov_compiled.create_infer_request()
-            if (self.ov_text_emb_compiled is not None
-                    and hasattr(self, 'text_emb_request')):
+            if self.ov_text_emb_compiled is not None:
                 self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
-            if (self.ov_per_layer_emb_compiled is not None
-                    and hasattr(self, 'per_layer_emb_request')):
+            if self.ov_vision_emb_compiled is not None:
+                self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
+            if self.ov_per_layer_emb_compiled is not None:
                 self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
             logger.info("[OV-STATE] Recreated infer request")
         except Exception as e:
@@ -808,7 +806,6 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
             if len(shape) > 0 and shape[0] is not None:
                 first_fixed_dims.append(shape[0])
         if first_fixed_dims:
-            from statistics import mode
             try:
                 self.batch_size = mode(first_fixed_dims)
             except StatisticsError:
