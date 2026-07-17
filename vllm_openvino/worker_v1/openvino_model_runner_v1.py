@@ -314,6 +314,7 @@ class OpenVINOModelRunnerV1:
         if self._mm_req_ids:
             all_pixel_values = []
             all_pixel_position_ids = []
+            all_image_grid_thw = []
             all_image_position_ids = []
 
             mm_req_ids = [
@@ -340,6 +341,9 @@ class OpenVINOModelRunnerV1:
                         if "pixel_position_ids" in mm_item:
                             all_pixel_position_ids.append(
                                 mm_item["pixel_position_ids"].data)
+                        if "image_grid_thw" in mm_item:
+                            all_image_grid_thw.append(
+                                mm_item["image_grid_thw"].data)
                     pos = mm_feature.mm_position
                     all_image_position_ids.append(
                         (pos.offset, pos.offset + pos.length))
@@ -355,6 +359,12 @@ class OpenVINOModelRunnerV1:
                     if pixel_position_ids.device != self.device:
                         pixel_position_ids = pixel_position_ids.to(self.device)
                     multi_modal_kwargs["pixel_position_ids"] = pixel_position_ids
+
+                if all_image_grid_thw:
+                    image_grid_thw = torch.stack(all_image_grid_thw)
+                    if image_grid_thw.device != self.device:
+                        image_grid_thw = image_grid_thw.to(self.device)
+                    multi_modal_kwargs["image_grid_thw"] = image_grid_thw
 
                 image_position_ids = torch.tensor(
                     all_image_position_ids, dtype=torch.int64)
