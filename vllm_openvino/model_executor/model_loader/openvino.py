@@ -382,14 +382,6 @@ class OpenVINOCausalLM(nn.Module):
                 vision_emb_model, ov_device, perf_hint)
             self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
 
-            self.ov_vision_pos_compiled = None
-            vision_pos_path = model_dir / "openvino_vision_embeddings_pos_model.xml"
-            if vision_pos_path.exists():
-                vision_pos_model = ov_core.read_model(str(vision_pos_path))
-                self.ov_vision_pos_compiled = ov_core.compile_model(
-                    vision_pos_model, ov_device, perf_hint)
-                self.vision_pos_request = self.ov_vision_pos_compiled.create_infer_request()
-
             vision_merger_path = model_dir / "openvino_vision_embeddings_merger_model.xml"
             if vision_merger_path.exists():
                 vision_merger_model = ov_core.read_model(str(vision_merger_path))
@@ -721,8 +713,6 @@ class OpenVINOCausalLM(nn.Module):
                 self.text_emb_request = None
             if hasattr(self, 'vision_emb_request') and self.vision_emb_request is not None:
                 self.vision_emb_request = None
-            if hasattr(self, 'vision_pos_request') and self.vision_pos_request is not None:
-                self.vision_pos_request = None
             if hasattr(self, 'vision_merger_request') and self.vision_merger_request is not None:
                 self.vision_merger_request = None
             if hasattr(self, 'per_layer_emb_request') and self.per_layer_emb_request is not None:
@@ -733,8 +723,6 @@ class OpenVINOCausalLM(nn.Module):
                 self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
             if self.ov_vision_emb_compiled is not None:
                 self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
-            if self.ov_vision_pos_compiled is not None:
-                self.vision_pos_request = self.ov_vision_pos_compiled.create_infer_request()
             if self.ov_vision_merger_compiled is not None:
                 self.vision_merger_request = self.ov_vision_merger_compiled.create_infer_request()
             if self.ov_per_layer_emb_compiled is not None:
