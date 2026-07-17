@@ -88,8 +88,9 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   - 멀티모달 언어 모델: `openvino_language_model.xml`
   - 텍스트 임베딩: `openvino_text_embeddings_model.xml`
   - 비전 인코더: `openvino_vision_embeddings_model.xml` (입력: **2D** `[num_patches, features]`, 배치 dim 없음 — 필요 시 squeeze)
-  - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, 3개 입력 필수)
-  - 비전 pos (일부 모델): `openvino_vision_embeddings_pos_model.xml` (입력 `[4, ?] i64` → 출력 `[4, ?, 1024]`, 현재 미사용)
+  - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
+  - 비전 pos (일부 모델): `openvino_vision_embeddings_pos_model.xml` (현재 미사용)
+- **mm_item 키 차이** — Qwen3.5: `pixel_values` + `image_grid_thw`. Gemma-4: `pixel_values`만. `pixel_position_ids`는 제공되지 않음
 
 ### 검증된 모델 및 서빙 경로 (2026-07-17 기준)
 
@@ -98,55 +99,6 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 | Qwen2.5-Coder-3B-Instruct-int4-ov | PA | ❌ | 기본 PA 경로 |
 | Qwen3.5-2B-int4-ov | Stateful/Hybrid | ✅ merger 필요 | ssm+conv ReadValue |
 | gemma-4-E2B-it-int4-ov | Stateful | ✅ | 단순 vision emb |
-
-## 멀티모달(비전) 서빙 파이프라인
-
-### 처리 흐름
-
-```
-mm_item["pixel_values"]       → vision encoder → [num_patches, 1024]
-mm_item["image_grid_thw"]     → _compute_merger_rotary_pos_emb() → [num_patches, 32]
-                                np.ones([1, N, N])                → attention_mask
-                              → merger.infer({hidden_states, attention_mask, rotary_pos_emb})
-                              → [num_patches, text_embed_dim]  (text dim으로 projection됨)
-```
-
-### Merger 호출 규칙
-
-merger(`openvino_vision_embeddings_merger_model.xml`)는 반드시 **dict로 3개 입력** 전달:
-
-```python
-self.vision_merger_request.infer({
-    "hidden_states": vision_embeds_2d,           # [num_patches, 1024]
-    "attention_mask": np.ones((1, N, N), np.float32),  # full attention
-    "rotary_pos_emb": rotary_pos_emb,            # [num_patches, 32]
-})
-```
-
-1개만 넘기면 `ScaledDotProductAttention` 내부에서 shape 불일치로 실패.
-
-### rotary_pos_emb 계산
-
-`image_grid_thw [n_images, 3]` (T, H, W)에서 Qwen2.5-VL `rot_pos_emb`와 동일 로직으로 계산:
-- spatial_merge_size=2 기준 permuted h/w pos ids 생성
-- rope_dim_per_spatial=16, theta=10000으로 frequency table 조회
-- concat(h_rope, w_rope) → [num_patches, 32]
-
-구현: `OpenVINOCausalLM._compute_merger_rotary_pos_emb()`
-
-### mm_item 키 참조
-
-| 모델 | pixel_values | pixel_position_ids | image_grid_thw |
-|------|--------------|--------------------|----------------|
-| Qwen2.5-Coder (PA, 텍스트 전용) | — | — | — |
-| Qwen3.5-2B (Hybrid) | ✅ | ❌ 없음 | ✅ |
-| Gemma-4-E2B (Stateful) | ✅ | ❌ 없음 | ❌ |
-
-`pixel_position_ids`가 없을 경우 `image_grid_thw`에서 직접 계산. 두 가지 모두 없으면 rotary_pos_emb를 zeros로 fallback.
-
-### pos model (현재 미사용)
-
-`openvino_vision_embeddings_pos_model.xml`: `[4, num_merged] i64 → [4, num_merged, 1024] f32` (embedding table lookup). merger 품질 개선에 기여할 수 있으나, 현재 skip해도 inference가 정상 동작함. 추가 시 패치 ordering(raster vs spatial-merge) 정렬 필요.
 
 ## Git 및 Commits 정책
 
