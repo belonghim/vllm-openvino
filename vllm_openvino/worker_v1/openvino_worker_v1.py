@@ -306,6 +306,15 @@ class OpenVINOWorkerV1(WorkerBase):
             getattr(self, 'cache_dtype', None) or self.cache_config.cache_dtype)
         self.cache_config.cache_dtype = detected_dtype
 
+        num_ssm_blocks = None
+        if self._is_model_stateful() and self.ssm_cache_config:
+            num_ssm_blocks = self.scheduler_config.max_num_seqs + 1
+            logger.info(
+                "[OV-WORKER] Stateful model: SSM physical slots=%d "
+                "(scheduler blocks=%d)",
+                num_ssm_blocks, self.cache_config.num_gpu_blocks,
+            )
+
         self.cache_engine = OpenVINOCacheEngine(
             self.cache_config,
             self.key_cache_config,
@@ -319,6 +328,7 @@ class OpenVINOWorkerV1(WorkerBase):
             self.conv_cache_config,
             self.ssm_cache_dtypes,
             self.conv_cache_dtypes,
+            num_ssm_blocks,
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache

@@ -45,6 +45,7 @@ class OpenVINOCacheEngine:
         conv_cache_config: list[ov.PartialShape] | None = None,
         ssm_cache_dtypes: list[str] | None = None,
         conv_cache_dtypes: list[str] | None = None,
+        num_ssm_blocks: int | None = None,
     ) -> None:
         # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
         # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
@@ -88,10 +89,13 @@ class OpenVINOCacheEngine:
             ov_device)
 
         # Initialize SSM/conv state caches (for hybrid models like Mamba).
+        # SSM states are managed internally by OpenVINO infer request; physical
+        # slots only need to cover active sequences, not the full block budget.
+        ssm_blocks = num_ssm_blocks if num_ssm_blocks is not None else self.num_device_blocks
         self.ssm_cache: list[ov.Tensor] = self._allocate_ssm_cache(
-            self.num_device_blocks, ov_core, ov_device)
+            ssm_blocks, ov_core, ov_device)
         self.conv_cache: list[ov.Tensor] = self._allocate_conv_cache(
-            self.num_device_blocks, ov_core, ov_device)
+            ssm_blocks, ov_core, ov_device)
 
         # Initialize the swap.
         self.swap_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_swap_cache(
