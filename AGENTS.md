@@ -83,14 +83,13 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5). `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
-- **SSM 물리 슬롯 ≠ 스케줄러 블록** — stateful/hybrid 모델에서 `ssm_cache` 텐서는 `StatefulInputBuilder`가 사용하지 않음. OpenVINO infer request가 SSM state를 내부 관리하므로 물리 슬롯은 `max_num_seqs+1`로 제한, 스케줄러 가상 블록과 분리됨. 기본 4GB kv_space를 그대로 쓰면 SSM 텐서가 4GB 할당되어 OOM 유발. preemption 등 외부 SSM 저장 구현 시 이 분리 해제 필요
+- **SSM 물리 슬롯 ≠ 스케줄러 블록** — stateful/hybrid 모델에서 `ssm_cache` 텐서는 `StatefulInputBuilder`가 사용하지 않음. OpenVINO infer request가 SSM state를 내부 관리하므로 물리 슬롯은 `max_num_seqs+1`로 제한(`_init_cache_engine()`의 `num_ssm_blocks`), 스케줄러 가상 블록과 분리됨. preemption 등 외부 SSM 저장 구현 시 이 분리 해제 필요
 - **모델 포맷 필수** — OpenVINO IR 포맷 사전 변환 필요. HuggingFace 원본 모델 직접 로딩 불가. 파일명 규칙:
   - 텍스트 모델: `openvino_model.xml`
   - 멀티모달 언어 모델: `openvino_language_model.xml`
   - 텍스트 임베딩: `openvino_text_embeddings_model.xml`
   - 비전 인코더: `openvino_vision_embeddings_model.xml` (입력: **2D** `[num_patches, features]`, 배치 dim 없음 — 필요 시 squeeze)
   - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
-  - 비전 pos (일부 모델): `openvino_vision_embeddings_pos_model.xml` (현재 미사용)
 - **mm_item 키 차이** — Qwen3.5: `pixel_values` + `image_grid_thw`. Gemma-4: `pixel_values`만. `pixel_position_ids`는 제공되지 않음
 
 ### 검증된 모델 및 서빙 경로 (2026-07-17 기준)
@@ -115,14 +114,4 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 | **v0.25.0** (2026-07-11) | ✅ **호환됨** (소스 레벨) | 모든 plugin 인터페이스 동일: WorkerBase, ModelRunnerOutput, SchedulerOutput, AttentionBackend, KVCacheSpec |
 | **v0.25.1** (2026-07-14) | ✅ 호환됨 | TorchCodec import, mixed-dtype allreduce RMSNorm 패치만 포함 |
 
-### v0.24.0 → v0.25.0 인터페이스 diff 요약
-
-| 인터페이스 | 파일 | Diff 결과 |
-|-----------|------|-----------|
-| `WorkerBase` | `worker_base.py` | **변경 없음** — 생성자, `__init__`, `init_device`, `execute_model()`, `sample_tokens()` 모두 동일 |
-| `ModelRunnerOutput` | `outputs.py` | **변경 없음** — 모든 dataclass 필드 동일 |
-| `SchedulerOutput` / `NewRequestData` / `CachedRequestData` | `core/sched/output.py` | **변경 없음** — 모든 dataclass 필드 동일 |
-| `KVCacheSpec` / `FullAttentionSpec` / `AttentionSpec` | `kv_cache_interface.py` | **하위 호환** — `KVQuantMode.INT4_PER_TOKEN_HEAD` (새 값), `RSWASpec` (새 dataclass). 기존 `FullAttentionSpec` 필드 불변 |
-| `AttentionBackend` | `attention/backend.py` | **하위 호환** — `rswa_prefix_lens` 필드, `lse_base_on_e` 속성, `token_to_req_indices()` 메서드 추가. 새 추상 메서드 없음 |
-
-**결론**: v0.25.0으로 업그레이드해도 plugin 코드 수정 불필요. 현재 AGENTS.md의 v0.24.0 타겟 유지 또는 v0.25.0으로 업데이트 모두 가능.
+v0.25.0으로 업그레이드해도 plugin 코드 수정 불필요. 현재 AGENTS.md의 v0.24.0 타겟 유지 또는 v0.25.0으로 업데이트 모두 가능.
