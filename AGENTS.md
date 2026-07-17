@@ -83,6 +83,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5). `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
+- **SSM 물리 슬롯 ≠ 스케줄러 블록** — stateful/hybrid 모델에서 `ssm_cache` 텐서는 `StatefulInputBuilder`가 사용하지 않음. OpenVINO infer request가 SSM state를 내부 관리하므로 물리 슬롯은 `max_num_seqs+1`로 제한, 스케줄러 가상 블록과 분리됨. 기본 4GB kv_space를 그대로 쓰면 SSM 텐서가 4GB 할당되어 OOM 유발. preemption 등 외부 SSM 저장 구현 시 이 분리 해제 필요
 - **모델 포맷 필수** — OpenVINO IR 포맷 사전 변환 필요. HuggingFace 원본 모델 직접 로딩 불가. 파일명 규칙:
   - 텍스트 모델: `openvino_model.xml`
   - 멀티모달 언어 모델: `openvino_language_model.xml`
