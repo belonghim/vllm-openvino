@@ -404,6 +404,18 @@ class OpenVINOCausalLM(nn.Module):
             return
         warmup_failed = False
         try:
+            dummy_ids = np.zeros((1, 1), dtype=np.int64)
+            if hasattr(self, 'text_emb_request') and self.text_emb_request is not None:
+                self.text_emb_request.infer([dummy_ids])
+
+            # per_layer_emb num_layers dim is fixed (e.g. 35/42) but appears dynamic
+            # in main model's per_layer_inputs [-1,-1,-1,256]; must use actual output.
+            per_layer_out = None
+            if hasattr(self, 'per_layer_emb_request') and self.per_layer_emb_request is not None:
+                self.per_layer_emb_request.infer([dummy_ids])
+                ple = self.per_layer_emb_request.get_output_tensor(0)
+                per_layer_out = ple.data.reshape(1, 1, ple.shape[2], ple.shape[3])
+
             compiled = self.ov_request.get_compiled_model()
             inputs = {}
             for inp in compiled.inputs:
@@ -427,7 +439,7 @@ class OpenVINOCausalLM(nn.Module):
                 elif name == "beam_idx":
                     inputs[name] = np.zeros(shape, dtype=dtype)
                 elif name == "per_layer_inputs":
-                    inputs[name] = np.zeros(shape, dtype=dtype)
+                    inputs[name] = per_layer_out if per_layer_out is not None else np.zeros(shape, dtype=dtype)
             self.ov_request.infer(inputs)
             self.recreate_infer_request()
             logger.info("[OV-WARMUP] Stateful model warmup completed")
