@@ -167,8 +167,8 @@ class OpenVINOCacheEngine:
                 tensor = remote_context.create_tensor(ov_type, shape, {})
                 try:
                     tensor.data.fill(0)
-                except (AttributeError, RuntimeError):
-                    pass
+                except (AttributeError, RuntimeError) as e:
+                    logger.warning("[OV-CACHE] GPU state tensor zero-init failed: %s", e)
             cache.append(tensor)
         return cache
 

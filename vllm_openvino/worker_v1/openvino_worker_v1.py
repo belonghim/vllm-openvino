@@ -307,7 +307,8 @@ class OpenVINOWorkerV1(WorkerBase):
         self.cache_config.cache_dtype = detected_dtype
 
         num_ssm_blocks = None
-        if self._is_model_stateful() and self.ssm_cache_config:
+        is_stateful = self._is_model_stateful()
+        if is_stateful and self.ssm_cache_config:
             num_ssm_blocks = self.scheduler_config.max_num_seqs + 1
             logger.info(
                 "[OV-WORKER] Stateful model: SSM physical slots=%d "
@@ -315,10 +316,13 @@ class OpenVINOWorkerV1(WorkerBase):
                 num_ssm_blocks, self.cache_config.num_gpu_blocks,
             )
 
+        kv_key_config = [] if is_stateful else self.key_cache_config
+        kv_value_config = [] if is_stateful else self.value_cache_config
+
         self.cache_engine = OpenVINOCacheEngine(
             self.cache_config,
-            self.key_cache_config,
-            self.value_cache_config,
+            kv_key_config,
+            kv_value_config,
             self.model_config,
             self.parallel_config,
             self.device_config,
@@ -444,9 +448,18 @@ class OpenVINOWorkerV1(WorkerBase):
                 parallel_config,
                 device_config,
                 ov_core,
-                ov_device)
+                ov_device,
+                self.ssm_cache_config,
+                self.conv_cache_config,
+                self.ssm_cache_dtypes,
+                self.conv_cache_dtypes,
+            )
             prev_kv_caches = self.model_runner.kv_caches
+            prev_ssm_caches = getattr(self.model_runner, 'ssm_caches', None)
+            prev_conv_caches = getattr(self.model_runner, 'conv_caches', None)
             self.model_runner.kv_caches = profiling_cache_engine.kv_cache
+            self.model_runner.ssm_caches = profiling_cache_engine.ssm_cache
+            self.model_runner.conv_caches = profiling_cache_engine.conv_cache
 
             total_num_scheduled_tokens = 0
             num_scheduled_tokens = {}
@@ -496,6 +509,8 @@ class OpenVINOWorkerV1(WorkerBase):
             finally:
                 bind_kv_cache({}, self.compilation_config.static_forward_context, [])
                 self.model_runner.kv_caches = prev_kv_caches
+                self.model_runner.ssm_caches = prev_ssm_caches
+                self.model_runner.conv_caches = prev_conv_caches
                 del profiling_cache_engine
 
         logger.info(
