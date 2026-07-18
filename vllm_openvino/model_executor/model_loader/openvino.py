@@ -416,18 +416,43 @@ class OpenVINOCausalLM(nn.Module):
                 ple = self.per_layer_emb_request.get_output_tensor(0)
                 per_layer_out = ple.data.reshape(1, 1, ple.shape[2], ple.shape[3])
 
+            _ov_dtype = {
+                ov.Type.i64: np.int64, ov.Type.i32: np.int32,
+                ov.Type.f32: np.float32, ov.Type.f16: np.float16,
+            }
+            if hasattr(self, 'vision_emb_request') and self.vision_emb_request is not None:
+                vis_inputs = []
+                for inp in self.ov_vision_emb_compiled.inputs:
+                    shape = [1 if d.is_dynamic else d.get_length()
+                             for d in inp.get_partial_shape()]
+                    vis_inputs.append(
+                        np.zeros(shape, dtype=_ov_dtype.get(inp.get_element_type(), np.float32)))
+                self.vision_emb_request.infer(vis_inputs)
+                if hasattr(self, 'vision_merger_request') and self.vision_merger_request is not None:
+                    vis_out = self.vision_emb_request.get_output_tensor(0)
+                    vis_hidden = vis_out.data.reshape(-1, vis_out.shape[-1])
+                    n_patches = vis_hidden.shape[0]
+                    merger_inputs = {}
+                    for inp in self.ov_vision_merger_compiled.inputs:
+                        inp_name = inp.get_any_name()
+                        shape = [1 if d.is_dynamic else d.get_length()
+                                 for d in inp.get_partial_shape()]
+                        dtype = _ov_dtype.get(inp.get_element_type(), np.float32)
+                        if inp_name == "hidden_states":
+                            merger_inputs[inp_name] = vis_hidden
+                        elif inp_name == "attention_mask":
+                            merger_inputs[inp_name] = np.ones(shape, dtype=dtype)
+                        else:
+                            merger_inputs[inp_name] = np.zeros(shape, dtype=dtype)
+                    self.vision_merger_request.infer(merger_inputs)
+
             compiled = self.ov_request.get_compiled_model()
             inputs = {}
             for inp in compiled.inputs:
                 name = inp.get_any_name()
                 shape = [1 if d.is_dynamic else d.get_length()
                          for d in inp.get_partial_shape()]
-                dtype = {
-                    ov.Type.i64: np.int64,
-                    ov.Type.i32: np.int32,
-                    ov.Type.f32: np.float32,
-                    ov.Type.f16: np.float16,
-                }.get(inp.get_element_type(), np.float32)
+                dtype = _ov_dtype.get(inp.get_element_type(), np.float32)
                 if name in ("input_ids", "inputs_embeds"):
                     inputs[name] = np.zeros(shape, dtype=dtype)
                 elif name == "attention_mask":
