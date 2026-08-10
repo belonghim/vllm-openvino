@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 from pathlib import Path
-from typing import Set
 
 import openvino as ov
 import openvino.properties as ov_props
@@ -700,7 +699,7 @@ class OpenVINOWorkerV1(WorkerBase):
         return num_device_blocks * cache_block_size
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
-        """Allocate NPU KV cache with the specified kv_cache_config."""
+        """Allocate OpenVINO KV cache with the specified kv_cache_config."""
         self.initialize_cache(kv_cache_config.num_blocks, self.num_swap_blocks)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -717,7 +716,7 @@ class OpenVINOWorkerV1(WorkerBase):
     def get_supported_tasks(self) -> tuple[str, ...]:
         return ('generate',)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         raise NotImplementedError("LoRA is not supported.")
 
     def pin_lora(self, lora_id: int) -> bool:

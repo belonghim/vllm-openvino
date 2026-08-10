@@ -50,8 +50,8 @@ DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limite
 
 
 class OpenVinoPlatform(Platform):
-    # PlatformEnum.CPU is used because PlatformEnum.OPENVINO may not exist in
-    # vLLM 0.13.0. See upstream-compatibility vault note before changing.
+    # PlatformEnum.CPU is used because PlatformEnum.OPENVINO does not exist in
+    # vLLM upstream. See upstream-compatibility vault note before changing.
     _enum = PlatformEnum.CPU
     device_name: str = "openvino"
     device_type: str = "cpu"
@@ -115,7 +115,7 @@ class OpenVinoPlatform(Platform):
         if ov is None:
             raise ImportError(
                 "OpenVINO is required but not installed. "
-                "Install with: pip install openvino>=2026.1.0")
+                "Install with: pip install openvino>=2026.3.0")
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.world_size != 1:
