@@ -137,7 +137,11 @@ class OpenVINOModelRunnerV1:
         return ov.Tensor(base_tensor, ov.Coordinate([0]), ov.Coordinate([length]))
 
     def _create_input_batch(self, num_cache_groups: int) -> InputBatch:
-        block_sizes = [self.cache_config.block_size] * max(1, num_cache_groups)
+        block_size = self.cache_config.block_size
+        n_groups = max(1, num_cache_groups)
+        block_sizes = [block_size] * n_groups
+        max_blocks = max(1, (self.model_config.max_model_len + block_size - 1) // block_size)
+        max_num_blocks_per_req = [max_blocks] * n_groups
         return InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.model_config.max_model_len,
@@ -146,6 +150,7 @@ class OpenVINOModelRunnerV1:
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=block_sizes,
             kernel_block_sizes=block_sizes,
+            max_num_blocks_per_req=max_num_blocks_per_req,
             is_pooling_model=getattr(self.model_config, 'is_pooling_model', False),
         )
 

@@ -4,8 +4,8 @@
 
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO(https://github.com/openvinotoolkit/openvino)를 LLM 추론 백엔드로 추가합니다.
 
-- **vLLM 버전**: 0.24.0
-- **OpenVINO 버전**: >= 2026.2.1
+- **vLLM 버전**: 0.26.0
+- **OpenVINO 버전**: >= 2026.3.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 - **단일 개발자 프로젝트** (belonghim)
 
@@ -110,8 +110,9 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 
 | 버전 | 플러그인 호환성 | 비고 |
 |------|---------------|------|
-| **v0.24.0** (2026-06-29) | ✅ 현재 타겟 | AGENTS.md 기준 |
-| **v0.25.0** (2026-07-11) | ✅ **호환됨** (소스 레벨) | 모든 plugin 인터페이스 동일: WorkerBase, ModelRunnerOutput, SchedulerOutput, AttentionBackend, KVCacheSpec |
+| **v0.24.0** (2026-06-29) | ✅ 호환됨 | 이전 타겟 |
+| **v0.25.0** (2026-07-11) | ✅ 호환됨 | 모든 plugin 인터페이스 동일: WorkerBase, ModelRunnerOutput, SchedulerOutput, AttentionBackend, KVCacheSpec |
 | **v0.25.1** (2026-07-14) | ✅ 호환됨 | TorchCodec import, mixed-dtype allreduce RMSNorm 패치만 포함 |
+| **v0.26.0** (2026-07-27) | ✅ **현재 타겟** | `InputBatch.max_num_blocks_per_req` 필수 파라미터화 (수정 완료). `AttentionBackend`에 `supports_sliding_window`, `supports_pcp` 클래스메서드 추가 (기본값 False, 플러그인 영향 없음) |
 
 v0.25.0으로 업그레이드해도 plugin 코드 수정 불필요. 현재 AGENTS.md의 v0.24.0 타겟 유지 또는 v0.25.0으로 업데이트 모두 가능.

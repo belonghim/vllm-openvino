@@ -115,7 +115,11 @@ def apply_selective_paged_attention_transformation(model: ov.Model, model_type: 
                 "The model will run with internal KV cache."
             )
             return
-        paged_attention_transformation(model)
+        paged_attention_transformation(
+            model,
+            allow_adaptive_rkv=True,
+            allow_cache_rotation=True,
+        )
         return
 
     if model_type == STATEFUL:
