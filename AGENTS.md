@@ -92,7 +92,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
 - **mm_item 키 차이** — Qwen3.5: `pixel_values` + `image_grid_thw`. Gemma-4: `pixel_values`만. `pixel_position_ids`는 제공되지 않음
 
-### 검증된 모델 및 서빙 경로 (2026-07-17 기준)
+### 검증된 모델 및 서빙 경로 (2026-08-11 기준)
 
 | 모델 | 서빙 경로 | 비전 | 비고 |
 |------|----------|------|------|
@@ -113,6 +113,4 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 | **v0.24.0** (2026-06-29) | ✅ 호환됨 | 이전 타겟 |
 | **v0.25.0** (2026-07-11) | ✅ 호환됨 | 모든 plugin 인터페이스 동일: WorkerBase, ModelRunnerOutput, SchedulerOutput, AttentionBackend, KVCacheSpec |
 | **v0.25.1** (2026-07-14) | ✅ 호환됨 | TorchCodec import, mixed-dtype allreduce RMSNorm 패치만 포함 |
-| **v0.26.0** (2026-07-27) | ✅ **현재 타겟** | `InputBatch.max_num_blocks_per_req` 필수 파라미터화 (수정 완료). `AttentionBackend`에 `supports_sliding_window`, `supports_pcp` 클래스메서드 추가 (기본값 False, 플러그인 영향 없음) |
-
-v0.25.0으로 업그레이드해도 plugin 코드 수정 불필요. 현재 AGENTS.md의 v0.24.0 타겟 유지 또는 v0.25.0으로 업데이트 모두 가능.
+| **v0.26.0** (2026-07-27) | ✅ **현재 타겟** | `InputBatch.max_num_blocks_per_req` 필수 파라미터화 (수정 완료). `get_kv_cache_shape`에 `cache_dtype_str` 파라미터 추가 (수정 완료). `AttentionImpl.__init__` 시그니처 일치 + 속성 저장 (수정 완료). `supports_sliding_window()` 명시적 False 오버라이드 (수정 완료). `MambaSpec.mamba_type` → `MambaAttentionBackendEnum.MAMBA2` (수정 완료) |
