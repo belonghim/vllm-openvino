@@ -62,12 +62,17 @@ class OpenVINOAttentionBackend(AttentionBackend):
     def supports_kv_connector(cls) -> bool:
         return False
 
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return False
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (2, num_blocks, num_kv_heads, block_size, head_size)
 
@@ -109,31 +114,31 @@ class OpenVINOAttentionMetadata:
     # Describes past KV cache size for each sequence within a batch
     # Shape: [batch_size_in_sequences]
     # Type: i32​
-    past_lens: torch.Tensor
+    past_lens: ov.Tensor
 
     # Describes start indices of input / speculative tokens from
     # current sequences within a batch sequence​
     # Shape: [batch_size_in_sequences + 1]​
     # Type: i32
-    subsequence_begins: torch.Tensor
+    subsequence_begins: ov.Tensor
 
     # Describes block tables for each sequence within a batch​ -
     # indices along 0th dimension in key_cache and value_cache inputs​
     # Shape: [num_blocks]
     # Type: i32​
-    block_indices: torch.Tensor
+    block_indices: ov.Tensor
 
     # Describes block tables for each sequence within a batch​ -
     # for i-th element, it is an index in block_indices with the
     # first block belonging to i-th sequence​
     # Shape: [batch_size_in_sequences + 1]
     # Type: i32​
-    block_indices_begins: torch.Tensor
+    block_indices_begins: ov.Tensor
 
     # Describes max context length
-    # Shape: scalar
+    # Shape: [1]
     # Type: i32
-    max_context_len: torch.Tensor
+    max_context_len: ov.Tensor
 
     # The index maps that relate multi-modal embeddings to the corresponding
     # placeholders.
@@ -194,17 +199,23 @@ class OpenVINOAttentionImpl(AttentionImpl[OpenVINOAttentionMetadata]):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        sliding_window: int | None = None,
+        kv_cache_dtype: str = "auto",
         logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
-        # Store parameters but no action needed for stub.
-        pass
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = scale
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        self.sliding_window = sliding_window
+        self.kv_cache_dtype = kv_cache_dtype
+        self.logits_soft_cap = logits_soft_cap
+        self.sinks = sinks
 
     def forward(
         self,

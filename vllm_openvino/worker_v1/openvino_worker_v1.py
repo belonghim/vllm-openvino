@@ -20,6 +20,7 @@ from vllm.sampling_params import SamplingParams
 
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec, MambaSpec
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase, CompilationTimes
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
@@ -657,7 +658,7 @@ class OpenVINOWorkerV1(WorkerBase):
                     block_size=mamba_block_size,
                     shapes=(conv_shape, ssm_shape),
                     dtypes=(conv_dtype, ssm_dtype),
-                    mamba_type="mamba2",
+                    mamba_type=MambaAttentionBackendEnum.MAMBA2,
                     mamba_cache_mode=mamba_cache_mode,
                     num_speculative_blocks=0,
                 )
