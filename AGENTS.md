@@ -48,8 +48,8 @@ python3 -m py_compile <file>
 
 # podman 소스 마운트 테스트
 podman run --replace -d --name vllm-server -p 8080:8080 \
-  -v /home/jooan/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
-  -v <hf_models_dir>:/models:Z \
+  -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
+  -v /home/user/hf:/models:Z \
   quay.io/joopark/vllm-openvino \
   --port=8080 --model <model_dir> --max-model-len 4096
 ```
@@ -81,6 +81,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 - **서빙 경로 2가지** — `detect_model_type()`으로 탐지 (기준: `ReadValue` op 유무):
   - **PagedAttention path**: `ReadValue` op 없는 모델(ATTENTION_ONLY) 중 `ScaledDotProductAttention` op도 있는 모델 (Llama 3, Qwen2.5 등). PA 변환 적용, 동시 요청 배칭 가능.
   - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5). `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
+- **Adaptive r-KV / Cache rotation** — `paged_attention_transformation(allow_adaptive_rkv=True, allow_cache_rotation=True)` 활성화 (OpenVINO 2026.3.0). adaptive r-KV는 decode-heavy 워크로드에서 KV 캐시 write bandwidth 감소. cache rotation은 슬라이딩 윈도우 지원 IR 변환이지만, `supports_sliding_window()=False`로 블록 테이블 rotation 미구현 — PA path에서 슬라이딩 윈도우 모델(Mistral 등) 추가 시 블록 테이블 rotation 구현 필요
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
 - **SSM 물리 슬롯 ≠ 스케줄러 블록** — stateful/hybrid 모델에서 `ssm_cache` 텐서는 `StatefulInputBuilder`가 사용하지 않음. OpenVINO infer request가 SSM state를 내부 관리하므로 물리 슬롯은 `max_num_seqs+1`로 제한(`_init_cache_engine()`의 `num_ssm_blocks`), 스케줄러 가상 블록과 분리됨. preemption 등 외부 SSM 저장 구현 시 이 분리 해제 필요
