@@ -105,6 +105,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self.conv_cache_config = []
         self.ssm_cache_dtypes = []
         self.conv_cache_dtypes = []
+        self._preloaded_model_type = ATTENTION_ONLY
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
         # hybrid-model state tensors even before load_model() is called.
