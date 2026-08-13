@@ -12,11 +12,9 @@ IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_BASE="/home/user/hf/OpenVINO"
 
 MODELS=(
-  "Phi-4-mini-instruct-int4-ov"
-  "Qwen2.5-Coder-3B-Instruct-int4-ov"
-  "Qwen3-4B-int4-ov"
-  "gemma-3-4b-it-int4-cw-ov"
-  "gemma-4-E4B-it-int4-ov"
+  "LFM2.5-8B-A1B-int4-ov"
+  "Qwen3.5-2B-int4-ov"
+  "gemma-4-E2B-it-int4-ov"
 )
 
 GUIDELLM_PROFILE="concurrent"
