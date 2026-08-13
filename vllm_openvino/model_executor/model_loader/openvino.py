@@ -848,11 +848,6 @@ class PAInputBuilder(OpenVINOInputBuilder):
         """Build list-based inputs for a PA-transformed model inference request."""
         model = self.model
         state_tensors = model._get_flat_kv_caches_template(kv_caches)
-        if model.model_type == HYBRID_MAMBA:
-            if ssm_caches:
-                state_tensors.extend(ssm_caches)
-            if conv_caches:
-                state_tensors.extend(conv_caches)
 
         attn_metadata = get_forward_context().attn_metadata
         if self._use_grouped is None:

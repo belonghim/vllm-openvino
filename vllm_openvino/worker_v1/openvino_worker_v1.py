@@ -143,11 +143,13 @@ class OpenVINOWorkerV1(WorkerBase):
             value_cache_config = []
             cache_dtype = None
 
+            has_unknown_readvalue = False
             for op in ov_model.get_ops():
                 if op.get_type_name() != "ReadValue":
                     continue
                 var_id = op.get_variable_id()
                 if not var_id:
+                    has_unknown_readvalue = True
                     continue
                 if "ssm" in var_id:
                     ssm_cache_config.append(op.output(0).get_partial_shape())
@@ -162,6 +164,8 @@ class OpenVINOWorkerV1(WorkerBase):
                         key_cache_config.append(op.output(0).get_partial_shape())
                     elif ".value" in var_id:
                         value_cache_config.append(op.output(0).get_partial_shape())
+                else:
+                    has_unknown_readvalue = True
 
             self.ssm_cache_config = ssm_cache_config
             self.conv_cache_config = conv_cache_config
@@ -174,7 +178,7 @@ class OpenVINOWorkerV1(WorkerBase):
 
             if ssm_cache_config or conv_cache_config:
                 self._preloaded_model_type = HYBRID_MAMBA
-            elif key_cache_config or value_cache_config:
+            elif key_cache_config or value_cache_config or has_unknown_readvalue:
                 self._preloaded_model_type = STATEFUL
             else:
                 self._preloaded_model_type = ATTENTION_ONLY
@@ -226,35 +230,30 @@ class OpenVINOWorkerV1(WorkerBase):
         num_cache_groups = 1
         self.model_runner.configure_cache_groups(num_cache_groups)
 
-        has_external_kv = False
-        new_key_cache_config = []
-        new_value_cache_config = []
-        for input_port in compiled_model.inputs:
-            input_name = input_port.get_any_name()
-
-            if input_name.startswith("key_cache."):
-                has_external_kv = True
-                self.cache_dtype = input_port.get_element_type().to_string()
-                new_key_cache_config.append(input_port.get_partial_shape())
-            if input_name.startswith("value_cache."):
-                new_value_cache_config.append(input_port.get_partial_shape())
-
+        has_external_kv = getattr(model, '_has_kv_cache_inputs', False)
         if has_external_kv:
+            new_key_cache_config = []
+            new_value_cache_config = []
+            for input_port in compiled_model.inputs:
+                input_name = input_port.get_any_name()
+                if input_name.startswith("key_cache."):
+                    self.cache_dtype = input_port.get_element_type().to_string()
+                    new_key_cache_config.append(input_port.get_partial_shape())
+                elif input_name.startswith("value_cache."):
+                    new_value_cache_config.append(input_port.get_partial_shape())
             self.key_cache_config = new_key_cache_config
             self.value_cache_config = new_value_cache_config
-
-        if not has_external_kv:
-            logger.info(
-                "[OV-WORKER] Stateful model, using preloaded KV shapes: "
-                "key=%d, value=%d",
-                len(self.key_cache_config), len(self.value_cache_config),
-            )
-        else:
             logger.info(
                 "[OV-WORKER] PA model, key_cache=%d, value_cache=%d, "
                 "ssm_cache=%d, conv_cache=%d",
                 len(self.key_cache_config), len(self.value_cache_config),
                 len(self.ssm_cache_config), len(self.conv_cache_config),
+            )
+        else:
+            logger.info(
+                "[OV-WORKER] Stateful model, using preloaded KV shapes: "
+                "key=%d, value=%d",
+                len(self.key_cache_config), len(self.value_cache_config),
             )
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -637,29 +636,20 @@ class OpenVINOWorkerV1(WorkerBase):
             def _dtype_to_torch(dtype_str: str) -> torch.dtype:
                 return str_to_torch_type.get(dtype_str, torch.float32)
 
+            def _get_state_shape_dtype(
+                cache_config: list,
+                cache_dtypes: list,
+                idx: int,
+            ) -> tuple[tuple[int, ...], torch.dtype]:
+                if idx < len(cache_config):
+                    dtype = _dtype_to_torch(cache_dtypes[idx]) if idx < len(cache_dtypes) else torch.float32
+                    return _to_per_block_shape(cache_config[idx]), dtype
+                return (1,), torch.float32
+
             num_mamba_layers = max(len(self.ssm_cache_config), len(self.conv_cache_config))
             for i in range(num_mamba_layers):
-                if i < len(self.conv_cache_config):
-                    conv_shape = _to_per_block_shape(self.conv_cache_config[i])
-                    conv_dtype = (
-                        _dtype_to_torch(self.conv_cache_dtypes[i])
-                        if i < len(self.conv_cache_dtypes)
-                        else torch.float32
-                    )
-                else:
-                    conv_shape = (1,)
-                    conv_dtype = torch.float32
-
-                if i < len(self.ssm_cache_config):
-                    ssm_shape = _to_per_block_shape(self.ssm_cache_config[i])
-                    ssm_dtype = (
-                        _dtype_to_torch(self.ssm_cache_dtypes[i])
-                        if i < len(self.ssm_cache_dtypes)
-                        else torch.float32
-                    )
-                else:
-                    ssm_shape = (1,)
-                    ssm_dtype = torch.float32
+                conv_shape, conv_dtype = _get_state_shape_dtype(self.conv_cache_config, self.conv_cache_dtypes, i)
+                ssm_shape, ssm_dtype = _get_state_shape_dtype(self.ssm_cache_config, self.ssm_cache_dtypes, i)
 
                 # MambaSpec.shapes expects tuple[tuple[int, ...], ...], e.g.
                 # (conv_state_shape, ssm_state_shape).
@@ -721,7 +711,11 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def _is_model_stateful(self) -> bool:
         model = getattr(self.model_runner, 'model', None)
-        return model is not None and not getattr(model, '_has_kv_cache_inputs', True)
+        if model is not None:
+            return not getattr(model, '_has_kv_cache_inputs', True)
+        # Fallback before load_model() completes (e.g. determine_available_memory called early)
+        preloaded = getattr(self, '_preloaded_model_type', None)
+        return preloaded in (STATEFUL, HYBRID_MAMBA)
 
     def get_supported_tasks(self) -> tuple[str, ...]:
         return ('generate',)
