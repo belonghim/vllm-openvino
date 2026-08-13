@@ -106,6 +106,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self.ssm_cache_dtypes = []
         self.conv_cache_dtypes = []
         self._preloaded_model_type = ATTENTION_ONLY
+        self._preloaded_ssm_state_shapes = None
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
         # hybrid-model state tensors even before load_model() is called.
@@ -211,8 +212,8 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def load_model(self):
         self.model_runner.load_model(
-            preloaded_model_type=getattr(self, '_preloaded_model_type', None),
-            preloaded_ssm_state_shapes=getattr(self, '_preloaded_ssm_state_shapes', None),
+            preloaded_model_type=self._preloaded_model_type,
+            preloaded_ssm_state_shapes=self._preloaded_ssm_state_shapes,
         )
 
         model = self.model_runner.get_model()
@@ -221,8 +222,7 @@ class OpenVINOWorkerV1(WorkerBase):
 
         compiled_model = model.ov_request.get_compiled_model()
 
-        ov_model_obj = self.model_runner.get_model()
-        ssm_shapes = getattr(ov_model_obj, "ssm_state_shapes", {})
+        ssm_shapes = getattr(model, "ssm_state_shapes", {})
         self.ssm_cache_config = [shape for shape, dtype in ssm_shapes.get("ssm", [])]
         self.conv_cache_config = [shape for shape, dtype in ssm_shapes.get("conv", [])]
         self.ssm_cache_dtypes = [dtype for shape, dtype in ssm_shapes.get("ssm", [])]
