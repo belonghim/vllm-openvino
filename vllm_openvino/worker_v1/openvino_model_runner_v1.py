@@ -163,12 +163,14 @@ class OpenVINOModelRunnerV1:
         self,
         preloaded_model_type: str | None = None,
         preloaded_ssm_state_shapes: dict | None = None,
+        preloaded_ov_model: "ov.Model | None" = None,
     ) -> None:
         self.model = get_model(
             vllm_config=self.vllm_config,
             ov_core=self.ov_core,
             preloaded_model_type=preloaded_model_type,
             preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
+            preloaded_ov_model=preloaded_ov_model,
         )
 
     def get_model(self) -> nn.Module:

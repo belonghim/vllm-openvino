@@ -107,6 +107,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self.conv_cache_dtypes = []
         self._preloaded_model_type = ATTENTION_ONLY
         self._preloaded_ssm_state_shapes = None
+        self._preloaded_ov_model = None
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
         # hybrid-model state tensors even before load_model() is called.
@@ -188,6 +189,7 @@ class OpenVINOWorkerV1(WorkerBase):
                 "ssm": list(zip(ssm_cache_config, ssm_cache_dtypes)),
                 "conv": list(zip(conv_cache_config, conv_cache_dtypes)),
             }
+            self._preloaded_ov_model = ov_model
 
             if self.ssm_cache_config or self.conv_cache_config:
                 logger.info(
@@ -214,7 +216,10 @@ class OpenVINOWorkerV1(WorkerBase):
         self.model_runner.load_model(
             preloaded_model_type=self._preloaded_model_type,
             preloaded_ssm_state_shapes=self._preloaded_ssm_state_shapes,
+            preloaded_ov_model=self._preloaded_ov_model,
         )
+        # Release reference; loader consumes it and applies in-place PA transformation.
+        self._preloaded_ov_model = None
 
         model = self.model_runner.get_model()
         if hasattr(model, 'warmup'):

@@ -236,6 +236,7 @@ class OpenVINOCausalLM(nn.Module):
         model_config: ModelConfig,
         preloaded_model_type: str | None = None,
         preloaded_ssm_state_shapes: dict | None = None,
+        preloaded_ov_model: ov.Model | None = None,
     ) -> None:
         super().__init__()
         self.model_config = model_config
@@ -267,7 +268,7 @@ class OpenVINOCausalLM(nn.Module):
         else:
             ir_filename = "openvino_model.xml"
 
-        ov_model = ov_core.read_model(str(model_dir / ir_filename))
+        ov_model = preloaded_ov_model if preloaded_ov_model is not None else ov_core.read_model(str(model_dir / ir_filename))
 
         if preloaded_model_type is not None and preloaded_ssm_state_shapes is not None:
             self.model_type = preloaded_model_type
@@ -1060,6 +1061,7 @@ def get_model(
     ov_core: ov.Core,
     preloaded_model_type: str | None = None,
     preloaded_ssm_state_shapes: dict | None = None,
+    preloaded_ov_model: ov.Model | None = None,
 ) -> torch.nn.Module:
     with set_current_vllm_config(vllm_config):
         return OpenVINOCausalLM(
@@ -1067,6 +1069,7 @@ def get_model(
             vllm_config.model_config,
             preloaded_model_type=preloaded_model_type,
             preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
+            preloaded_ov_model=preloaded_ov_model,
         )
 
  
