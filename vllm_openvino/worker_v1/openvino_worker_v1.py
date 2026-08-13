@@ -602,10 +602,11 @@ class OpenVINOWorkerV1(WorkerBase):
 
         # Hybrid models: include MambaSpec entries so vLLM accounts for
         # SSM/conv state memory when allocating cache blocks.
-        if self.ssm_cache_config and self.conv_cache_config:
-            if len(self.ssm_cache_config) != len(self.conv_cache_config):
+        if self.ssm_cache_config or self.conv_cache_config:
+            if (self.ssm_cache_config and self.conv_cache_config
+                    and len(self.ssm_cache_config) != len(self.conv_cache_config)):
                 logger.warning(
-                    "Mismatched SSM/conv cache shapes: ssm=%d conv=%d; using min count.",
+                    "Mismatched SSM/conv cache shapes: ssm=%d conv=%d; using max count.",
                     len(self.ssm_cache_config),
                     len(self.conv_cache_config),
                 )
@@ -636,21 +637,29 @@ class OpenVINOWorkerV1(WorkerBase):
             def _dtype_to_torch(dtype_str: str) -> torch.dtype:
                 return str_to_torch_type.get(dtype_str, torch.float32)
 
-            num_mamba_layers = min(len(self.ssm_cache_config), len(self.conv_cache_config))
+            num_mamba_layers = max(len(self.ssm_cache_config), len(self.conv_cache_config))
             for i in range(num_mamba_layers):
-                conv_shape = _to_per_block_shape(self.conv_cache_config[i])
-                ssm_shape = _to_per_block_shape(self.ssm_cache_config[i])
+                if i < len(self.conv_cache_config):
+                    conv_shape = _to_per_block_shape(self.conv_cache_config[i])
+                    conv_dtype = (
+                        _dtype_to_torch(self.conv_cache_dtypes[i])
+                        if i < len(self.conv_cache_dtypes)
+                        else torch.float32
+                    )
+                else:
+                    conv_shape = (1,)
+                    conv_dtype = torch.float32
 
-                conv_dtype = (
-                    _dtype_to_torch(self.conv_cache_dtypes[i])
-                    if i < len(self.conv_cache_dtypes)
-                    else torch.float32
-                )
-                ssm_dtype = (
-                    _dtype_to_torch(self.ssm_cache_dtypes[i])
-                    if i < len(self.ssm_cache_dtypes)
-                    else torch.float32
-                )
+                if i < len(self.ssm_cache_config):
+                    ssm_shape = _to_per_block_shape(self.ssm_cache_config[i])
+                    ssm_dtype = (
+                        _dtype_to_torch(self.ssm_cache_dtypes[i])
+                        if i < len(self.ssm_cache_dtypes)
+                        else torch.float32
+                    )
+                else:
+                    ssm_shape = (1,)
+                    ssm_dtype = torch.float32
 
                 # MambaSpec.shapes expects tuple[tuple[int, ...], ...], e.g.
                 # (conv_state_shape, ssm_state_shape).
