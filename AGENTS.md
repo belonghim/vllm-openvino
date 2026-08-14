@@ -4,6 +4,8 @@
 
 **vllm-openvino**는 [vLLM](https://github.com/vllm-project/vllm)의 **플러그인**으로, Intel OpenVINO(https://github.com/openvinotoolkit/openvino)를 LLM 추론 백엔드로 추가합니다.
 
+**구현 참조**: [OpenVINO GenAI](https://github.com/openvinotoolkit/openvino.genai)의 추론 로직(상태 관리, SDPA 백엔드, 하이브리드 모델 처리)을 참고하여, 동일 OpenVINO IR 모델을 vLLM OpenAI-compatible API로 서빙하는 것이 핵심 목표다.
+
 - **vLLM 버전**: 0.26.0
 - **OpenVINO 버전**: >= 2026.3.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
@@ -93,13 +95,14 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
 - **mm_item 키 차이** — Qwen3.5: `pixel_values` + `image_grid_thw`. Gemma-4: `pixel_values`만. `pixel_position_ids`는 제공되지 않음
 
-### 검증된 모델 및 서빙 경로 (2026-08-11 기준)
+### 검증된 모델 및 서빙 경로 (2026-08-14 기준)
 
 | 모델 | 서빙 경로 | 비전 | 비고 |
 |------|----------|------|------|
 | Qwen2.5-Coder-3B-Instruct-int4-ov | PA | ❌ | 기본 PA 경로 |
 | Qwen3.5-2B-int4-ov | Stateful/Hybrid | ✅ merger 필요 | ssm+conv ReadValue |
 | gemma-4-E2B-it-int4-ov | Stateful | ✅ | 단순 vision emb |
+| LFM2.5-8B-A1B-int4-ov | Stateful/Hybrid | ❌ | conv-only hybrid MoE (18 LIV conv + 6 GQA, 32 experts top-4). MoE scatter 패턴으로 decode 느림(~0.7 tok/s). 공식 추론은 OpenVINO GenAI `ATTENTION_BACKEND=SDPA` |
 
 ## Git 및 Commits 정책
 
