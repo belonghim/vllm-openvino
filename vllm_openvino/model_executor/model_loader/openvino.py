@@ -58,7 +58,21 @@ STATEFUL = "stateful"
 
 
 def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, list]]:
-    """Single-pass detection of model type and SSM/conv state shapes."""
+    """Single-pass detection of model type and SSM/conv state shapes.
+
+    Classification by ReadValue variable IDs (validated on known models):
+      - 'ssm' in var_id            → HYBRID_MAMBA (SSM recurrent state, e.g. Qwen3.5)
+      - 'conv' in var_id           → HYBRID_MAMBA (conv state, e.g. Qwen3.5)
+      - 'past_key_values' in var_id → STATEFUL (transformer KV via ReadValue, e.g. Gemma-4)
+      - empty var_id               → STATEFUL
+      - other non-empty var_id     → STATEFUL; shape logged for diagnostics
+      - no ReadValue at all        → ATTENTION_ONLY (PA path candidate)
+
+    Note: OpenVINO GenAI uses output shape rank (3D=SSM, 4D=KV) as an alternative
+    heuristic (PR #3359), but this is unreliable for our model format — Qwen3.5
+    SSM states export as 4D (not 3D), same rank as KV cache states. var_id name
+    matching is more robust.
+    """
     ssm_shapes = []
     conv_shapes = []
     has_non_ssm_readvalue = False
@@ -73,7 +87,17 @@ def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, lis
             ssm_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
         elif "conv" in var_id:
             conv_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
+        elif "past_key_values" in var_id:
+            # Known transformer KV-cache pattern (e.g. Gemma-4). Classify as stateful.
+            has_non_ssm_readvalue = True
         else:
+            pshape = op.output(0).get_partial_shape()
+            logger.debug(
+                "ReadValue '%s': unrecognized var_id pattern (shape=%s, rank=%d); "
+                "treating as stateful. If this is an SSM/conv state, ensure "
+                "'ssm' or 'conv' appears in the variable_id.",
+                var_id, pshape, len(pshape),
+            )
             has_non_ssm_readvalue = True
 
     if ssm_shapes or conv_shapes:

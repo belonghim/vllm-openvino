@@ -168,6 +168,13 @@ class OpenVINOWorkerV1(WorkerBase):
                     elif ".value" in var_id:
                         value_cache_config.append(op.output(0).get_partial_shape())
                 else:
+                    pshape = op.output(0).get_partial_shape()
+                    logger.debug(
+                        "ReadValue '%s': unrecognized var_id pattern (shape=%s, rank=%d); "
+                        "treating as stateful. If this is an SSM/conv state, ensure "
+                        "'ssm' or 'conv' appears in the variable_id.",
+                        var_id, pshape, len(pshape),
+                    )
                     has_unknown_readvalue = True
 
             self.ssm_cache_config = ssm_cache_config
