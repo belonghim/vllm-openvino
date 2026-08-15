@@ -403,6 +403,8 @@ class OpenVINOCausalLM(nn.Module):
                 self.ov_vision_merger_compiled = ov_core.compile_model(
                     vision_merger_model, ov_device, perf_hint)
                 self.vision_merger_request = self.ov_vision_merger_compiled.create_infer_request()
+                self._merger_rope_cache: dict[tuple, np.ndarray] = {}
+                self._merger_attn_mask: np.ndarray | None = None
 
         self.use_per_layer_embeddings_model = False
         self.ov_per_layer_emb_compiled = None
@@ -560,12 +562,16 @@ class OpenVINOCausalLM(nn.Module):
         spatial_merge_size = 2
         rope_dim_per_spatial = 16
         theta = 10000.0
-        inv_freq = (1.0 / (theta ** (np.arange(0, rope_dim_per_spatial, 2,
-                                               dtype=np.float32)
-                                     / rope_dim_per_spatial)))  # [8]
         grid_thw_np = self._as_numpy_no_copy(image_grid_thw)
         if grid_thw_np.ndim == 1:
             grid_thw_np = grid_thw_np[np.newaxis, :]
+        cache_key = grid_thw_np.tobytes()
+        cached = self._merger_rope_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        inv_freq = (1.0 / (theta ** (np.arange(0, rope_dim_per_spatial, 2,
+                                               dtype=np.float32)
+                                     / rope_dim_per_spatial)))  # [8]
         all_hpos: list[np.ndarray] = []
         all_wpos: list[np.ndarray] = []
         for thw in grid_thw_np:
@@ -588,7 +594,10 @@ class OpenVINOCausalLM(nn.Module):
         rope_table = np.concatenate([freqs, freqs], axis=-1)  # [max_pos, 16]
         h_rope = rope_table[hpos_ids]  # [num_patches, 16]
         w_rope = rope_table[wpos_ids]  # [num_patches, 16]
-        return np.concatenate([h_rope, w_rope], axis=-1)  # [num_patches, 32]
+        result = np.concatenate([h_rope, w_rope], axis=-1)  # [num_patches, 32]
+        if len(self._merger_rope_cache) < 8:
+            self._merger_rope_cache[cache_key] = result
+        return result
 
     def _prepare_embeddings(
         self,
@@ -623,8 +632,11 @@ class OpenVINOCausalLM(nn.Module):
 
             if self.ov_vision_merger_compiled is not None:
                 num_patches = vision_embeds_2d.shape[0]
-                attention_mask = np.ones(
-                    (1, num_patches, num_patches), dtype=np.float32)
+                if (self._merger_attn_mask is None
+                        or self._merger_attn_mask.shape[1] != num_patches):
+                    self._merger_attn_mask = np.ones(
+                        (1, num_patches, num_patches), dtype=np.float32)
+                attention_mask = self._merger_attn_mask
                 if image_grid_thw is not None:
                     rotary_pos_emb = self._compute_merger_rotary_pos_emb(
                         image_grid_thw, num_patches)
