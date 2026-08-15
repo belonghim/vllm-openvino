@@ -11,7 +11,6 @@ import openvino as ov
 import openvino.properties as props
 import openvino.properties.hint as hints
 import torch
-from statistics import StatisticsError, mode
 
 from openvino._offline_transformations import paged_attention_transformation
 from torch import nn
@@ -375,22 +374,9 @@ class OpenVINOCausalLM(nn.Module):
                 logger.info("[OV-STATE] State %d: name=%s, shape=%s, dtype=%s",
                             i, state.name, state.state.shape,
                             state.state.get_element_type())
-        self._batch_size = 1
-        if not self._has_kv_cache_inputs:
-            first_fixed_dims: list[int] = []
-            for inp in ov_compiled.inputs:
-                shape = inp.get_partial_shape()
-                if len(shape) > 0 and shape[0].is_static:
-                    first_fixed_dims.append(shape[0].get_length())
-            if first_fixed_dims:
-                try:
-                    self._batch_size = mode(first_fixed_dims)
-                except StatisticsError:
-                    self._batch_size = max(first_fixed_dims)
-
         logger.info(
-            "OpenVINO model loaded: type=%s, has_kv_cache=%s, batch_size=%d",
-            self.model_type, self._has_kv_cache_inputs, self._batch_size
+            "OpenVINO model loaded: type=%s, has_kv_cache=%s",
+            self.model_type, self._has_kv_cache_inputs,
         )
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
@@ -935,7 +921,6 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         self.model = model
         compiled_model = model.ov_request.get_compiled_model()
         self.input_shapes: dict[str, list] = {}
-        first_fixed_dims: list[int] = []
         for inp in compiled_model.inputs:
             name = inp.get_any_name()
             shape = []
@@ -945,18 +930,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 else:
                     shape.append(dim.get_length())
             self.input_shapes[name] = shape
-            if len(shape) > 0 and shape[0] is not None:
-                first_fixed_dims.append(shape[0])
-        if first_fixed_dims:
-            try:
-                self.batch_size = mode(first_fixed_dims)
-            except StatisticsError:
-                self.batch_size = max(first_fixed_dims)
-        else:
-            self.batch_size = 1
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("StatefulInputBuilder shape registry: %s, batch_size: %d",
-                         self.input_shapes, self.batch_size)
+            logger.debug("StatefulInputBuilder shape registry: %s",
+                         self.input_shapes)
 
         max_seq = model.model_config.max_model_len
         self._max_seq = max_seq
