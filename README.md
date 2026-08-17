@@ -80,6 +80,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true` or `false` | `auto` |
 | `VLLM_OPENVINO_INFERENCE_PRECISION` | CPU only. Force inference precision: `f32`, `f16`, `bf16` | `auto` |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true` or `false` | `auto` |
+| `VLLM_OPENVINO_HYBRID_PA` | Experimental. Attempt PagedAttention (concurrent batching) for hybrid Mamba/attention models instead of the default sequential stateful path. See [Serving Modes](#serving-modes). | `0` |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
 ## Performance Tuning
@@ -147,21 +148,25 @@ The script runs a warmed-up benchmark against the local OpenAI-compatible endpoi
 
 ## Serving Modes
 
-The plugin supports two serving paths depending on the model architecture:
+The plugin supports three serving paths depending on the model architecture:
 
 ### PagedAttention (default)
 
-Models with `ScaledDotProductAttention` ops (e.g., Llama 3, Qwen2.5) are transformed to use vLLM's PagedAttention mechanism. This enables:
+Models with `ScaledDotProductAttention` ops and no state (e.g., Llama 3, Qwen2.5) are transformed to use vLLM's PagedAttention mechanism. This enables:
 - Concurrent request batching
 - External KV cache management
 - Full vLLM scheduler features
 
-### Stateful Path
+### Stateful Path (default for hybrid/Mamba models)
 
-Models without SDPA ops (Gemma-4) or with hybrid Mamba/attention layers (Qwen3.5) run via OpenVINO's internal state management (`ReadValue`/`Assign`). Characteristics:
+Models without SDPA ops (Gemma-4) or with hybrid Mamba/attention layers (Qwen3.5, LFM2.5) run via OpenVINO's internal state management (`ReadValue`/`Assign`) by default. Characteristics:
 - Sequential request processing (`max_num_seqs=1`)
 - Internal KV cache managed by OpenVINO runtime
 - Automatic detection and configuration — no manual flags needed
+
+### Hybrid-PA (experimental, opt-in via `VLLM_OPENVINO_HYBRID_PA=1`)
+
+For hybrid Mamba/attention models, this converts attention layers to real PagedAttention and conv/SSM layers to a separate linear-attention paged-state mechanism, enabling concurrent request batching (`max_num_seqs > 1`) instead of the sequential stateful path. Verified on LFM2.5 (conv-only) and Qwen3.5 (conv + GatedDeltaNet SSM) with byte-exact output vs. the stateful path. Not currently supported for Gemma-4 (sliding-window attention layers hit a shape mismatch). Off by default — new and less battle-tested than the stateful path.
 
 ## Compatibility
 

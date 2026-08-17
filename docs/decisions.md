@@ -91,7 +91,7 @@ from openvino._offline_transformations import paged_attention_transformation
 
 ## 7. 비동기 추론 파이프라인 — 실현 불가 (스케줄러 구조 제약)
 
-**현재 상태**: `OpenVINOCausalLM.forward()`에서 `ov_request.start_async()` + 즉시 `wait()` 패턴 사용
+**현재 상태**: `OpenVINOCausalLM.forward()`는 `ov_request.infer()` 동기 호출 사용 (과거 `start_async()+wait()` 패턴에서 이미 교체됨, `docs/compatibility.md` 항목 13 참조)
 
 **왜 실현 불가한가**:
 - 비동기 파이프라인(배치 N 추론 중 배치 N+1 준비)은 vLLM 스케줄러가 **배치 N이 완료되어 샘플링된 토큰을 받아야** 다음 배치를 생성 가능

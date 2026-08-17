@@ -67,16 +67,17 @@ def _is_stateful_model(model_path: str) -> bool:
 
 
 def _is_hybrid_pa_candidate(model_path: str) -> bool:
-    """Conv-only hybrid model eligible for the experimental PA path: has
-    ReadValue state but no SSM variable_id, and has SDPA attention ops.
+    """Hybrid model eligible for the experimental PA path: has ReadValue
+    state and SDPA attention ops (conv-only and ssm+conv hybrids both
+    qualify — see apply_selective_paged_attention_transformation).
     """
     ir_path = _find_model_ir_path(model_path)
     if ir_path is None:
         return False
     try:
-        has_readvalue, has_sdpa, has_ssm = _scan_ir_for_patterns(
-            ir_path, [b'type="ReadValue"', b'ScaledDotProductAttention', b'variable_id="ssm'])
-        return has_readvalue and has_sdpa and not has_ssm
+        has_readvalue, has_sdpa = _scan_ir_for_patterns(
+            ir_path, [b'type="ReadValue"', b'ScaledDotProductAttention'])
+        return has_readvalue and has_sdpa
     except (IOError, OSError) as e:
         logger.warning("_is_hybrid_pa_candidate: could not read %s: %s", ir_path, e)
         return False

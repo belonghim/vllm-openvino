@@ -123,16 +123,16 @@ def _has_sdpa_ops(model: ov.Model) -> bool:
 
 
 def apply_selective_paged_attention_transformation(
-    model: ov.Model, model_type: str, ssm_shapes: list | None = None,
+    model: ov.Model, model_type: str,
 ) -> None:
     """Apply PA transformation selectively based on model type.
 
-    For HYBRID_MAMBA models: PA transformation is skipped due to PrevSequenceLengthPattern
-    crash on SSM Gather/Reshape nodes, EXCEPT for conv-only hybrids (no true SSM state,
-    e.g. LFM2.5) when VLLM_OPENVINO_HYBRID_PA is enabled — the SSM-specific crash does not
-    apply there and the transform emits a separate linear-attention paged-state mechanism
-    (la.*/conv_state_table.* inputs) for the conv layers alongside real PagedAttention for
-    the attention layers. Unvalidated for true-SSM hybrids (e.g. Qwen3.5); left unchanged.
+    For HYBRID_MAMBA models: PA transformation is skipped by default (unvalidated on
+    older OpenVINO versions). When VLLM_OPENVINO_HYBRID_PA is enabled, it's attempted —
+    verified on OpenVINO 2026.3.0 to succeed for both conv-only hybrids (LFM2.5) and
+    ssm+conv hybrids (Qwen3.5, GatedDeltaNet state). The transform emits a linear-attention
+    paged-state mechanism (la.*/conv_state_table.*, and la.*/gated_delta_state_table.* for
+    true SSM state) alongside real PagedAttention for the attention layers.
     For ATTENTION_ONLY models: apply PA transformation only if SDPA ops exist.
     For STATEFUL models: skip PA transformation; model manages KV cache via ReadValue/Assign.
     """
@@ -158,8 +158,7 @@ def apply_selective_paged_attention_transformation(
         )
         return
 
-    if (envs.VLLM_OPENVINO_HYBRID_PA and not ssm_shapes
-            and _has_sdpa_ops(model)):
+    if envs.VLLM_OPENVINO_HYBRID_PA and _has_sdpa_ops(model):
         # platform.py already relaxed max_num_seqs based on this same
         # eligibility check, so a silent fallback here would leave a
         # multi-request scheduler pointed at the (single-request-only)
@@ -170,9 +169,9 @@ def apply_selective_paged_attention_transformation(
             allow_cache_rotation=False,
         )
         logger.info(
-            "Conv-only hybrid model: applied PagedAttention transformation "
-            "(attention layers -> PagedAttention, conv layers -> linear "
-            "attention paged state)."
+            "Hybrid model: applied PagedAttention transformation "
+            "(attention layers -> PagedAttention, conv/SSM layers -> "
+            "linear attention paged state)."
         )
         return
 
@@ -325,8 +324,7 @@ class OpenVINOCausalLM(nn.Module):
             self.model_type = preloaded_model_type if preloaded_model_type is not None else detected_type
             self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
-        apply_selective_paged_attention_transformation(
-            ov_model, self.model_type, self.ssm_state_shapes.get("ssm"))
+        apply_selective_paged_attention_transformation(ov_model, self.model_type)
         if has_op_with_type(ov_model, "PagedAttentionExtension"):
             apply_gather_before_matmul_transformation(ov_model)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
@@ -391,24 +389,34 @@ class OpenVINOCausalLM(nn.Module):
             inp.get_any_name().startswith(("key_cache.", "value_cache."))
             for inp in ov_compiled.inputs
         )
-        # Conv-only hybrid PA models additionally expose a linear-attention
-        # paged-state mechanism (la.*/conv_state_table.*) for the conv layers.
+        # Hybrid PA models additionally expose a linear-attention paged-state
+        # mechanism for conv layers (conv_state_table.*) and/or true SSM
+        # state, e.g. GatedDeltaNet (gated_delta_state_table.*), sharing one
+        # set of la.* paging indices.
         self._has_linear_attention_inputs = any(
-            inp.get_any_name().startswith("conv_state_table.")
+            inp.get_any_name().startswith(("conv_state_table.", "gated_delta_state_table."))
             for inp in ov_compiled.inputs
         )
         self._position_input_name: str | None = None
+        self._position_input_channels = 1
         if self._has_kv_cache_inputs:
-            known_names = {"input_ids", "max_context_len", "past_lens",
-                           "subsequence_begins", "block_indices",
+            known_names = {"input_ids", "inputs_embeds", "max_context_len",
+                           "past_lens", "subsequence_begins", "block_indices",
                            "block_indices_begins", "sampled_tokens_indices"}
             known_prefixes = ("key_cache.", "value_cache.",
-                               "conv_state_table.", "la.")
+                               "conv_state_table.", "gated_delta_state_table.",
+                               "la.")
             for inp in ov_compiled.inputs:
                 name = inp.get_any_name()
                 if name in known_names or name.startswith(known_prefixes):
                     continue
                 self._position_input_name = name
+                pshape = inp.get_partial_shape()
+                # Multi-channel position_ids (e.g. M-RoPE [4, seq]): only the
+                # first channel carries real positions, matching the existing
+                # StatefulInputBuilder convention for these models.
+                if pshape.rank.get_length() == 2 and pshape[0].is_static:
+                    self._position_input_channels = pshape[0].get_length()
                 break
 
         if not self._has_kv_cache_inputs:
@@ -969,12 +977,13 @@ class PAInputBuilder(OpenVINOInputBuilder):
 
 
 class HybridPAInputBuilder(OpenVINOInputBuilder):
-    """Builds named-dict inputs for conv-only hybrid PA-transformed models.
+    """Builds named-dict inputs for hybrid PA-transformed models.
 
     Attention layers use real PagedAttention (key_cache.N/value_cache.N,
-    identical semantics to PAInputBuilder). Conv layers use a separate
-    linear-attention paged-state mechanism (la.*/conv_state_table.N), one
-    physical slot per running sequence, fed from ``attn_metadata``.
+    identical semantics to PAInputBuilder). Conv/SSM layers use a separate
+    linear-attention paged-state mechanism (la.*/conv_state_table.N and/or
+    la.*/gated_delta_state_table.N), one physical slot per running sequence
+    shared across both groups, fed from ``attn_metadata``.
     """
 
     def __init__(self, model: "OpenVINOCausalLM") -> None:
@@ -1000,8 +1009,15 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         # shared rank-1 [1] tensor attn_metadata carries for other PA models.
         max_context_len = ov.Tensor(attn_metadata.max_context_len.data.reshape(()))
 
+        if model.use_text_embeddings_model:
+            token_input = {"inputs_embeds": model._prepare_embeddings(
+                input_ids, pixel_values, image_position_ids, pixel_position_ids,
+                image_grid_thw)}
+        else:
+            token_input = {"input_ids": input_ids}
+
         inputs: dict[str, object] = {
-            "input_ids": input_ids,
+            **token_input,
             "past_lens": attn_metadata.past_lens,
             "subsequence_begins": attn_metadata.subsequence_begins,
             "block_indices": attn_metadata.block_indices,
@@ -1014,13 +1030,21 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
             "la.cache_interval": attn_metadata.la_cache_interval,
         }
         if model._position_input_name is not None:
-            inputs[model._position_input_name] = positions
+            if model._position_input_channels > 1:
+                pos_np = model._as_numpy_no_copy(positions).reshape(-1)
+                pos_multi = np.zeros((model._position_input_channels, pos_np.shape[0]), dtype=np.int64)
+                pos_multi[0, :] = pos_np
+                inputs[model._position_input_name] = pos_multi
+            else:
+                inputs[model._position_input_name] = positions
 
         for i, (key_cache, value_cache) in enumerate(kv_caches):
             inputs[f"key_cache.{i}"] = key_cache
             inputs[f"value_cache.{i}"] = value_cache
         for i, conv_cache in enumerate(conv_caches or []):
             inputs[f"conv_state_table.{i}"] = conv_cache
+        for i, ssm_cache in enumerate(ssm_caches or []):
+            inputs[f"gated_delta_state_table.{i}"] = ssm_cache
 
         return inputs
 

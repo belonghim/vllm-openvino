@@ -97,10 +97,10 @@ class OpenVINOModelRunnerV1:
         # Pre-allocated block-index tensors.
         self._init_block_index_tensors()
 
-        # Private conv-state slot pool for hybrid-PA models (conv-only PA
-        # transform). Not vLLM-scheduler-managed: bypasses MambaSpec's
-        # multi-group block striping, which is incompatible with these
-        # models' single shared conv_state_table.* input set.
+        # Private conv/SSM-state slot pool for hybrid-PA models. Not
+        # vLLM-scheduler-managed: bypasses MambaSpec's multi-group block
+        # striping, which is incompatible with these models' single shared
+        # set of state-table inputs.
         num_conv_slots = max_seqs + 1
         self._conv_slot_by_req: dict[str, int] = {}
         self._conv_slot_free: list[int] = list(range(num_conv_slots))
@@ -176,9 +176,9 @@ class OpenVINOModelRunnerV1:
             self._conv_slot_by_req[req_id] = slot
         if num_computed == 0:
             # Fresh prefill (first ever, or a preemption re-prefill reusing
-            # the same slot): the conv history for this slot is invalid.
-            for conv_cache in self.conv_caches:
-                conv_cache.data[slot] = 0
+            # the same slot): the conv/SSM history for this slot is invalid.
+            for cache in (*self.conv_caches, *self.ssm_caches):
+                cache.data[slot] = 0
         return slot
 
     def _create_input_batch(self, num_cache_groups: int) -> InputBatch:
@@ -362,7 +362,7 @@ class OpenVINOModelRunnerV1:
             self._past_lens_buf[n_reqs] = num_computed
             self._subseq_begins_buf[n_reqs + 1] = self._subseq_begins_buf[n_reqs] + query_len
 
-            if self.conv_caches:
+            if self.conv_caches or self.ssm_caches:
                 conv_slot = self._get_conv_slot(req_id, num_computed)
                 self._la_block_indices_buf[2 * n_reqs] = conv_slot
                 self._la_block_indices_buf[2 * n_reqs + 1] = conv_slot
@@ -466,7 +466,7 @@ class OpenVINOModelRunnerV1:
 
         la_block_indices = la_block_indices_begins = None
         la_past_lens = la_cache_interval = None
-        if self.conv_caches:
+        if self.conv_caches or self.ssm_caches:
             la_block_indices = self._slice_tensor(self._la_block_indices_tensor_base, 2 * n_reqs)
             la_block_indices_begins = self._slice_tensor(self._la_block_indices_begins_tensor_base, n_reqs + 1)
             la_past_lens = self._slice_tensor(self._la_past_lens_tensor_base, n_reqs)

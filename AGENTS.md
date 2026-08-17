@@ -80,9 +80,10 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 - **KV 캐시 `.fill(0)` 복원 금지** — `_allocate_kv_cache()`에 `.fill(0)` 없는 것이 정상(의도된 최적화). 추가하면 OOM 유발. SSM/conv 캐시(`_allocate_state_cache()`)에는 `.fill(0)` 유지됨
 - **Pin memory 미지원** / **LoRA 미지원** / **단일 소켓만 지원**
 - **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 import 시점에 raise하지 말 것. vLLM 플러그인 디스커버리 메커니즘 때문
-- **서빙 경로 2가지** — `detect_model_type()`으로 탐지 (기준: `ReadValue` op 유무):
+- **서빙 경로 3가지** — `detect_model_type()`으로 탐지 (기준: `ReadValue` op 유무):
   - **PagedAttention path**: `ReadValue` op 없는 모델(ATTENTION_ONLY) 중 `ScaledDotProductAttention` op도 있는 모델 (Llama 3, Qwen2.5 등). PA 변환 적용, 동시 요청 배칭 가능.
-  - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5). `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
+  - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5, LFM2.5). 기본값. `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
+  - **Hybrid-PA path (실험적, opt-in)** — `VLLM_OPENVINO_HYBRID_PA=1` 환경변수로만 활성화. hybrid Mamba/attention 모델에 `paged_attention_transformation()`을 시도: attention 레이어는 real PagedAttention(`key_cache.N`/`value_cache.N`), conv/SSM 레이어는 별도 linear-attention paged-state 메커니즘(`la.*` + `conv_state_table.N`/`gated_delta_state_table.N`, 시퀀스당 전용 slot pool로 관리, vLLM의 MambaSpec 그룹핑은 우회). `max_num_seqs>1` 허용, 동시 요청 배칭 가능. OpenVINO 2026.3.0에서 LFM2.5(conv-only)와 Qwen3.5(conv+GatedDeltaNet SSM) 둘 다 크래시 없이 동작 및 정확성 검증(baseline과 byte-exact 일치) 완료. Gemma-4는 PA 변환 자체는 성공하나 local/global sliding-window attention(레이어별 head_size 상이)에서 실제 추론 시 shape mismatch 발생 — 슬라이딩 윈도우 블록 테이블 rotation 미구현이 원인으로 추정, 미해결.
 - **Adaptive r-KV / Cache rotation** — `paged_attention_transformation(allow_adaptive_rkv=True, allow_cache_rotation=True)` 활성화 (OpenVINO 2026.3.0). adaptive r-KV는 decode-heavy 워크로드에서 KV 캐시 write bandwidth 감소. cache rotation은 슬라이딩 윈도우 지원 IR 변환이지만, `supports_sliding_window()=False`로 블록 테이블 rotation 미구현 — PA path에서 슬라이딩 윈도우 모델(Mistral 등) 추가 시 블록 테이블 rotation 구현 필요
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
@@ -95,14 +96,14 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
   - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
 - **mm_item 키 차이** — Qwen3.5: `pixel_values` + `image_grid_thw`. Gemma-4: `pixel_values`만. `pixel_position_ids`는 제공되지 않음
 
-### 검증된 모델 및 서빙 경로 (2026-08-14 기준)
+### 검증된 모델 및 서빙 경로 (2026-08-17 기준)
 
 | 모델 | 서빙 경로 | 비전 | 비고 |
 |------|----------|------|------|
 | Qwen2.5-Coder-3B-Instruct-int4-ov | PA | ❌ | 기본 PA 경로 |
-| Qwen3.5-2B-int4-ov | Stateful/Hybrid | ✅ merger 필요 | ssm+conv ReadValue |
-| gemma-4-E2B-it-int4-ov | Stateful | ✅ | 단순 vision emb |
-| LFM2.5-8B-A1B-int4-ov | Stateful/Hybrid | ❌ | conv-only hybrid MoE (18 LIV conv + 6 GQA, 32 experts top-4). MoE scatter 패턴으로 decode 느림(~0.7 tok/s). 공식 추론은 OpenVINO GenAI `ATTENTION_BACKEND=SDPA` |
+| Qwen3.5-0.8B/2B-int4-ov | Stateful/Hybrid (기본) 또는 Hybrid-PA (opt-in, 검증됨) | ✅ merger 필요 | ssm+conv ReadValue (SSM은 GatedDeltaNet). `VLLM_OPENVINO_HYBRID_PA=1` 시 PA 변환 성공, baseline과 byte-exact 일치, 동시 요청 배칭 정상 동작 |
+| gemma-4-E2B-it-int4-ov | Stateful (기본) | ✅ | 단순 vision emb. Hybrid-PA 미지원 — PA 변환 자체는 성공하나 local/global sliding-window 레이어 추론 시 shape mismatch, 미해결 |
+| LFM2.5-8B-A1B-int4-ov | Stateful (기본) 또는 Hybrid-PA (opt-in, 검증됨) | ❌ | conv-only hybrid MoE (18 LIV conv + 6 GQA, 32 experts top-4). `VLLM_OPENVINO_HYBRID_PA=1` 시 PA 변환 성공, baseline과 byte-exact 일치, 동시 요청 배칭 정상 동작. decode 속도는 하드웨어에 크게 의존(AVX-512+VNNI 데스크톱에서 단일 요청 ~13 tok/s 실측; 저사양/AVX2 환경에서는 훨씬 느릴 수 있음 — 실측 필요) |
 
 ## Git 및 Commits 정책
 
