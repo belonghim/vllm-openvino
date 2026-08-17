@@ -7,8 +7,8 @@
 ```bash
 # 서버 시작 (소스 마운트 + 모델 마운트)
 podman run --replace -d --name vllm-server -p 8080:8080 \
-  -v /home/user/project/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
-  -v /home/user/hf:/models:Z \
+  -v ~/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
+  -v ~/hf:/models:Z \
   quay.io/joopark/vllm-openvino \
   --port=8080 --model <model_dir> --max-model-len 4096
 
