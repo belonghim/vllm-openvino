@@ -109,7 +109,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 
 - **Co-authored-by 미사용**: AI agent는 commits를 할 때 `Co-authored-by` trailer를 추가하지 않습니다. 모든 commits은 belonghim 계정의 이름으로만 기록됩니다.
 - **사유**: GitHub contributor 목록의 명확성을 위해. 실제 코드 개발은 사용자(belonghim)이고, AI agent는 개발 보조 도구입니다.
-- 작업 완료시 git push 까지 진행한다
+- 시작시 git pull 하고, 작업 완료시 git push 까지 진행한다
 
 ## vLLM 버전 호환성
 
