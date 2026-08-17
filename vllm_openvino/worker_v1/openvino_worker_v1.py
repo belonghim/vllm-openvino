@@ -339,12 +339,11 @@ class OpenVINOWorkerV1(WorkerBase):
         num_ssm_blocks = None
         is_stateful = self._is_model_stateful()
         is_hybrid_pa = self._is_hybrid_pa_model()
-        if (is_stateful or is_hybrid_pa) and (self.ssm_cache_config or self.conv_cache_config):
+        if is_hybrid_pa and (self.ssm_cache_config or self.conv_cache_config):
             num_ssm_blocks = self.scheduler_config.max_num_seqs + 1
             logger.info(
-                "[OV-WORKER] %s model: conv/SSM physical slots=%d "
+                "[OV-WORKER] Hybrid-PA model: conv/SSM physical slots=%d "
                 "(scheduler blocks=%d)",
-                "Stateful" if is_stateful else "Hybrid-PA",
                 num_ssm_blocks, self.cache_config.num_gpu_blocks,
             )
 
@@ -360,16 +359,18 @@ class OpenVINOWorkerV1(WorkerBase):
             self.device_config,
             self.ov_core,
             ov_device,
-            self.ssm_cache_config,
-            self.conv_cache_config,
+            [] if is_stateful else self.ssm_cache_config,
+            [] if is_stateful else self.conv_cache_config,
             self.ssm_cache_dtypes,
             self.conv_cache_dtypes,
             num_ssm_blocks,
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache
-        self.model_runner.ssm_caches = self.cache_engine.ssm_cache
-        self.model_runner.conv_caches = self.cache_engine.conv_cache
+        # Stateful models manage SSM/conv state via OV ReadValue/Assign internally;
+        # external state tensors are only used by the Hybrid-PA path.
+        self.model_runner.ssm_caches = [] if is_stateful else self.cache_engine.ssm_cache
+        self.model_runner.conv_caches = [] if is_stateful else self.cache_engine.conv_cache
         bind_kv_cache({}, self.compilation_config.static_forward_context, [])
         self.model_runner.block_size = self.cache_engine.block_size
 
@@ -432,6 +433,8 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block."""
+        if self._is_model_stateful():
+            return 1
         # Hybrid-PA models reserve conv/SSM state as a separate fixed-size
         # pool (see _conv_reservation_bytes); excluded here to avoid
         # double-counting it as if it scaled per attention KV block.

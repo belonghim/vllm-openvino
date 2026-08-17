@@ -87,7 +87,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 - **Adaptive r-KV / Cache rotation** — `paged_attention_transformation(allow_adaptive_rkv=True, allow_cache_rotation=True)` 활성화 (OpenVINO 2026.3.0). adaptive r-KV는 decode-heavy 워크로드에서 KV 캐시 write bandwidth 감소. cache rotation은 슬라이딩 윈도우 지원 IR 변환이지만, `supports_sliding_window()=False`로 블록 테이블 rotation 미구현 — PA path에서 슬라이딩 윈도우 모델(Mistral 등) 추가 시 블록 테이블 rotation 구현 필요
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
 - **Multi-request batching for stateful models** — `forward()`의 `num_requests` 파라미터로 실제 요청 수만큼 슬라이싱
-- **SSM 물리 슬롯 ≠ 스케줄러 블록** — stateful/hybrid 모델에서 `ssm_cache` 텐서는 `StatefulInputBuilder`가 사용하지 않음. OpenVINO infer request가 SSM state를 내부 관리하므로 물리 슬롯은 `max_num_seqs+1`로 제한(`_init_cache_engine()`의 `num_ssm_blocks`), 스케줄러 가상 블록과 분리됨. preemption 등 외부 SSM 저장 구현 시 이 분리 해제 필요
+- **SSM 물리 슬롯 ≠ 스케줄러 블록** — **Stateful path**: ssm_cache/conv_cache를 아예 할당하지 않음 (빈 리스트를 `OpenVINOCacheEngine`에 전달). OpenVINO infer request가 SSM state를 내부 관리하므로 외부 텐서 불필요. `get_cache_block_size_bytes()`는 stateful 모델에 대해 1을 반환(attention KV 블록 없음). **Hybrid-PA path**: 물리 슬롯 `max_num_seqs+1`로 할당(`num_ssm_blocks`), 스케줄러 가상 블록과 분리. preemption 등 외부 SSM 저장 구현 시 이 분리 해제 필요
 - **모델 포맷 필수** — OpenVINO IR 포맷 사전 변환 필요. HuggingFace 원본 모델 직접 로딩 불가. 파일명 규칙:
   - 텍스트 모델: `openvino_model.xml`
   - 멀티모달 언어 모델: `openvino_language_model.xml`
