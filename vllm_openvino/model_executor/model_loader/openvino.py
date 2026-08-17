@@ -122,11 +122,17 @@ def _has_sdpa_ops(model: ov.Model) -> bool:
     return False
 
 
-def apply_selective_paged_attention_transformation(model: ov.Model, model_type: str) -> None:
+def apply_selective_paged_attention_transformation(
+    model: ov.Model, model_type: str, ssm_shapes: list | None = None,
+) -> None:
     """Apply PA transformation selectively based on model type.
 
     For HYBRID_MAMBA models: PA transformation is skipped due to PrevSequenceLengthPattern
-    crash on SSM Gather/Reshape nodes. The model runs with internal KV cache.
+    crash on SSM Gather/Reshape nodes, EXCEPT for conv-only hybrids (no true SSM state,
+    e.g. LFM2.5) when VLLM_OPENVINO_HYBRID_PA is enabled — the SSM-specific crash does not
+    apply there and the transform emits a separate linear-attention paged-state mechanism
+    (la.*/conv_state_table.* inputs) for the conv layers alongside real PagedAttention for
+    the attention layers. Unvalidated for true-SSM hybrids (e.g. Qwen3.5); left unchanged.
     For ATTENTION_ONLY models: apply PA transformation only if SDPA ops exist.
     For STATEFUL models: skip PA transformation; model manages KV cache via ReadValue/Assign.
     """
@@ -149,6 +155,24 @@ def apply_selective_paged_attention_transformation(model: ov.Model, model_type: 
         logger.info(
             "Stateful model detected (ReadValue/Assign ops). "
             "Skipping PagedAttention transformation."
+        )
+        return
+
+    if (envs.VLLM_OPENVINO_HYBRID_PA and not ssm_shapes
+            and _has_sdpa_ops(model)):
+        # platform.py already relaxed max_num_seqs based on this same
+        # eligibility check, so a silent fallback here would leave a
+        # multi-request scheduler pointed at the (single-request-only)
+        # stateful path. Fail loudly instead.
+        paged_attention_transformation(
+            model,
+            allow_adaptive_rkv=False,
+            allow_cache_rotation=False,
+        )
+        logger.info(
+            "Conv-only hybrid model: applied PagedAttention transformation "
+            "(attention layers -> PagedAttention, conv layers -> linear "
+            "attention paged state)."
         )
         return
 
@@ -301,7 +325,8 @@ class OpenVINOCausalLM(nn.Module):
             self.model_type = preloaded_model_type if preloaded_model_type is not None else detected_type
             self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
-        apply_selective_paged_attention_transformation(ov_model, self.model_type)
+        apply_selective_paged_attention_transformation(
+            ov_model, self.model_type, self.ssm_state_shapes.get("ssm"))
         if has_op_with_type(ov_model, "PagedAttentionExtension"):
             apply_gather_before_matmul_transformation(ov_model)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
@@ -366,6 +391,25 @@ class OpenVINOCausalLM(nn.Module):
             inp.get_any_name().startswith(("key_cache.", "value_cache."))
             for inp in ov_compiled.inputs
         )
+        # Conv-only hybrid PA models additionally expose a linear-attention
+        # paged-state mechanism (la.*/conv_state_table.*) for the conv layers.
+        self._has_linear_attention_inputs = any(
+            inp.get_any_name().startswith("conv_state_table.")
+            for inp in ov_compiled.inputs
+        )
+        self._position_input_name: str | None = None
+        if self._has_kv_cache_inputs:
+            known_names = {"input_ids", "max_context_len", "past_lens",
+                           "subsequence_begins", "block_indices",
+                           "block_indices_begins", "sampled_tokens_indices"}
+            known_prefixes = ("key_cache.", "value_cache.",
+                               "conv_state_table.", "la.")
+            for inp in ov_compiled.inputs:
+                name = inp.get_any_name()
+                if name in known_names or name.startswith(known_prefixes):
+                    continue
+                self._position_input_name = name
+                break
 
         if not self._has_kv_cache_inputs:
             states = self.ov_request.query_state()
@@ -694,7 +738,9 @@ class OpenVINOCausalLM(nn.Module):
         - Stateful models (no KV cache inputs) -> StatefulInputBuilder
         """
         if self._input_builder is None:
-            if self._has_kv_cache_inputs:
+            if self._has_linear_attention_inputs:
+                self._input_builder = HybridPAInputBuilder(self)
+            elif self._has_kv_cache_inputs:
                 self._input_builder = PAInputBuilder(self)
             else:
                 self._input_builder = StatefulInputBuilder(self)
@@ -919,6 +965,63 @@ class PAInputBuilder(OpenVINOInputBuilder):
 
         inputs.append(attn_metadata.max_context_len)
         inputs.append(attn_metadata.sampled_token_indices)
+        return inputs
+
+
+class HybridPAInputBuilder(OpenVINOInputBuilder):
+    """Builds named-dict inputs for conv-only hybrid PA-transformed models.
+
+    Attention layers use real PagedAttention (key_cache.N/value_cache.N,
+    identical semantics to PAInputBuilder). Conv layers use a separate
+    linear-attention paged-state mechanism (la.*/conv_state_table.N), one
+    physical slot per running sequence, fed from ``attn_metadata``.
+    """
+
+    def __init__(self, model: "OpenVINOCausalLM") -> None:
+        self.model = model
+
+    def build_inputs(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
+        ssm_caches: list[ov.Tensor] | None = None,
+        conv_caches: list[ov.Tensor] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_position_ids: torch.Tensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
+        image_grid_thw: torch.Tensor | None = None,
+        num_requests: int | None = None,
+    ) -> dict:
+        model = self.model
+        attn_metadata = get_forward_context().attn_metadata
+
+        # This model's max_context_len input is a rank-0 scalar, unlike the
+        # shared rank-1 [1] tensor attn_metadata carries for other PA models.
+        max_context_len = ov.Tensor(attn_metadata.max_context_len.data.reshape(()))
+
+        inputs: dict[str, object] = {
+            "input_ids": input_ids,
+            "past_lens": attn_metadata.past_lens,
+            "subsequence_begins": attn_metadata.subsequence_begins,
+            "block_indices": attn_metadata.block_indices,
+            "block_indices_begins": attn_metadata.block_indices_begins,
+            "max_context_len": max_context_len,
+            "sampled_tokens_indices": attn_metadata.sampled_token_indices,
+            "la.block_indices": attn_metadata.la_block_indices,
+            "la.block_indices_begins": attn_metadata.la_block_indices_begins,
+            "la.past_lens": attn_metadata.la_past_lens,
+            "la.cache_interval": attn_metadata.la_cache_interval,
+        }
+        if model._position_input_name is not None:
+            inputs[model._position_input_name] = positions
+
+        for i, (key_cache, value_cache) in enumerate(kv_caches):
+            inputs[f"key_cache.{i}"] = key_cache
+            inputs[f"value_cache.{i}"] = value_cache
+        for i, conv_cache in enumerate(conv_caches or []):
+            inputs[f"conv_state_table.{i}"] = conv_cache
+
         return inputs
 
 

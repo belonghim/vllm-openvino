@@ -97,6 +97,26 @@ class OpenVINOModelRunnerV1:
         # Pre-allocated block-index tensors.
         self._init_block_index_tensors()
 
+        # Private conv-state slot pool for hybrid-PA models (conv-only PA
+        # transform). Not vLLM-scheduler-managed: bypasses MambaSpec's
+        # multi-group block striping, which is incompatible with these
+        # models' single shared conv_state_table.* input set.
+        num_conv_slots = max_seqs + 1
+        self._conv_slot_by_req: dict[str, int] = {}
+        self._conv_slot_free: list[int] = list(range(num_conv_slots))
+        self._la_block_indices_buf = np.zeros(2 * max_seqs, dtype=np.int32)
+        self._la_block_indices_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
+        self._la_past_lens_buf = np.zeros(max_seqs, dtype=np.int32)
+        self._la_cache_interval_buf = np.zeros(max_seqs, dtype=np.int32)
+        self._la_block_indices_tensor_base = ov.Tensor(
+            self._la_block_indices_buf, ov.Shape([2 * max_seqs]), ov.Type.i32)
+        self._la_block_indices_begins_tensor_base = ov.Tensor(
+            self._la_block_indices_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
+        self._la_past_lens_tensor_base = ov.Tensor(
+            self._la_past_lens_buf, ov.Shape([max_seqs]), ov.Type.i32)
+        self._la_cache_interval_tensor_base = ov.Tensor(
+            self._la_cache_interval_buf, ov.Shape([max_seqs]), ov.Type.i32)
+
     def _init_block_index_tensors(self) -> None:
         max_seqs = self.scheduler_config.max_num_seqs
         block_size = self.cache_config.block_size
@@ -135,6 +155,31 @@ class OpenVINOModelRunnerV1:
     @staticmethod
     def _slice_tensor(base_tensor: ov.Tensor, length: int) -> ov.Tensor:
         return ov.Tensor(base_tensor, ov.Coordinate([0]), ov.Coordinate([length]))
+
+    def release_finished_conv_slots(self, scheduler_output: SchedulerOutput) -> None:
+        """Release conv slots for finished requests.
+
+        Called unconditionally (even on zero-scheduled-token steps) because
+        async scheduling can report a request as finished in a step that
+        schedules no new tokens for anyone, which would otherwise bypass
+        _update_states() and starve the small (max_num_seqs+1) slot pool.
+        """
+        for req_id in scheduler_output.finished_req_ids:
+            slot = self._conv_slot_by_req.pop(req_id, None)
+            if slot is not None:
+                self._conv_slot_free.append(slot)
+
+    def _get_conv_slot(self, req_id: str, num_computed: int) -> int:
+        slot = self._conv_slot_by_req.get(req_id)
+        if slot is None:
+            slot = self._conv_slot_free.pop()
+            self._conv_slot_by_req[req_id] = slot
+        if num_computed == 0:
+            # Fresh prefill (first ever, or a preemption re-prefill reusing
+            # the same slot): the conv history for this slot is invalid.
+            for conv_cache in self.conv_caches:
+                conv_cache.data[slot] = 0
+        return slot
 
     def _create_input_batch(self, num_cache_groups: int) -> InputBatch:
         block_size = self.cache_config.block_size
@@ -183,6 +228,9 @@ class OpenVINOModelRunnerV1:
             self.requests.pop(req_id, None)
             self.input_batch.remove_request(req_id)
             self._mm_req_ids.discard(req_id)
+            slot = self._conv_slot_by_req.pop(req_id, None)
+            if slot is not None:
+                self._conv_slot_free.append(slot)
 
         # Remove unscheduled requests from batch (but keep cached state)
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
@@ -313,6 +361,15 @@ class OpenVINOModelRunnerV1:
 
             self._past_lens_buf[n_reqs] = num_computed
             self._subseq_begins_buf[n_reqs + 1] = self._subseq_begins_buf[n_reqs] + query_len
+
+            if self.conv_caches:
+                conv_slot = self._get_conv_slot(req_id, num_computed)
+                self._la_block_indices_buf[2 * n_reqs] = conv_slot
+                self._la_block_indices_buf[2 * n_reqs + 1] = conv_slot
+                self._la_block_indices_begins_buf[n_reqs + 1] = 2 * (n_reqs + 1)
+                self._la_past_lens_buf[n_reqs] = num_computed
+                self._la_cache_interval_buf[n_reqs] = 0
+
             n_reqs += 1
 
         self._sampled_idx_buf[:n_reqs] = self._subseq_begins_buf[1:n_reqs + 1] - 1
@@ -407,6 +464,14 @@ class OpenVINOModelRunnerV1:
         self._max_context_len_buf[()] = max_seq_len
         max_context_len_tensor = ov.Tensor(self._max_context_len_buf, ov.Shape([1]), ov.Type.i32)
 
+        la_block_indices = la_block_indices_begins = None
+        la_past_lens = la_cache_interval = None
+        if self.conv_caches:
+            la_block_indices = self._slice_tensor(self._la_block_indices_tensor_base, 2 * n_reqs)
+            la_block_indices_begins = self._slice_tensor(self._la_block_indices_begins_tensor_base, n_reqs + 1)
+            la_past_lens = self._slice_tensor(self._la_past_lens_tensor_base, n_reqs)
+            la_cache_interval = self._slice_tensor(self._la_cache_interval_tensor_base, n_reqs)
+
         attn_metadata = OpenVINOAttentionMetadata(
             past_lens=past_lens_tensor,
             subsequence_begins=subsequence_begins_tensor,
@@ -417,7 +482,11 @@ class OpenVINOModelRunnerV1:
             max_context_len=max_context_len_tensor,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
-            sampled_token_indices=sampled_token_indices_tensor
+            sampled_token_indices=sampled_token_indices_tensor,
+            la_block_indices=la_block_indices,
+            la_block_indices_begins=la_block_indices_begins,
+            la_past_lens=la_past_lens,
+            la_cache_interval=la_cache_interval,
         )
 
         return (
@@ -517,9 +586,12 @@ class OpenVINOModelRunnerV1:
             if seq_len < req_state.num_prompt_tokens:
                 sampled_tokens[i] = []
 
+        # Snapshot (not a live reference): with async scheduling, a later
+        # step can mutate self.input_batch before the scheduler consumes
+        # this step's output, corrupting it if it aliased the live dicts.
         return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
+            req_ids=list(self.input_batch.req_ids),
+            req_id_to_index=dict(self.input_batch.req_id_to_index),
             sampled_token_ids=sampled_tokens,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},

@@ -162,6 +162,13 @@ class OpenVINOAttentionMetadata:
     # Optional per-group block_indices_begins (group 0 == attention).
     block_indices_begins_groups: list[ov.Tensor] | None = None
 
+    # Linear-attention (conv-only hybrid PA) paged-state inputs, one physical
+    # slot per running sequence. None for non-hybrid-PA models.
+    la_block_indices: ov.Tensor | None = None
+    la_block_indices_begins: ov.Tensor | None = None
+    la_past_lens: ov.Tensor | None = None
+    la_cache_interval: ov.Tensor | None = None
+
 
 class OpenVINOAttentionMetadataBuilder(
     AttentionMetadataBuilder[OpenVINOAttentionMetadata]

@@ -247,6 +247,8 @@ class OpenVINOWorkerV1(WorkerBase):
         if has_external_kv:
             new_key_cache_config = []
             new_value_cache_config = []
+            new_conv_cache_config = []
+            new_conv_cache_dtypes = []
             for input_port in compiled_model.inputs:
                 input_name = input_port.get_any_name()
                 if input_name.startswith("key_cache."):
@@ -254,8 +256,16 @@ class OpenVINOWorkerV1(WorkerBase):
                     new_key_cache_config.append(input_port.get_partial_shape())
                 elif input_name.startswith("value_cache."):
                     new_value_cache_config.append(input_port.get_partial_shape())
+                elif input_name.startswith("conv_state_table."):
+                    # PA transformation may change conv state precision (e.g.
+                    # f32 -> bf16); the preloaded (pre-transform) dtype is stale.
+                    new_conv_cache_config.append(input_port.get_partial_shape())
+                    new_conv_cache_dtypes.append(input_port.get_element_type().to_string())
             self.key_cache_config = new_key_cache_config
             self.value_cache_config = new_value_cache_config
+            if new_conv_cache_config:
+                self.conv_cache_config = new_conv_cache_config
+                self.conv_cache_dtypes = new_conv_cache_dtypes
             logger.info(
                 "[OV-WORKER] PA model, key_cache=%d, value_cache=%d, "
                 "ssm_cache=%d, conv_cache=%d",
@@ -320,11 +330,13 @@ class OpenVINOWorkerV1(WorkerBase):
 
         num_ssm_blocks = None
         is_stateful = self._is_model_stateful()
-        if is_stateful and self.ssm_cache_config:
+        is_hybrid_pa = self._is_hybrid_pa_model()
+        if (is_stateful or is_hybrid_pa) and (self.ssm_cache_config or self.conv_cache_config):
             num_ssm_blocks = self.scheduler_config.max_num_seqs + 1
             logger.info(
-                "[OV-WORKER] Stateful model: SSM physical slots=%d "
+                "[OV-WORKER] %s model: conv/SSM physical slots=%d "
                 "(scheduler blocks=%d)",
+                "Stateful" if is_stateful else "Hybrid-PA",
                 num_ssm_blocks, self.cache_config.num_gpu_blocks,
             )
 
@@ -363,6 +375,8 @@ class OpenVINOWorkerV1(WorkerBase):
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput | None:
         if scheduler_output.total_num_scheduled_tokens == 0:
+            if hasattr(self.model_runner, 'release_finished_conv_slots'):
+                self.model_runner.release_finished_conv_slots(scheduler_output)
             return ModelRunnerOutput(
                 req_ids=[],
                 req_id_to_index={},
@@ -410,12 +424,16 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block."""
+        # Hybrid-PA models reserve conv state as a separate fixed-size pool
+        # (see _conv_reservation_bytes); excluded here to avoid double-counting
+        # it as if it scaled per attention KV block.
+        conv_cache_config = [] if self._is_hybrid_pa_model() else self.conv_cache_config
         return OpenVINOCacheEngine.get_cache_block_size(
             self.cache_config.cache_dtype,
             self.key_cache_config,
             self.value_cache_config,
             self.ssm_cache_config,
-            self.conv_cache_config,
+            conv_cache_config,
             self.cache_config.block_size,
         )
 
@@ -612,6 +630,14 @@ class OpenVINOWorkerV1(WorkerBase):
                 head_size=max(key_cache_shape[3].get_length(), value_cache_shape[3].get_length()),
                 dtype=str_to_torch_type[cache_type])
 
+        # Hybrid-PA models (conv-only, PA-transformed) manage conv state via
+        # a private slot pool in the model runner, bypassing vLLM's MambaSpec
+        # grouping entirely (vLLM stripes >6 mamba layers across multiple
+        # block tables, but the model has one shared conv_state_table.* set
+        # of inputs — see model runner's conv slot allocator).
+        if self._is_hybrid_pa_model():
+            return kv_cache_spec
+
         # Hybrid models: include MambaSpec entries so vLLM accounts for
         # SSM/conv state memory when allocating cache blocks.
         if self.ssm_cache_config or self.conv_cache_config:
@@ -690,10 +716,16 @@ class OpenVINOWorkerV1(WorkerBase):
             "cache_block_size=%d bytes, kv_space=%d bytes",
             cache_dtype, cache_block_size, kv_space,
         )
-        num_device_blocks, num_swap_blocks = determine_num_available_blocks(current_platform,
-                                                                            self.cache_config,
-                                                                            cache_block_size,
-                                                                            self.profile_run)
+        conv_reservation = self._conv_reservation_bytes() if self._is_hybrid_pa_model() else 0
+        original_space_bytes = self.cache_config.openvino_kvcache_space_bytes
+        if conv_reservation:
+            self.cache_config.openvino_kvcache_space_bytes = max(
+                0, original_space_bytes - conv_reservation)
+        try:
+            num_device_blocks, num_swap_blocks = determine_num_available_blocks(
+                current_platform, self.cache_config, cache_block_size, self.profile_run)
+        finally:
+            self.cache_config.openvino_kvcache_space_bytes = original_space_bytes
         if self._is_model_stateful():
             blocks_per_seq = math.ceil(
                 self.model_config.max_model_len / self.cache_config.block_size)
@@ -729,6 +761,18 @@ class OpenVINOWorkerV1(WorkerBase):
         # Fallback before load_model() completes (e.g. determine_available_memory called early)
         preloaded = getattr(self, '_preloaded_model_type', None)
         return preloaded in (STATEFUL, HYBRID_MAMBA)
+
+    def _is_hybrid_pa_model(self) -> bool:
+        model = getattr(self.model_runner, 'model', None)
+        return getattr(model, '_has_linear_attention_inputs', False)
+
+    def _conv_reservation_bytes(self) -> int:
+        if not self.conv_cache_config:
+            return 0
+        num_conv_slots = self.scheduler_config.max_num_seqs + 1
+        per_slot_bytes = OpenVINOCacheEngine.get_cache_block_size(
+            self.cache_config.cache_dtype, [], [], [], self.conv_cache_config)
+        return per_slot_bytes * num_conv_slots
 
     def get_supported_tasks(self) -> tuple[str, ...]:
         return ('generate',)

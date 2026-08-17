@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
+    VLLM_OPENVINO_HYBRID_PA: bool = False
 
 KV_CACHE_PRECISION_MAP: dict[str, str] = {
     "u8": "u8", "i8": "i8",
@@ -78,6 +79,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OPENVINO_ENABLE_CPU_PINNING":
     lambda: (lambda v: None if v in ("", "auto") else v == "true")(
         os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower()),
+
+    # Experimental: attempt PagedAttention transformation for conv-only hybrid
+    # models (e.g. LFM2.5) instead of forcing the fully-stateful path. Enables
+    # concurrent request batching (max_num_seqs > 1) for such models. Default
+    # off — the transformation and downstream input construction are new and
+    # unvalidated for models with true SSM state (only tested on conv-only).
+    "VLLM_OPENVINO_HYBRID_PA":
+    lambda: os.getenv("VLLM_OPENVINO_HYBRID_PA", "0") == "1",
 }
 
 # end-env-vars-definition

@@ -21,24 +21,64 @@ except ImportError as e:
     logger.warning("Failed to import OpenVINO with %r", e)
 
 
-def _is_stateful_model(model_path: str) -> bool:
+def _find_model_ir_path(model_path: str) -> "Path | None":
     from pathlib import Path
     model_dir = Path(model_path)
     if not model_dir.is_dir():
-        return False
+        return None
     ir_path = model_dir / "openvino_language_model.xml"
     if not ir_path.exists():
         ir_path = model_dir / "openvino_model.xml"
     if not ir_path.exists():
+        return None
+    return ir_path
+
+
+def _scan_ir_for_patterns(ir_path, patterns: list[bytes]) -> list[bool]:
+    """Scan an IR XML file for byte patterns in one pass.
+
+    Keeps a small overlap between chunks so a pattern isn't missed when
+    split across a chunk boundary.
+    """
+    found = [False] * len(patterns)
+    max_pattern_len = max(len(p) for p in patterns)
+    overlap = max_pattern_len - 1
+    carry = b''
+    with open(ir_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            window = carry + chunk
+            for i, pattern in enumerate(patterns):
+                if not found[i] and pattern in window:
+                    found[i] = True
+            carry = window[-overlap:] if overlap > 0 else b''
+    return found
+
+
+def _is_stateful_model(model_path: str) -> bool:
+    ir_path = _find_model_ir_path(model_path)
+    if ir_path is None:
         return False
     try:
-        with open(ir_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''):
-                if b'type="ReadValue"' in chunk:
-                    return True
-        return False
+        (has_readvalue,) = _scan_ir_for_patterns(ir_path, [b'type="ReadValue"'])
+        return has_readvalue
     except (IOError, OSError) as e:
         logger.warning("_is_stateful_model: could not read %s: %s", ir_path, e)
+        return False
+
+
+def _is_hybrid_pa_candidate(model_path: str) -> bool:
+    """Conv-only hybrid model eligible for the experimental PA path: has
+    ReadValue state but no SSM variable_id, and has SDPA attention ops.
+    """
+    ir_path = _find_model_ir_path(model_path)
+    if ir_path is None:
+        return False
+    try:
+        has_readvalue, has_sdpa, has_ssm = _scan_ir_for_patterns(
+            ir_path, [b'type="ReadValue"', b'ScaledDotProductAttention', b'variable_id="ssm'])
+        return has_readvalue and has_sdpa and not has_ssm
+    except (IOError, OSError) as e:
+        logger.warning("_is_hybrid_pa_candidate: could not read %s: %s", ir_path, e)
         return False
 
 
@@ -136,11 +176,19 @@ class OpenVinoPlatform(Platform):
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         if scheduler_config and scheduler_config.max_num_seqs != 1:
             if _is_stateful_model(model_config.model):
-                logger.warning(
-                    "[OV-PLATFORM] Stateful OpenVINO model detected. "
-                    "Overriding max_num_seqs from %d to 1.",
-                    scheduler_config.max_num_seqs)
-                scheduler_config.max_num_seqs = 1
+                if (envs.VLLM_OPENVINO_HYBRID_PA
+                        and _is_hybrid_pa_candidate(model_config.model)):
+                    logger.info(
+                        "[OV-PLATFORM] Conv-only hybrid model with "
+                        "VLLM_OPENVINO_HYBRID_PA=1: attempting PagedAttention "
+                        "transformation, keeping max_num_seqs=%d.",
+                        scheduler_config.max_num_seqs)
+                else:
+                    logger.warning(
+                        "[OV-PLATFORM] Stateful OpenVINO model detected. "
+                        "Overriding max_num_seqs from %d to 1.",
+                        scheduler_config.max_num_seqs)
+                    scheduler_config.max_num_seqs = 1
 
         # check and update cache config
         cache_config = vllm_config.cache_config
