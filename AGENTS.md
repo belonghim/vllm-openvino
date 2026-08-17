@@ -69,7 +69,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 \
 | 비동기 추론 파이프라인 | 불가 | vLLM 스케줄러가 순차 동작. 플러그인 레벨 비동기는 구조적으로 불가 |
 | Structured outputs (문법 유도 디코딩) | 수요 없음 | outlines 통합 필요. 단순히 `sample_tokens()` 수정으로는 불가 |
 | `openvino._offline_transformations` 교체 | 불필요 | `paged_attention_transformation`은 대체 불가. 2026.0.0에서 여전히 정상 동작 확인됨 |
-| stateful path 기반 신규 기능 추가 | 금지 | OpenVINO Model Server(OVMS)에서 stateful model serving deprecated 예정. Runtime ReadValue/Assign ops 자체는 유지되나 장기 방향성 불확실. stateful path는 유지보수 모드로만 유지. 버그 수정은 허용 |
+| stateful path 기반 신규 기능 추가 | 제한 | OpenVINO Model Server(OVMS) 방향성과 무관하게 기존 ReadValue/Assign stateful path는 유지보수 모드로 유지. Hybrid-PA는 별도 외부 cache path이며, 검증된 hybrid 모델에 opt-in으로 추가 가능 |
 
 ## 기술적 특이사항 (코드 수정 시 참고)
 
