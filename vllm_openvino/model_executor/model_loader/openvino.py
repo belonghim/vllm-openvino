@@ -329,7 +329,6 @@ class OpenVINOCausalLM(nn.Module):
             apply_gather_before_matmul_transformation(ov_model)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
         ov_model.validate_nodes_and_infer_types()
-
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
         perf_mode = envs.VLLM_OPENVINO_PERFORMANCE_MODE
@@ -796,11 +795,7 @@ class OpenVINOCausalLM(nn.Module):
                                  i, getattr(v, 'shape', 'N/A'),
                                  getattr(v, 'dtype', 'N/A'))
         self.ov_request.infer(inputs)
-        logits_ov = getattr(self, '_logits_ov_tensor', None)
-        if logits_ov is None:
-            logits_ov = self.ov_request.get_tensor("logits")
-            self._logits_ov_tensor = logits_ov
-        logits = torch.from_numpy(logits_ov.data)
+        logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
         return self._extract_logits(logits, num_requests)
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -992,7 +987,9 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
 
     def __init__(self, model: "OpenVINOCausalLM") -> None:
         self.model = model
-        self._pos_multi_buf: "np.ndarray | None" = None
+        # Pre-allocated 0-dim buffer for max_context_len.
+        # Model (PA-transformed) expects scalar shape=[]; attn_metadata provides
+        # shape=(1), so we maintain our own 0-dim OV tensor and update in-place.
         _buf = np.zeros((), dtype=np.int32)
         self._max_ctx_buf = _buf
         self._max_ctx_ov = ov.Tensor(_buf)
@@ -1039,12 +1036,10 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         if model._position_input_name is not None:
             if model._position_input_channels > 1:
                 pos_np = model._as_numpy_no_copy(positions).reshape(-1)
-                seq_len = pos_np.shape[0]
-                if self._pos_multi_buf is None or self._pos_multi_buf.shape[1] < seq_len:
-                    self._pos_multi_buf = np.zeros(
-                        (model._position_input_channels, seq_len), dtype=np.int64)
-                self._pos_multi_buf[0, :seq_len] = pos_np
-                inputs[model._position_input_name] = self._pos_multi_buf[:, :seq_len]
+                pos_multi = np.zeros(
+                    (model._position_input_channels, pos_np.shape[0]), dtype=np.int64)
+                pos_multi[0, :] = pos_np
+                inputs[model._position_input_name] = pos_multi
             else:
                 inputs[model._position_input_name] = positions
 

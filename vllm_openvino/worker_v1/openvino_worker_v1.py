@@ -433,8 +433,6 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block."""
-        if self._is_model_stateful():
-            return 1
         # Hybrid-PA models reserve conv/SSM state as a separate fixed-size
         # pool (see _conv_reservation_bytes); excluded here to avoid
         # double-counting it as if it scaled per attention KV block.
