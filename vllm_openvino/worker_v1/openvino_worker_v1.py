@@ -3,6 +3,7 @@ import math
 import re
 from pathlib import Path
 
+import numpy as np
 import openvino as ov
 import openvino.properties as ov_props
 import torch
@@ -79,6 +80,11 @@ class OpenVINOWorkerV1(WorkerBase):
                          is_driver_worker=is_driver_worker)
         self.ov_core = ov.Core()
         self.ov_core.set_property({ov_props.enable_mmap: True})
+        cache_dir = envs.VLLM_OPENVINO_CACHE_DIR
+        if cache_dir:
+            self.ov_core.set_property({ov_props.cache_dir: cache_dir})
+            logger.info("[OV-WORKER] Compiled model cache enabled at %s",
+                       cache_dir)
         self.parallel_config.rank = rank
 
         if self.model_config.trust_remote_code:
@@ -416,13 +422,14 @@ class OpenVINOWorkerV1(WorkerBase):
             )
         new_block_ids_to_zero = getattr(scheduler_output, 'new_block_ids_to_zero', None)
         if new_block_ids_to_zero and self.kv_cache:
-            for key_cache, value_cache in self.kv_cache:
-                k = key_cache.data
-                v = value_cache.data
-                valid_ids = [bid for bid in new_block_ids_to_zero if bid < k.shape[0]]
-                if valid_ids:
-                    k[valid_ids] = 0
-                    v[valid_ids] = 0
+            num_blocks = self.kv_cache[0][0].shape[0]
+            valid_ids = np.array(
+                [bid for bid in new_block_ids_to_zero if bid < num_blocks],
+                dtype=np.int64)
+            if valid_ids.size:
+                for key_cache, value_cache in self.kv_cache:
+                    key_cache.data[valid_ids] = 0
+                    value_cache.data[valid_ids] = 0
         self._pending_output = self.model_runner.execute_model(scheduler_output)
         return None
 

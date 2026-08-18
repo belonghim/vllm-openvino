@@ -367,6 +367,19 @@ class OpenVINOCausalLM(nn.Module):
         apply_selective_paged_attention_transformation(ov_model, self.model_type)
         if has_op_with_type(ov_model, "PagedAttentionExtension"):
             apply_gather_before_matmul_transformation(ov_model)
+        else:
+            # Stateful models compute the LM head over the whole input
+            # sequence and only the last token is used (_extract_logits);
+            # slicing before the matmul avoids that wasted compute. Best
+            # effort: an unrecognized output pattern must not block model
+            # load, since the plugin already runs correctly without it.
+            try:
+                apply_gather_before_matmul_transformation(ov_model)
+            except (ValueError, RuntimeError) as e:
+                logger.warning(
+                    "[OV-LOADER] gather-before-matmul not applied to "
+                    "stateful model output, falling back to full-sequence "
+                    "logits: %s", e)
         # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
         ov_model.validate_nodes_and_infer_types()
         ov_device = envs.VLLM_OPENVINO_DEVICE
@@ -425,6 +438,12 @@ class OpenVINOCausalLM(nn.Module):
             enable_pinning = envs.VLLM_OPENVINO_ENABLE_CPU_PINNING
             if enable_pinning is not None:
                 cpu_hint[hints.enable_cpu_pinning()] = enable_pinning
+
+            core_type = envs.VLLM_OPENVINO_SCHEDULING_CORE_TYPE
+            core_type_enum = getattr(hints.SchedulingCoreType, core_type, None) \
+                if core_type else None
+            if core_type_enum is not None:
+                cpu_hint[hints.scheduling_core_type] = core_type_enum
 
             perf_hint = {**perf_hint, **cpu_hint}
 
@@ -582,6 +601,8 @@ class OpenVINOCausalLM(nn.Module):
                 elif name == "token_type_ids":
                     inputs[name] = np.zeros(shape, dtype=dtype)
                 elif name == "beam_idx":
+                    inputs[name] = np.zeros(shape, dtype=dtype)
+                elif name == "sampled_tokens_indices":
                     inputs[name] = np.zeros(shape, dtype=dtype)
                 elif name == "per_layer_inputs":
                     inputs[name] = per_layer_out if per_layer_out is not None else np.zeros(shape, dtype=dtype)
@@ -885,36 +906,27 @@ class OpenVINOCausalLM(nn.Module):
     def recreate_infer_request(self) -> None:
         if self._has_kv_cache_inputs:
             return
-        # Drop cached text embeddings so a recreated request never serves
-        # stale entries.
-        self._text_emb_cache.clear()
-        # OpenVINO 2026.1.0 enforces strict stride checks on state tensor
-        # resize; creating a fresh infer request is safer than in-place resize.
+        # Only the main LM request carries ReadValue/Assign state; the
+        # text/vision embedding and merger requests are stateless and have
+        # nothing to reset, so recreating them is unnecessary work.
+        # _text_emb_cache entries are exact-match keyed and detached copies
+        # (see _prepare_embeddings), so they stay valid across requests and
+        # don't need clearing here.
+        # reset_state() zeroes the ReadValue/Assign state without discarding
+        # the infer request, avoiding create_infer_request() overhead. Fall
+        # back to a fresh infer request if a given OpenVINO build/model
+        # rejects it (observed as strict stride checks on state resize on
+        # OpenVINO 2026.1.0).
         try:
-            if hasattr(self, 'ov_request') and self.ov_request is not None:
-                self.ov_request = None
-            if hasattr(self, 'text_emb_request') and self.text_emb_request is not None:
-                self.text_emb_request = None
-            if hasattr(self, 'vision_emb_request') and self.vision_emb_request is not None:
-                self.vision_emb_request = None
-            if hasattr(self, 'vision_merger_request') and self.vision_merger_request is not None:
-                self.vision_merger_request = None
-            if hasattr(self, 'per_layer_emb_request') and self.per_layer_emb_request is not None:
-                self.per_layer_emb_request = None
-
-            self.ov_request = self.ov_compiled.create_infer_request()
-            if self.ov_text_emb_compiled is not None:
-                self.text_emb_request = self.ov_text_emb_compiled.create_infer_request()
-            if self.ov_vision_emb_compiled is not None:
-                self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
-            if self.ov_vision_merger_compiled is not None:
-                self.vision_merger_request = self.ov_vision_merger_compiled.create_infer_request()
-            if self.ov_per_layer_emb_compiled is not None:
-                self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
-            logger.info("[OV-STATE] Recreated infer request")
+            self.ov_request.reset_state()
+            logger.info("[OV-STATE] Reset infer request state")
         except Exception as e:
-            logger.warning("[OV-STATE] recreate_infer_request failed: %s", e)
-            raise
+            logger.warning(
+                "[OV-STATE] reset_state() failed (%s), recreating infer "
+                "request instead", e)
+            self.ov_request = None
+            self.ov_request = self.ov_compiled.create_infer_request()
+            logger.info("[OV-STATE] Recreated infer request")
 
     @torch._dynamo.disable
     def sample(
@@ -1161,6 +1173,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         self._attention_mask_buf = np.ones((1, max_seq), dtype=np.int64)
         self._token_type_ids_buf = np.zeros((1, max_seq), dtype=np.int64)
         self._beam_idx_buf = np.zeros(1, dtype=np.int32)
+        self._sampled_idx_buf = np.zeros(1, dtype=np.int64)
         self._pos_3d_buf: np.ndarray | None = None
         self._pos_3d_channels: int = 0
         self._inputs_dict: dict = {}
@@ -1270,6 +1283,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         (batch_size, seq_len), dtype=np.int64)
             elif name == "beam_idx":
                 inputs_dict[name] = self._beam_idx_buf
+            elif name == "sampled_tokens_indices":
+                self._sampled_idx_buf[0] = seq_len - 1
+                inputs_dict[name] = self._sampled_idx_buf
             else:
                 logger.warning(
                     "StatefulInputBuilder: unhandled input %s "

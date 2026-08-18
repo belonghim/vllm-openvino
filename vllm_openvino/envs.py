@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
     VLLM_OPENVINO_HYBRID_PA: bool = True
+    VLLM_OPENVINO_CACHE_DIR: str | None = None
+    VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
 
 KV_CACHE_PRECISION_MAP: dict[str, str] = {
     "u8": "u8", "i8": "i8",
@@ -87,6 +89,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # unvalidated hybrid model hits a PA transformation issue).
     "VLLM_OPENVINO_HYBRID_PA":
     lambda: os.getenv("VLLM_OPENVINO_HYBRID_PA", "1") == "1",
+
+    # Directory for OpenVINO's compiled-model disk cache. When set, OpenVINO
+    # skips recompiling the model on process restart if a matching cached
+    # blob exists (keyed by model + OpenVINO version). Unset (default) keeps
+    # cold-compile-every-start behavior, since not every deployment has a
+    # writable, persistent path available.
+    "VLLM_OPENVINO_CACHE_DIR":
+    lambda: os.getenv("VLLM_OPENVINO_CACHE_DIR", None),
+
+    # CPU-only: scheduling core type on hybrid P-core/E-core CPUs
+    # (PCORE_ONLY, ECORE_ONLY, ANY_CORE). None keeps OpenVINO default.
+    "VLLM_OPENVINO_SCHEDULING_CORE_TYPE":
+    lambda: (lambda v: v.upper() if v else None)(
+        os.getenv("VLLM_OPENVINO_SCHEDULING_CORE_TYPE", None)),
 }
 
 # end-env-vars-definition
