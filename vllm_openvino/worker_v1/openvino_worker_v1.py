@@ -622,7 +622,12 @@ class OpenVINOWorkerV1(WorkerBase):
         key_cache_config = self.key_cache_config
         value_cache_config = self.value_cache_config
         block_size = self.cache_config.block_size
-        cache_type = _resolve_cache_dtype(self.cache_config.cache_dtype)
+        # Must resolve identically to determine_available_memory(): prefer the
+        # actual compiled model's key_cache.N dtype over the unresolved
+        # "dynamic" cache_config.cache_dtype, or block sizing here diverges
+        # from actual cache allocation and corrupts memory under concurrency.
+        cache_type = _resolve_cache_dtype(
+            getattr(self, 'cache_dtype', None) or self.cache_config.cache_dtype)
         assert cache_type in str_to_torch_type, f"Unexpected cache type {cache_type}"
         kv_cache_spec = {}
 
