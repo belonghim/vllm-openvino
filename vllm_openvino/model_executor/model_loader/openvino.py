@@ -146,8 +146,8 @@ def apply_selective_paged_attention_transformation(
             return
         paged_attention_transformation(
             model,
-            allow_adaptive_rkv=True,
-            allow_cache_rotation=True,
+            allow_adaptive_rkv=False,
+            allow_cache_rotation=False,
         )
         return
 
