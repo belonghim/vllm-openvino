@@ -3,6 +3,7 @@
 # ruff: noqa: SIM117
 import logging
 import os
+from collections import OrderedDict
 from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Any
@@ -310,6 +311,9 @@ class OpenVINOInputBuilder(ABC):
         ...
 
 
+_TEXT_EMB_CACHE_MAX_SIZE = 8
+
+
 class OpenVINOCausalLM(nn.Module):
 
     def __init__(
@@ -479,6 +483,7 @@ class OpenVINOCausalLM(nn.Module):
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
         self.ov_text_emb_compiled = None
+        self._text_emb_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
         if self.use_text_embeddings_model:
             text_emb_model = ov_core.read_model(
                 str(model_dir / "openvino_text_embeddings_model.xml"))
@@ -706,10 +711,19 @@ class OpenVINOCausalLM(nn.Module):
         image_grid_thw: torch.Tensor | None = None,
     ) -> np.ndarray:
         input_ids_np = self._as_numpy_no_copy(input_ids).reshape(1, -1)
-        self.text_emb_request.infer([input_ids_np])
-        inputs_embeds = self.text_emb_request.get_output_tensor(0)
-        inputs_embeds_2d = inputs_embeds.data.reshape(
-            -1, inputs_embeds.shape[-1])
+        cache_key = (input_ids_np.tobytes(), input_ids_np.shape,
+                     input_ids_np.dtype)
+        inputs_embeds_2d = self._text_emb_cache.get(cache_key)
+        if inputs_embeds_2d is None:
+            self.text_emb_request.infer([input_ids_np])
+            inputs_embeds = self.text_emb_request.get_output_tensor(0)
+            inputs_embeds_2d = inputs_embeds.data.reshape(
+                -1, inputs_embeds.shape[-1])
+            # OpenVINO reuses output buffers across infer calls, so cache a
+            # detached copy keyed by exact input bytes/shape/dtype.
+            self._text_emb_cache[cache_key] = inputs_embeds_2d.copy()
+            if len(self._text_emb_cache) > _TEXT_EMB_CACHE_MAX_SIZE:
+                self._text_emb_cache.popitem(last=False)
 
         if self.use_vision_embeddings_model and pixel_values is not None:
             pixel_values_np, image_pos_np = self._prepare_vision_inputs(
@@ -752,6 +766,9 @@ class OpenVINOCausalLM(nn.Module):
 
             # image_position_ids from mm_position tells text insertion points
             if image_position_ids is not None:
+                # Scatter mutates in place; copy so cached text embeddings
+                # are never modified.
+                inputs_embeds_2d = inputs_embeds_2d.copy()
                 text_pos_np = self._as_numpy_no_copy(image_position_ids)
                 if text_pos_np.ndim == 1:
                     text_pos_np = text_pos_np.reshape(1, 2)
@@ -868,6 +885,9 @@ class OpenVINOCausalLM(nn.Module):
     def recreate_infer_request(self) -> None:
         if self._has_kv_cache_inputs:
             return
+        # Drop cached text embeddings so a recreated request never serves
+        # stale entries.
+        self._text_emb_cache.clear()
         # OpenVINO 2026.1.0 enforces strict stride checks on state tensor
         # resize; creating a fresh infer request is safer than in-place resize.
         try:
