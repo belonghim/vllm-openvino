@@ -1,12 +1,12 @@
 # Podman Testing
 
 Use a source mount to test Python changes without rebuilding the image. Keep
-`--cpus=8` for comparable CPU measurements.
+`--cpus=8 --memory=16g` for comparable measurements.
 
 ## Start a Server
 
 ```bash
-podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
+podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
   -v ~/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v ~/hf:/models:Z \
   quay.io/joopark/vllm-openvino \

@@ -42,15 +42,15 @@
 - 코드를 수정하면 먼저 `python3 -m py_compile`을 실행한다.
 - 런타임 변경은 빌드 없이 podman 소스 마운트로 검증한다.
 - 단일·연속·동시 요청을 실제 API로 확인한다.
-- 성능 비교는 `--cpus=8`로 CPU 수를 고정한다.
+- 성능 비교는 `--cpus=8 --memory=16g`로 CPU 수와 메모리를 고정한다.
 - 상세 절차는 `docs/podman-testing.md`를 따른다.
 
 ```bash
 # 문법 오류 사전 차단 (반드시 먼저 실행)
 python3 -m py_compile <file>
 
-# podman 소스 마운트 테스트 (CPU 8개로 제한)
-podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
+# podman 소스 마운트 테스트 (CPU 8개, 메모리 16GiB로 제한)
+podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
   -v ~/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v ~/hf:/models:Z \
   quay.io/joopark/vllm-openvino \
