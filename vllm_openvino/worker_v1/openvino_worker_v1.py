@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
+import re
 from pathlib import Path
 
 import openvino as ov
@@ -142,8 +143,8 @@ class OpenVINOWorkerV1(WorkerBase):
             conv_cache_config = []
             ssm_cache_dtypes = []
             conv_cache_dtypes = []
-            key_cache_config = []
-            value_cache_config = []
+            key_cache_by_layer: dict[int, ov.PartialShape] = {}
+            value_cache_by_layer: dict[int, ov.PartialShape] = {}
             cache_dtype = None
 
             has_unknown_readvalue = False
@@ -163,10 +164,24 @@ class OpenVINOWorkerV1(WorkerBase):
                 elif "past_key_values" in var_id:
                     if cache_dtype is None:
                         cache_dtype = op.get_element_type().to_string()
+                    # Key by parsed layer index, not append order: ReadValue
+                    # op traversal doesn't visit key/value ops in matching
+                    # per-layer order (verified on Gemma-4 — layer 9's value
+                    # op precedes layer 0's key op), so zip(key_list,
+                    # value_list) would pair mismatched layers. Harmless when
+                    # all layers share one head_size; on Gemma-4's alternating
+                    # 256/512 sliding-window layers it inflated max(key,
+                    # value) head_size per spec, making vLLM's KV cache
+                    # admission check demand more memory than we allocate.
+                    layer_match = re.search(r"past_key_values\.(\d+)\.", var_id)
+                    if layer_match is None:
+                        has_unknown_readvalue = True
+                        continue
+                    layer_idx = int(layer_match.group(1))
                     if ".key" in var_id:
-                        key_cache_config.append(op.output(0).get_partial_shape())
+                        key_cache_by_layer[layer_idx] = op.output(0).get_partial_shape()
                     elif ".value" in var_id:
-                        value_cache_config.append(op.output(0).get_partial_shape())
+                        value_cache_by_layer[layer_idx] = op.output(0).get_partial_shape()
                 else:
                     pshape = op.output(0).get_partial_shape()
                     logger.debug(
@@ -176,6 +191,11 @@ class OpenVINOWorkerV1(WorkerBase):
                         var_id, pshape, len(pshape),
                     )
                     has_unknown_readvalue = True
+
+            common_layers = sorted(
+                set(key_cache_by_layer) & set(value_cache_by_layer))
+            key_cache_config = [key_cache_by_layer[i] for i in common_layers]
+            value_cache_config = [value_cache_by_layer[i] for i in common_layers]
 
             self.ssm_cache_config = ssm_cache_config
             self.conv_cache_config = conv_cache_config
