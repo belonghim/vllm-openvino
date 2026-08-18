@@ -2,11 +2,13 @@
 
 **빌드 없이 코드 수정을 즉시 반영**하는 방법. `vllm_openvino/` 디렉토리를 컨테이너에 마운트하면 파일 수정 후 컨테이너 재시작만으로 적용된다.
 
+**CPU 제한 (`--cpus=8`) 필수**: 컨테이너를 호스트의 전체 코어에 제한 없이 띄우면 테스트마다 가용 코어 수가 달라져 CPU 사용량 비교가 불가능하다 (2026-08-18, CPU 사용량 회귀 조사 중 도입). 모든 podman 테스트에 `--cpus=8`을 고정으로 사용해 재현 가능한 비교 기준을 만든다.
+
 ## 기본 명령어
 
 ```bash
-# 서버 시작 (소스 마운트 + 모델 마운트)
-podman run --replace -d --name vllm-server -p 8080:8080 \
+# 서버 시작 (소스 마운트 + 모델 마운트, CPU 8개로 제한)
+podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
   -v ~/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v ~/hf:/models:Z \
   quay.io/joopark/vllm-openvino \

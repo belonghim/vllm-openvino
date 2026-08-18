@@ -55,7 +55,7 @@ run_model_perf() {
   cleanup_container
 
   podman run --replace -d --name "$CONTAINER_NAME" \
-    -p 8080:8080 \
+    -p 8080:8080 --cpus=8 \
     -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino" \
     -v "$model_dir:/models:Z" \
     -e VLLM_OPENVINO_DEVICE=CPU \

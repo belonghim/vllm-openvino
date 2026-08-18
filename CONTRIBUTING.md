@@ -61,8 +61,8 @@ Test your changes in isolation using a Podman container with source code mounted
 # Build container (if using local image)
 podman build -f Containerfile -t vllm-openvino .
 
-# Run with source mount
-podman run --replace -d --name vllm-server -p 8080:8080 \
+# Run with source mount (CPU limited to 8 for reproducible comparisons)
+podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
   -v /path/to/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino \
   -v /path/to/models:/models:Z \
   vllm-openvino \

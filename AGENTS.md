@@ -42,14 +42,15 @@
 - 코드 수정 → `python3 -m py_compile` → podman 소스 마운트 → API 호출 테스트 → 정상 응답 확인 후에만 사용자에게 클러스터 배포를 요청한다.
 - podman 테스트 시 `--enable-auto-tool-choice --tool-call-parser=qwen3_coder` 등 실제 실행 인자를 그대로 사용한다.
 - 단일 요청, 연속 요청, 동시 요청 모두 통과해야 한다.
+- **`--cpus=8`로 CPU를 제한해서 테스트한다** (2026-08-18). 제한 없이 띄우면 테스트마다 가용 코어 수가 달라져 CPU 사용량 비교가 불가능하다.
 - 상세 가이드 및 반복 디버그 루프: `docs/podman-testing.md`
 
 ```bash
 # 문법 오류 사전 차단 (반드시 먼저 실행)
 python3 -m py_compile <file>
 
-# podman 소스 마운트 테스트
-podman run --replace -d --name vllm-server -p 8080:8080 \
+# podman 소스 마운트 테스트 (CPU 8개로 제한)
+podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
   -v ~/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v ~/hf:/models:Z \
   quay.io/joopark/vllm-openvino \
