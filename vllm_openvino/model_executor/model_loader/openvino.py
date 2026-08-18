@@ -1039,7 +1039,10 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         # shape=(1), so we maintain our own 0-dim OV tensor and update in-place.
         _buf = np.zeros((), dtype=np.int32)
         self._max_ctx_buf = _buf
-        self._max_ctx_ov = ov.Tensor(_buf)
+        # shared_memory=True is required: the 1-arg ov.Tensor(array) ctor
+        # defaults to copying, which would freeze this tensor at 0 and feed
+        # max_context_len=0 into PagedAttention on every step.
+        self._max_ctx_ov = ov.Tensor(_buf, shared_memory=True)
 
     def build_inputs(
         self,
