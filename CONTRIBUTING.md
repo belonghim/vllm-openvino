@@ -7,8 +7,8 @@ This is a single-developer open-source project. Contributions and feedback are w
 ### Prerequisites
 
 - Python >= 3.10
-- vLLM 0.19.1 (or target version)
-- OpenVINO >= 2026.1.0
+- vLLM 0.26.0
+- OpenVINO >= 2026.3.0
 - Linux x86-64 with AVX2+ support
 
 ### Installation from Source
@@ -159,14 +159,15 @@ Before proposing changes, review the design principles in `AGENTS.md`:
 3. **Minimalism** — No premature abstractions, no unused features
 4. **Problem-Focused** — Solve real user problems, not hypothetical ones
 
-See `docs/decisions.md` for rationales behind rejected features.
+See `docs/compatibility.md` for current runtime constraints and
+`docs/upgrade-checklist.md` when changing the vLLM version.
 
 ## Troubleshooting
 
 ### Import Errors
 
 If `import openvino` fails:
-- Verify OpenVINO >= 2026.1.0 is installed
+- Verify OpenVINO >= 2026.3.0 is installed
 - Try: `python3 -c "import openvino; print(openvino.__version__)"`
 
 ### Podman Build Failures
