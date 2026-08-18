@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -66,18 +67,29 @@ def _is_stateful_model(model_path: str) -> bool:
         return False
 
 
+_VARIABLE_ID_RE = re.compile(rb'variable_id="([^"]*)"')
+
+
 def _is_hybrid_pa_candidate(model_path: str) -> bool:
-    """Hybrid model eligible for the experimental PA path: has ReadValue
-    state and SDPA attention ops (conv-only and ssm+conv hybrids both
-    qualify — see apply_selective_paged_attention_transformation).
+    """Hybrid Mamba/attention model eligible for the Hybrid-PA path.
+
+    Deliberately narrower than "has ReadValue + SDPA": Gemma-4 also matches
+    that (KV cache via ReadValue) but has no ssm/conv state, and PA
+    transformation succeeds on it yet crashes at inference on its
+    sliding-window layers (docs/compatibility.md #23) — so we require
+    ssm/conv specifically inside variable_id, not a whole-file byte scan
+    (gemma-4's IR has 278 unrelated "conv" hits from `type="Convert"` ops).
     """
     ir_path = _find_model_ir_path(model_path)
     if ir_path is None:
         return False
     try:
-        has_readvalue, has_sdpa = _scan_ir_for_patterns(
-            ir_path, [b'type="ReadValue"', b'ScaledDotProductAttention'])
-        return has_readvalue and has_sdpa
+        with open(ir_path, 'rb') as f:
+            data = f.read()
+        if b'ScaledDotProductAttention' not in data:
+            return False
+        return any(b'ssm' in vid or b'conv' in vid
+                   for vid in _VARIABLE_ID_RE.findall(data))
     except (IOError, OSError) as e:
         logger.warning("_is_hybrid_pa_candidate: could not read %s: %s", ir_path, e)
         return False
@@ -180,9 +192,10 @@ class OpenVinoPlatform(Platform):
                 if (envs.VLLM_OPENVINO_HYBRID_PA
                         and _is_hybrid_pa_candidate(model_config.model)):
                     logger.info(
-                        "[OV-PLATFORM] Conv-only hybrid model with "
-                        "VLLM_OPENVINO_HYBRID_PA=1: attempting PagedAttention "
-                        "transformation, keeping max_num_seqs=%d.",
+                        "[OV-PLATFORM] Hybrid Mamba/attention model detected: "
+                        "attempting Hybrid-PA transformation, keeping "
+                        "max_num_seqs=%d. Set VLLM_OPENVINO_HYBRID_PA=0 to "
+                        "force the sequential stateful path instead.",
                         scheduler_config.max_num_seqs)
                 else:
                     logger.warning(
