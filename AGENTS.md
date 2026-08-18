@@ -70,7 +70,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
 | 비동기 추론 파이프라인 | 불가 | vLLM 스케줄러가 순차 동작. 플러그인 레벨 비동기는 구조적으로 불가 |
 | Structured outputs (문법 유도 디코딩) | 수요 없음 | outlines 통합 필요. 단순히 `sample_tokens()` 수정으로는 불가 |
 | `openvino._offline_transformations` 교체 | 불필요 | `paged_attention_transformation`은 대체 불가. 2026.0.0에서 여전히 정상 동작 확인됨 |
-| stateful path 기반 신규 기능 추가 | 제한 | OpenVINO Model Server(OVMS) 방향성과 무관하게 기존 ReadValue/Assign stateful path는 유지보수 모드로 유지. Hybrid-PA는 별도 외부 cache path이며, 검증된 hybrid 모델에 opt-in으로 추가 가능 |
+| stateful path 기반 신규 기능 추가 | 제한 | OpenVINO Model Server(OVMS) 방향성과 무관하게 기존 ReadValue/Assign stateful path는 유지보수 모드로 유지. Hybrid-PA는 별도 외부 cache path이며, 검증된 hybrid 모델(Qwen3.5, LFM2.5)에 기본값(2026-08-18부터). `VLLM_OPENVINO_HYBRID_PA=0`으로 개별 폴백 가능 |
 
 ## 기술적 특이사항 (코드 수정 시 참고)
 
@@ -84,7 +84,8 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
 - **서빙 경로 3가지** — `detect_model_type()`으로 탐지 (기준: `ReadValue` op 유무):
   - **PagedAttention path**: `ReadValue` op 없는 모델(ATTENTION_ONLY) 중 `ScaledDotProductAttention` op도 있는 모델 (Llama 3, Qwen2.5 등). PA 변환 적용, 동시 요청 배칭 가능.
   - **Stateful path**: `ReadValue` op 있는 모델 (Gemma-4) 또는 hybrid Mamba/attention (`ReadValue`에 ssm/conv var_id 포함, Qwen3.5, LFM2.5). 기본값. `max_num_seqs=1`, 순차 처리, OpenVINO 내부 KV 캐시.
-  - **Hybrid-PA path (실험적, opt-in)** — `VLLM_OPENVINO_HYBRID_PA=1` 환경변수로만 활성화. hybrid Mamba/attention 모델에 `paged_attention_transformation()`을 시도: attention 레이어는 real PagedAttention(`key_cache.N`/`value_cache.N`), conv/SSM 레이어는 별도 linear-attention paged-state 메커니즘(`la.*` + `conv_state_table.N`/`gated_delta_state_table.N`, 시퀀스당 전용 slot pool로 관리, vLLM의 MambaSpec 그룹핑은 우회). `max_num_seqs>1` 허용, 동시 요청 배칭 가능. OpenVINO 2026.3.0에서 LFM2.5(conv-only)와 Qwen3.5(conv+GatedDeltaNet SSM) 둘 다 크래시 없이 동작 및 정확성 검증(baseline과 byte-exact 일치) 완료. Gemma-4는 PA 변환 자체는 성공하나 local/global sliding-window attention(레이어별 head_size 상이)에서 실제 추론 시 shape mismatch 발생 — 슬라이딩 윈도우 블록 테이블 rotation 미구현이 원인으로 추정, 미해결. **주의**: 이 크래시-프리 검증은 이후 리팩토링 커밋(`96862df`)에서 재발한 세그폴트 회귀로 한때 무효화됐었음 — 단일 요청만으로도 재현. 2026-08-18에 원인 규명 및 수정 완료(상세: `docs/compatibility.md` 항목 25).
+  - **Hybrid-PA path (기본값, 2026-08-18부터)** — hybrid Mamba/attention 모델(`ReadValue` variable_id에 `ssm`/`conv` 포함)에서 `VLLM_OPENVINO_HYBRID_PA=1`이 기본값이라 자동 적용됨. `paged_attention_transformation()`을 시도: attention 레이어는 real PagedAttention(`key_cache.N`/`value_cache.N`), conv/SSM 레이어는 별도 linear-attention paged-state 메커니즘(`la.*` + `conv_state_table.N`/`gated_delta_state_table.N`, 시퀀스당 전용 slot pool로 관리, vLLM의 MambaSpec 그룹핑은 우회). `max_num_seqs>1` 허용, 동시 요청 배칭 가능. `VLLM_OPENVINO_HYBRID_PA=0`으로 개별 폴백 가능. OpenVINO 2026.3.0에서 LFM2.5(conv-only)와 Qwen3.5(conv+GatedDeltaNet SSM) 둘 다 크래시 없이 동작 및 정확성 검증(baseline과 byte-exact 일치) 완료. `platform.py`의 `_is_hybrid_pa_candidate()`가 IR의 `variable_id`에서 `ssm`/`conv` 포함 여부까지 검사(단순 ReadValue+SDPA 존재만으로는 부족) — Gemma-4도 ReadValue+SDPA는 있지만 ssm/conv 상태가 없으므로 후보에서 제외되어 기존 stateful 경로 그대로 유지됨 (PA 변환 자체는 성공하나 local/global sliding-window attention(레이어별 head_size 상이)에서 실제 추론 시 shape mismatch 발생 — 슬라이딩 윈도우 블록 테이블 rotation 미구현이 원인으로 추정, 미해결). **주의**: 이 크래시-프리 검증은 이후 리팩토링 커밋(`96862df`)에서 재발한 세그폴트 회귀로 한때 무효화됐었음 — 단일 요청만으로도 재현. 2026-08-18에 원인 규명 및 수정 완료(상세: `docs/compatibility.md` 항목 25).
+  - **Gemma-4 KV 캐시 사이즈 산정 버그 (2026-08-18 수정)** — stateful 모델의 `key_cache_config`/`value_cache_config`가 IR `ReadValue` op 순회(append) 순서로 채워져, 레이어별 key/value가 서로 다른 레이어끼리 짝지어지는 버그가 있었음 (Gemma-4는 layer 9의 value op이 layer 0의 key op보다 먼저 순회됨). head_size가 모든 레이어에서 동일한 모델(대부분)은 무해했지만, Gemma-4는 5개 레이어마다 head_size가 256/512로 갈라져 `max(key_head_size, value_head_size)` 기반 `FullAttentionSpec` 산정치가 부풀려짐 — vLLM의 KV 캐시 admission 체크가 실제 할당량보다 더 큰 메모리를 요구해 `--max-model-len 4096`에서 항상 OOM으로 부팅 실패. `_preload_state_cache_shapes()`에서 `variable_id`의 레이어 번호를 파싱해 key/value를 올바르게 짝짓도록 수정.
 - **Adaptive r-KV / Cache rotation 비활성화 (2026-08-18)** — `paged_attention_transformation(allow_adaptive_rkv=False, allow_cache_rotation=False)`로 되돌림. adaptive r-KV의 decode별 KV 스코어링 연산이 CPU 사용량을 증가시켜 원복함. 슬라이딩 윈도우 모델(Mistral 등)을 PA path에 추가하려면 cache_rotation 재활성화 + 블록 테이블 rotation 구현이 필요
 - **cgroup CPU quota 자동감지 (2026-08-18)** — `model_loader/openvino.py`의 `_detect_cgroup_cpu_quota()`. 컨테이너 `--cpus`/k8s CPU limit은 cgroup CFS quota로 스로틀링하지만 `os.cpu_count()`는 호스트 전체 코어를 그대로 보고함. `VLLM_OPENVINO_CPU_THREADS_NUM=0`(기본값)일 때 cgroup quota가 가시 코어 수보다 작으면 그 값으로 스레드 수를 캡핑 — 실측(8-quota/24-core 호스트): 미적용 시 스레드 91개, 45초/~355% CPU, 적용 시 8개, 34초/~300% CPU (동일 워크로드, 25% 개선). `VLLM_OPENVINO_CPU_THREADS_NUM`을 명시적으로 지정하면 자동감지보다 우선함
 - **Gather-before-matmul 변환 주의** — PA-transformed 모델에만 적용. stateful 모델에 적용하면 `seq_len=0` 출력으로 서빙 실패
@@ -103,9 +104,9 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 \
 | 모델 | 서빙 경로 | 비전 | 비고 |
 |------|----------|------|------|
 | Qwen2.5-Coder-3B-Instruct-int4-ov | PA | ❌ | 기본 PA 경로 |
-| Qwen3.5-0.8B/2B-int4-ov | Stateful/Hybrid (기본) 또는 Hybrid-PA (opt-in, 검증됨) | ✅ merger 필요 | ssm+conv ReadValue (SSM은 GatedDeltaNet). `VLLM_OPENVINO_HYBRID_PA=1` 시 PA 변환 성공, baseline과 byte-exact 일치, 동시 요청 배칭 정상 동작 |
-| gemma-4-E2B-it-int4-ov | Stateful (기본) | ✅ | 단순 vision emb. Hybrid-PA 미지원 — PA 변환 자체는 성공하나 local/global sliding-window 레이어 추론 시 shape mismatch, 미해결 |
-| LFM2.5-8B-A1B-int4-ov | Stateful (기본) 또는 Hybrid-PA (opt-in, 검증됨) | ❌ | conv-only hybrid MoE (18 LIV conv + 6 GQA, 32 experts top-4). `VLLM_OPENVINO_HYBRID_PA=1` 시 PA 변환 성공, baseline과 byte-exact 일치, 동시 요청 배칭 정상 동작. decode 속도는 하드웨어에 크게 의존(AVX-512+VNNI 데스크톱에서 단일 요청 ~13 tok/s 실측; 저사양/AVX2 환경에서는 훨씬 느릴 수 있음 — 실측 필요) |
+| Qwen3.5-0.8B/2B-int4-ov | Hybrid-PA (기본) | ✅ merger 필요 | ssm+conv ReadValue (SSM은 GatedDeltaNet). PA 변환 성공, baseline과 byte-exact 일치, 동시 요청 배칭 정상 동작. `VLLM_OPENVINO_HYBRID_PA=0`으로 stateful 폴백 가능 |
+| gemma-4-E2B-it-int4-ov | Stateful (기본) | ✅ | 단순 vision emb. Hybrid-PA 후보 아님(ssm/conv 상태 없음) — 기존 stateful 경로 그대로 유지 |
+| LFM2.5-8B-A1B-int4-ov | Hybrid-PA (기본) | ❌ | conv-only hybrid MoE (18 LIV conv + 6 GQA, 32 experts top-4). PA 변환 성공, baseline과 byte-exact 일치, 동시 요청 배칭 정상 동작. decode 속도는 하드웨어에 크게 의존(AVX-512+VNNI 데스크톱에서 단일 요청 ~13 tok/s 실측; 저사양/AVX2 환경에서는 훨씬 느릴 수 있음 — 실측 필요). `VLLM_OPENVINO_HYBRID_PA=0`으로 stateful 폴백 가능 |
 
 ## Git 및 Commits 정책
 
