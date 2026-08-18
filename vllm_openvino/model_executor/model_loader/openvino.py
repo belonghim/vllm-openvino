@@ -1063,6 +1063,11 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         # defaults to copying, which would freeze this tensor at 0 and feed
         # max_context_len=0 into PagedAttention on every step.
         self._max_ctx_ov = ov.Tensor(_buf, shared_memory=True)
+        # Reused across steps for multi-channel position inputs (e.g.
+        # M-RoPE). Rows 1+ stay zero for the buffer's lifetime; only row 0
+        # (real positions) is written each step, so caching by exact width
+        # avoids a fresh allocation + zero-fill on every call.
+        self._pos_multi_buf: np.ndarray | None = None
 
     def build_inputs(
         self,
@@ -1106,10 +1111,13 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         if model._position_input_name is not None:
             if model._position_input_channels > 1:
                 pos_np = model._as_numpy_no_copy(positions).reshape(-1)
-                pos_multi = np.zeros(
-                    (model._position_input_channels, pos_np.shape[0]), dtype=np.int64)
-                pos_multi[0, :] = pos_np
-                inputs[model._position_input_name] = pos_multi
+                seq_len = pos_np.shape[0]
+                if (self._pos_multi_buf is None
+                        or self._pos_multi_buf.shape[1] != seq_len):
+                    self._pos_multi_buf = np.zeros(
+                        (model._position_input_channels, seq_len), dtype=np.int64)
+                self._pos_multi_buf[0, :] = pos_np
+                inputs[model._position_input_name] = self._pos_multi_buf
             else:
                 inputs[model._position_input_name] = positions
 

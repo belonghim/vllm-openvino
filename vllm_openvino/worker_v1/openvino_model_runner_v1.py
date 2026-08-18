@@ -70,6 +70,11 @@ class OpenVINOModelRunnerV1:
             dtype=np.int64,
         )
         self._max_context_len_buf = np.zeros((), dtype=np.int32)
+        # Preallocated once and mutated in place per step (matches
+        # HybridPAInputBuilder's _max_ctx_ov pattern) to avoid a fresh
+        # ov.Tensor wrapper object every _prepare_inputs() call.
+        self._max_context_len_tensor_base = ov.Tensor(
+            self._max_context_len_buf, ov.Shape([1]), ov.Type.i32)
 
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         self._past_lens_tensor_base = ov.Tensor(
@@ -462,7 +467,7 @@ class OpenVINOModelRunnerV1:
         block_indices_group_tensors = self._block_indices_group_tensors_out
         block_indices_begins_group_tensors = self._block_indices_begins_group_tensors_out
         self._max_context_len_buf[()] = max_seq_len
-        max_context_len_tensor = ov.Tensor(self._max_context_len_buf, ov.Shape([1]), ov.Type.i32)
+        max_context_len_tensor = self._max_context_len_tensor_base
 
         la_block_indices = la_block_indices_begins = None
         la_past_lens = la_cache_interval = None
