@@ -74,7 +74,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
 | `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: u8, i8, f16, bf16, f32 | `auto` |
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `LATENCY` |
-| `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = OpenVINO auto) | `0` |
+| `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = auto: cgroup CPU quota if constrained, else OpenVINO auto) | `0` |
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | CPU only. Thread affinity: `CORE`, `NUMA`, `NONE` | unset |
 | `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer | `AUTO` |
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true` or `false` | `auto` |
@@ -113,6 +113,8 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 | Variable | Type | Values | Effect |
 |----------|------|--------|--------|
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | int | `0` (auto), `1..N` | Caps OpenVINO CPU inference threads |
+
+**cgroup-aware auto-detection**: container runtimes (podman/docker `--cpus`, Kubernetes CPU limits) throttle via cgroup CFS quota, but `os.cpu_count()` inside the container still reports the host's full core count. With `VLLM_OPENVINO_CPU_THREADS_NUM=0` (default), the plugin now detects the cgroup quota at model-load time and caps OpenVINO's thread pool to it when the quota is tighter than the visible core count — preventing thread oversubscription. Measured on an 8-quota/24-visible-core host: uncapped auto-detection spawned 91 threads and took 45s/~355% CPU for a 4-request burst; quota-aware capping to 8 threads took 34s/~300% CPU for the same workload (25% faster, lower CPU). Set `VLLM_OPENVINO_CPU_THREADS_NUM` explicitly to override this detection.
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | str | `CORE`, `NUMA`, `NONE` | Controls CPU thread affinity policy |
 | `VLLM_OPENVINO_NUM_STREAMS` | str/int | `AUTO`, `1..N` | Controls number of parallel CPU inference streams |
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | bool | `true`, `false`, `auto` | Disabling prevents HT oversubscription on 2-socket systems |

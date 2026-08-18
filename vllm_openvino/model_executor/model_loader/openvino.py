@@ -2,6 +2,7 @@
 
 # ruff: noqa: SIM117
 import logging
+import os
 from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Any
@@ -42,6 +43,41 @@ def _flatten_inputs(inputs):
         else:
             flatten_inputs.append(input_data)
     return flatten_inputs
+
+
+def _detect_cgroup_cpu_quota() -> int | None:
+    """Detect the effective CPU count from a cgroup v2/v1 CFS quota.
+
+    Container runtimes (podman/docker --cpus, Kubernetes CPU limits) throttle
+    via cgroup CFS quota but leave os.cpu_count()/sched_getaffinity() reporting
+    the host's full core count. OpenVINO's thread auto-detection (num_threads
+    unset) uses the latter, so it oversubscribes under a tighter quota —
+    measured on an 8-quota/24-visible-core host: 91 threads spawned, 45s/~355%
+    CPU vs. 34s/~300% CPU when capped to 8 threads for the same workload.
+    Returns None if no quota is set (unconstrained) or it can't be read.
+    """
+    try:
+        quota_max_path = Path("/sys/fs/cgroup/cpu.max")
+        if quota_max_path.exists():
+            quota_str, period_str = quota_max_path.read_text().split()
+            if quota_str == "max":
+                return None
+            quota, period = int(quota_str), int(period_str)
+        else:
+            cfs_quota_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+            cfs_period_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+            if not (cfs_quota_path.exists() and cfs_period_path.exists()):
+                return None
+            quota = int(cfs_quota_path.read_text())
+            period = int(cfs_period_path.read_text())
+            if quota <= 0:
+                return None
+        if period <= 0:
+            return None
+        effective = quota // period
+        return effective if effective > 0 else None
+    except (OSError, ValueError):
+        return None
 
 
 def has_op_with_type(function: ov.Model, type_name: str):
@@ -340,6 +376,17 @@ class OpenVINOCausalLM(nn.Module):
             cpu_hint: dict[str, Any] = {}
 
             cpu_threads_num = envs.VLLM_OPENVINO_CPU_THREADS_NUM
+            if cpu_threads_num == 0:
+                visible_cores = os.cpu_count() or 0
+                quota_cores = _detect_cgroup_cpu_quota()
+                if quota_cores is not None and quota_cores < visible_cores:
+                    logger.info(
+                        "[OV-LOADER] Detected cgroup CPU quota=%d below visible "
+                        "cores=%d; capping OpenVINO inference threads to %d to "
+                        "avoid oversubscription. Set VLLM_OPENVINO_CPU_THREADS_NUM "
+                        "explicitly to override.",
+                        quota_cores, visible_cores, quota_cores)
+                    cpu_threads_num = quota_cores
             if cpu_threads_num > 0:
                 # AVX2-only CPUs are often compute-bound; capping threads can
                 # reduce oversubscription and improve stable token throughput.
