@@ -375,7 +375,7 @@ class OpenVINOCausalLM(nn.Module):
             # load, since the plugin already runs correctly without it.
             try:
                 apply_gather_before_matmul_transformation(ov_model)
-            except (ValueError, RuntimeError) as e:
+            except Exception as e:
                 logger.warning(
                     "[OV-LOADER] gather-before-matmul not applied to "
                     "stateful model output, falling back to full-sequence "
@@ -440,10 +440,15 @@ class OpenVINOCausalLM(nn.Module):
                 cpu_hint[hints.enable_cpu_pinning()] = enable_pinning
 
             core_type = envs.VLLM_OPENVINO_SCHEDULING_CORE_TYPE
-            core_type_enum = getattr(hints.SchedulingCoreType, core_type, None) \
-                if core_type else None
-            if core_type_enum is not None:
-                cpu_hint[hints.scheduling_core_type] = core_type_enum
+            if core_type:
+                core_type_enum = getattr(hints.SchedulingCoreType, core_type, None)
+                if core_type_enum is not None:
+                    cpu_hint[hints.scheduling_core_type] = core_type_enum
+                else:
+                    logger.warning(
+                        "[OV-LOADER] Unknown VLLM_OPENVINO_SCHEDULING_CORE_TYPE=%s, "
+                        "expected one of PCORE_ONLY/ECORE_ONLY/ANY_CORE; ignoring",
+                        core_type)
 
             perf_hint = {**perf_hint, **cpu_hint}
 
