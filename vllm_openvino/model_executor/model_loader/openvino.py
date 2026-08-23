@@ -1208,6 +1208,8 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         batch_size = (num_requests if num_requests is not None
                       else max(1, input_ids_np.shape[0]
                                if input_ids_np.ndim > 0 else 1))
+        # lazily converted once, shared by position_ids and attention_mask branches
+        positions_np: np.ndarray | None = None
 
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
@@ -1237,8 +1239,10 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     else:
                         inputs_dict[name] = input_ids_np.reshape(-1)
             elif name == "position_ids":
+                if positions_np is None:
+                    positions_np = model._as_numpy_no_copy(positions)
+                pos = positions_np
                 if len(shape) == 3:
-                    pos = model._as_numpy_no_copy(positions)
                     seq_len_pos = pos.shape[-1] if pos.ndim > 0 else 1
                     if self._pos_3d_buf is None and self._pos_3d_channels > 0:
                         self._pos_3d_buf = np.zeros(
@@ -1255,12 +1259,13 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         pos_3d[0, 0, :] = pos.reshape(-1)
                         inputs_dict[name] = pos_3d
                 elif len(shape) == 2:
-                    pos = model._as_numpy_no_copy(positions)
                     inputs_dict[name] = pos.reshape(batch_size, -1)
                 else:
-                    inputs_dict[name] = model._as_numpy_no_copy(positions).reshape(-1)
+                    inputs_dict[name] = pos.reshape(-1)
             elif name == "attention_mask":
-                pos_np = model._as_numpy_no_copy(positions)
+                if positions_np is None:
+                    positions_np = model._as_numpy_no_copy(positions)
+                pos_np = positions_np
                 total_seq_len = (int(pos_np.max()) + 1
                                  if pos_np.size > 0 else seq_len)
                 if total_seq_len <= self._attention_mask_buf.shape[1]:
@@ -1270,7 +1275,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                         (batch_size, total_seq_len), dtype=np.int64)
             elif name == "per_layer_inputs":
                 if model.use_per_layer_embeddings_model:
-                    ple_input_ids = model._as_numpy_no_copy(input_ids).reshape(1, -1)
+                    ple_input_ids = input_ids_np.reshape(1, -1)
                     model.per_layer_emb_request.infer([ple_input_ids])
                     ple_out = model.per_layer_emb_request.get_output_tensor(0)
                     inputs_dict[name] = ple_out.data.reshape(
