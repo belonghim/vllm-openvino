@@ -15,7 +15,7 @@ RUN pip install -U pip setuptools wheel && \
         nvidia-cuda-tileiras nvidia-cuda-nvdisasm nvidia-cudnn-frontend nvidia-cutlass-dsl \
         nvidia-cutlass-dsl-libs-core nvidia-cutlass-dsl-libs-cu12 \
         nvidia-ml-py nvidia-nvjitlink nvidia-nvvm \
-        humming-kernels pynvvideocodec apache-tvm-ffi quack-kernels \
+        humming-kernels pynvvideocodec quack-kernels \
         tokenspeed-mla tokenspeed-triton tilelang && \
     pip cache purge && \
     find /opt/vllm-env -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
