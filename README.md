@@ -38,12 +38,12 @@ podman build -f Containerfile -t quay.io/joopark/vllm-openvino .
 Run the Docker container:
 
 ```bash
-podman run -d --name vllm-server -p 8000:8000 \
+podman run -d --name vllm-server -p 8080:8080 \
   -e VLLM_OPENVINO_DEVICE=CPU \
   -e TORCH_COMPILE_DISABLE=1 \
   -e VLLM_OPENVINO_KVCACHE_SPACE=8 \
   quay.io/joopark/vllm-openvino \
-  --model <model_id>
+  --port=8080 --model <model_id>
 ```
 
 ## Quick Start
@@ -72,14 +72,14 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 |----------|-------------|---------|
 | `VLLM_OPENVINO_DEVICE` | Device selection: CPU, GPU, GPU.1, etc. | `CPU` |
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
-| `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: u8, i8, f16, bf16, f32 | `auto` |
+| `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: `u8`, `i8`, `f16`/`fp16`, `bf16`, `f32`/`fp32` (unset = auto-detected from model) | unset |
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `LATENCY` |
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = auto: cgroup CPU quota if constrained, else OpenVINO auto) | `0` |
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | CPU only. Thread affinity: `CORE`, `NUMA`, `NONE` | unset |
 | `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer | `AUTO` |
-| `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true` or `false` | `auto` |
-| `VLLM_OPENVINO_INFERENCE_PRECISION` | CPU only. Force inference precision: `f32`, `f16`, `bf16` | `auto` |
-| `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true` or `false` | `auto` |
+| `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true`, `false`, or `auto` | `auto` |
+| `VLLM_OPENVINO_INFERENCE_PRECISION` | CPU only. Force inference precision: `f32`, `f16`, `bf16` (unset = OpenVINO default) | unset |
+| `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true`, `false`, or `auto` | `auto` |
 | `VLLM_OPENVINO_HYBRID_PA` | Default path for hybrid Mamba/attention models: attempt PagedAttention (concurrent batching) instead of the sequential stateful path. Set to `0` to force the sequential stateful path instead. See [Serving Modes](#serving-modes). | `1` |
 | `VLLM_OPENVINO_CACHE_DIR` | Directory for OpenVINO's compiled-model disk cache. When set, skips recompiling the model on process restart if a matching cached blob exists. Unset by default since not every deployment has a writable, persistent path. | unset |
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | CPU only. Scheduling core type on hybrid P-core/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
@@ -120,7 +120,7 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | str | `CORE`, `NUMA`, `NONE` | Controls CPU thread affinity policy |
 | `VLLM_OPENVINO_NUM_STREAMS` | str/int | `AUTO`, `1..N` | Controls number of parallel CPU inference streams |
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | bool | `true`, `false`, `auto` | Disabling prevents HT oversubscription on 2-socket systems |
-| `VLLM_OPENVINO_INFERENCE_PRECISION` | str | `f32`, `f16`, `bf16`, `auto` | Forces specific precision for matmul operations |
+| `VLLM_OPENVINO_INFERENCE_PRECISION` | str | `f32`, `f16`, `bf16` (unset = OpenVINO default) | Forces specific precision for matmul operations |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | bool | `true`, `false`, `auto` | Controls thread-to-core pinning |
 
 Example (latency-optimized for AVX2, 2-socket Xeon):
@@ -182,12 +182,15 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
 - Gemma 3 and Gemma 4 text and multimodal (text + image)
-- Qwen3.5 (hybrid Mamba/attention architecture)
+- Qwen3.5 and LFM2.5 (hybrid Mamba/attention architecture, via Hybrid-PA)
 
 ## Limitations
 
 - LoRA serving is not supported.
+- Pin memory is not supported.
+- Structured outputs are not supported.
 - Single socket only; tensor/pipeline parallelism is not supported.
 - vLLM V1 engine only.
+- Stateful-path models (e.g. Gemma-4) do not support concurrent request execution (`max_num_seqs=1`).
 
 See `docs/compatibility.md` for the current support matrix.
