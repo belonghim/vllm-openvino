@@ -366,17 +366,16 @@ class OpenVINOCausalLM(nn.Module):
             self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
         if self.model_type == STATEFUL and envs.VLLM_OPENVINO_STATEFUL_PA:
-            sliding = has_sliding_window(self.model_config)
-            if sliding:
+            if has_sliding_window(self.model_config):
                 logger.info(
                     "[OV-LOADER] Sliding-window stateful model keeps the "
-                    "sequential stateful path even with "
-                    "VLLM_OPENVINO_STATEFUL_PA=1.")
+                    "sequential stateful path (VLLM_OPENVINO_STATEFUL_PA "
+                    "does not apply).")
             elif not _has_sdpa_ops(ov_model):
-                raise ValueError(
-                    "VLLM_OPENVINO_STATEFUL_PA=1 requires ScaledDotProduct"
-                    "Attention ops, but this stateful model has none. "
-                    "Unset the env var or keep max_num_seqs=1.")
+                logger.warning(
+                    "[OV-LOADER] Stateful model without ScaledDotProduct"
+                    "Attention ops keeps the sequential stateful path. "
+                    "Set VLLM_OPENVINO_STATEFUL_PA=0 to silence this.")
             else:
                 self.model_type = ATTENTION_ONLY
 

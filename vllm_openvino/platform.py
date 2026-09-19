@@ -223,11 +223,10 @@ class OpenVinoPlatform(Platform):
                         and _is_stateful_pa_candidate(model_config.model)
                         and not has_sliding_window(model_config)):
                     logger.info(
-                        "[OV-PLATFORM] VLLM_OPENVINO_STATEFUL_PA=1: "
-                        "attempting PagedAttention transformation for "
-                        "stateful model, keeping max_num_seqs=%d. "
-                        "Set VLLM_OPENVINO_STATEFUL_PA=0 to force the "
-                        "sequential stateful path instead.",
+                        "[OV-PLATFORM] PagedAttention transformation for "
+                        "stateful model (VLLM_OPENVINO_STATEFUL_PA), keeping "
+                        "max_num_seqs=%d. Set VLLM_OPENVINO_STATEFUL_PA=0 to "
+                        "force the sequential stateful path instead.",
                         scheduler_config.max_num_seqs)
                 else:
                     logger.warning(

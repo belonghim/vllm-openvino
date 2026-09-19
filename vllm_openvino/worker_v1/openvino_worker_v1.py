@@ -161,7 +161,11 @@ class OpenVINOWorkerV1(WorkerBase):
             cache_dtype = None
 
             has_unknown_readvalue = False
+            has_sdpa = False
             for op in ov_model.get_ops():
+                if op.get_type_name() == "ScaledDotProductAttention":
+                    has_sdpa = True
+                    continue
                 if op.get_type_name() != "ReadValue":
                     continue
                 var_id = op.get_variable_id()
@@ -221,7 +225,9 @@ class OpenVINOWorkerV1(WorkerBase):
 
             if ssm_cache_config or conv_cache_config:
                 self._preloaded_model_type = HYBRID_MAMBA
-            elif envs.VLLM_OPENVINO_STATEFUL_PA and not has_sliding_window(self.model_config):
+            elif (envs.VLLM_OPENVINO_STATEFUL_PA
+                    and has_sdpa
+                    and not has_sliding_window(self.model_config)):
                 self._preloaded_model_type = ATTENTION_ONLY
             elif key_cache_config or value_cache_config or has_unknown_readvalue:
                 self._preloaded_model_type = STATEFUL
