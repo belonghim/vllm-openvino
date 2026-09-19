@@ -67,16 +67,6 @@ class OpenVINOAttentionBackend(AttentionBackend):
         return False
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (2, num_blocks, num_kv_heads, block_size, head_size)
-
-    @staticmethod
     def swap_blocks(
         src_tensor: ov.Tensor,
         dst_tensor: ov.Tensor,
