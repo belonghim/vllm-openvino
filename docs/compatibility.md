@@ -25,15 +25,19 @@ The plugin selects a path from the model IR:
 Stateful plain-attention models (optimum-intel default exports, e.g.
 Qwen2.5-Coder-int4-ov) can opt into the PagedAttention path with
 `VLLM_OPENVINO_STATEFUL_PA=1`: the PA transformation runs at load time and
-`max_num_seqs` keeps its default 128. Concurrency-8 aggregate throughput is
-~5.5x the stateful path (single-stream -6%). Sliding-window models stay on
-the stateful path regardless of the flag. On PA paths the KV cache defaults
-to u8; `VLLM_OPENVINO_KV_CACHE_PRECISION` selects `u8`/`f16`/`bf16` through
-the OpenVINO `KV_CACHE_PRECISION` compile property (`f32`/`i8` are rejected
-by CPU PagedAttention and fall back to the default with a warning). Greedy
-output can differ from the stateful path because the transformed attention
-computation differs; u8 and bf16 caches produced byte-identical output, so
-the difference is not cache precision.
+`max_num_seqs` keeps its default 128. Validated on Qwen2.5-Coder-0.5B,
+Qwen3-1.7B and TinyLlama-1.1B (int4 IR): concurrency-8 aggregate throughput
+was 4.9-7.0x the stateful path, single-stream -1.2% to -7.8%. Sliding-window
+models (Gemma-4, Phi-3.5-mini) stay on the stateful path regardless of the
+flag. On PA paths the KV cache defaults to u8; `VLLM_OPENVINO_KV_CACHE_PRECISION`
+selects `u8`/`f16`/`bf16` through the OpenVINO `KV_CACHE_PRECISION` compile
+property (`f32`/`i8` are rejected by CPU PagedAttention and fall back to the
+default with a warning). Greedy output matched the stateful path on
+TinyLlama-1.1B and differed on Qwen-family models; u8 and bf16 caches
+produced byte-identical output, so the difference comes from the transformed
+attention computation, not cache precision. The opt-in default (`0`) is
+intentional: enabling the flag changes numerical output on some
+architectures.
 
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
 Qwen3.5 and LFM2.5. Set `VLLM_OPENVINO_HYBRID_PA=0` to force the stateful path.
