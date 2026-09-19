@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 import re
 from typing import TYPE_CHECKING
 
@@ -7,7 +8,9 @@ from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
 
 import vllm_openvino.envs as envs
-from vllm_openvino.utils import canonical_vllm_cache_dtype, has_sliding_window
+from vllm_openvino.utils import (canonical_vllm_cache_dtype,
+                                 cpu_thread_limit,
+                                 has_sliding_window)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -21,6 +24,22 @@ try:
 except ImportError as e:
     ov = None  # type: ignore[assignment]
     logger.warning("Failed to import OpenVINO with %r", e)
+
+
+def _cap_torch_threads() -> None:
+    if envs.VLLM_OPENVINO_DEVICE.upper() != "CPU":
+        return
+    if "OMP_NUM_THREADS" in os.environ:
+        return
+    limit, reason = cpu_thread_limit()
+    if not limit:
+        return
+    os.environ["OMP_NUM_THREADS"] = str(limit)
+    if torch.get_num_threads() != limit:
+        torch.set_num_threads(limit)
+    logger.info(
+        "[OV-PLATFORM] Capping Torch/OMP threads to %d (%s) to avoid CPU "
+        "oversubscription.", limit, reason)
 
 
 def _find_model_ir_path(model_path: str) -> "Path | None":
@@ -191,6 +210,8 @@ class OpenVinoPlatform(Platform):
             raise ImportError(
                 "OpenVINO is required but not installed. "
                 "Install with: pip install openvino>=2026.3.0")
+
+        _cap_torch_threads()
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.world_size != 1:

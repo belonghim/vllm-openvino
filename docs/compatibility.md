@@ -52,7 +52,9 @@ from vLLM scheduler blocks.
 
 - CPU KV block size is `32`; GPU KV block size is `16`.
 - `VLLM_OPENVINO_CPU_THREADS_NUM=0` uses cgroup CPU quota when available;
-  an explicit value takes precedence.
+  an explicit value takes precedence. The same quota caps the Torch/OMP
+  thread pools at engine config time unless `OMP_NUM_THREADS` is set
+  externally.
 - `VLLM_OPENVINO_KVCACHE_SPACE=0` selects the backend default (4 GiB on CPU).
 - KV cache allocation must not add zero-fill to `_allocate_kv_cache()`;
   OpenVINO initializes the cache and extra zero-fill can cause OOM.
