@@ -6,7 +6,7 @@ set -euo pipefail
 
 MODEL_PATH="${1:-}"
 NUM_REQUESTS="${2:-100}"
-API_URL="${API_URL:-http://localhost:8080}"
+API_URL="${API_URL:-http://127.0.0.1:8080}"
 
 if [[ -z "$MODEL_PATH" ]]; then
     echo "Usage: $0 <model_path> [num_requests]"
