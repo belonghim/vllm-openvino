@@ -10,7 +10,10 @@ from vllm.platforms.interface import Platform, PlatformEnum
 import vllm_openvino.envs as envs
 from vllm_openvino.utils import (canonical_vllm_cache_dtype,
                                  cpu_thread_limit,
-                                 has_sliding_window)
+                                 detect_cgroup_memory_limit,
+                                 format_memory_size,
+                                 has_sliding_window,
+                                 model_weights_bytes)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -40,6 +43,39 @@ def _cap_torch_threads() -> None:
     logger.info(
         "[OV-PLATFORM] Capping Torch/OMP threads to %d (%s) to avoid CPU "
         "oversubscription.", limit, reason)
+
+
+def _fit_kv_cache_to_memory_limit(kv_bytes: int, model_path: str) -> int:
+    limit = detect_cgroup_memory_limit()
+    if limit is None:
+        return kv_bytes
+    weights = model_weights_bytes(model_path)
+    budget = (limit - weights - CONTAINER_RUNTIME_BASELINE_BYTES
+              - KV_CACHE_MEMORY_MARGIN_BYTES)
+    if kv_bytes > budget:
+        fitted = max(KV_CACHE_MIN_BYTES, budget)
+        logger.warning(
+            "[OV-PLATFORM] KV cache space %s does not fit the container memory "
+            "limit %s after reserving %s runtime baseline, %s model weights and "
+            "%s headroom; sizing the pool to %s to avoid an OOM kill. Raise the "
+            "container memory limit or lower VLLM_OPENVINO_KVCACHE_SPACE to keep "
+            "a larger pool.",
+            format_memory_size(kv_bytes), format_memory_size(limit),
+            format_memory_size(CONTAINER_RUNTIME_BASELINE_BYTES),
+            format_memory_size(weights),
+            format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES),
+            format_memory_size(fitted))
+        return fitted
+    if kv_bytes * 10 > budget * 9:
+        logger.warning(
+            "[OV-PLATFORM] KV cache space %s leaves under 10%% headroom under the "
+            "container memory limit %s (runtime baseline %s, model weights %s, "
+            "headroom %s); an OOM is possible once the pool is fully touched.",
+            format_memory_size(kv_bytes), format_memory_size(limit),
+            format_memory_size(CONTAINER_RUNTIME_BASELINE_BYTES),
+            format_memory_size(weights),
+            format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES))
+    return kv_bytes
 
 
 def _find_model_ir_path(model_path: str) -> "Path | None":
@@ -140,6 +176,9 @@ GIB_BYTES = 1024 ** 3
 CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
 GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
 DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limited RAM
+KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES // 2  # runtime headroom under a cgroup limit
+KV_CACHE_MIN_BYTES = GIB_BYTES // 4  # below this a pool cannot serve usefully
+CONTAINER_RUNTIME_BASELINE_BYTES = 3 * GIB_BYTES // 2  # python/torch/vLLM resident before the pool
 
 
 class OpenVinoPlatform(Platform):
@@ -313,6 +352,11 @@ class OpenVinoPlatform(Platform):
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE "
                 f"{kv_cache_space}, expect a positive integer value.")
+
+        if (cache_config.openvino_kvcache_space_bytes
+                and OpenVinoPlatform.is_openvino_cpu()):
+            cache_config.openvino_kvcache_space_bytes = _fit_kv_cache_to_memory_limit(
+                cache_config.openvino_kvcache_space_bytes, model_config.model)
 
         # Disable torch compilation — OpenVINO compiles its own models
         from vllm.config import CompilationMode

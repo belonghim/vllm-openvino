@@ -59,6 +59,36 @@ def cpu_thread_limit() -> tuple[int | None, str]:
     return None, "no cgroup quota below the visible core count"
 
 
+def detect_cgroup_memory_limit() -> int | None:
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw == "max":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        return None if value >= 1 << 62 else value
+    return None
+
+
+def model_weights_bytes(model_path: str) -> int:
+    model_dir = Path(model_path)
+    if not model_dir.is_dir():
+        return 0
+    total = 0
+    for blob in model_dir.glob("openvino_*.bin"):
+        try:
+            total += blob.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 
 def determine_num_available_blocks(current_platform, cache_config, cache_block_size: int, profile_run_func) -> tuple[int, int]:
     """Determine the number of blocks available for the KV cache.

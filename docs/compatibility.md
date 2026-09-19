@@ -64,6 +64,12 @@ from vLLM scheduler blocks.
   10 rounds while its size stayed fixed; cgroup total 1.6 -> 2.5 GB).
   Size containers for `baseline + VLLM_OPENVINO_KVCACHE_SPACE`, not for the
   pool alone.
+- On CPU, `openvino_kvcache_space_bytes` is fitted to the container's
+  cgroup memory limit when one is set: budget = limit - model weights
+  (`openvino_*.bin`) - 1.5 GiB runtime baseline - 512 MiB headroom. A pool
+  larger than the budget is reduced to it (never below 256 MiB) with a
+  warning; a pool above 90% of the budget logs a headroom warning. Both are
+  skipped when no cgroup memory limit is set.
 - vLLM's prefix caching (default on) retains freed blocks, so workloads with
   unique prompts keep touching new pool pages over time;
   `--no-enable-prefix-caching` keeps the resident set at the working set

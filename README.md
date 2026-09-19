@@ -91,7 +91,7 @@ For CPU deployments, especially AVX2-only systems, tuning OpenVINO CPU threading
 
 ### Memory Footprint
 
-The KV cache is reserved as one fixed-size mapping and pages become resident only as blocks are used, so RSS climbs toward `baseline + VLLM_OPENVINO_KVCACHE_SPACE` and then plateaus; size the container for that sum (baseline is roughly the model plus ~1.5 GB of runtime for small models). vLLM's prefix caching (on by default) retains freed blocks, so unique-prompt workloads keep touching new pool pages — add `--no-enable-prefix-caching` to hold the resident set at the working set.
+The KV cache is reserved as one fixed-size mapping and pages become resident only as blocks are used, so RSS climbs toward `baseline + VLLM_OPENVINO_KVCACHE_SPACE` and then plateaus; size the container for that sum (baseline is roughly the model plus ~1.5 GB of runtime for small models). vLLM's prefix caching (on by default) retains freed blocks, so unique-prompt workloads keep touching new pool pages — add `--no-enable-prefix-caching` to hold the resident set at the working set. On CPU the pool is also sized against the container memory limit: if it does not fit alongside the model weights, a 1.5 GB runtime baseline and 512 MB headroom, the plugin reduces it automatically and logs the new size, and it warns when under 10% headroom remains; run without a cgroup memory limit and the check is skipped.
 
 ### KV Cache Quantization
 
