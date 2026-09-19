@@ -425,15 +425,6 @@ class OpenVINOCausalLM(nn.Module):
                 # reduce oversubscription and improve stable token throughput.
                 cpu_hint[props.inference_num_threads] = cpu_threads_num
 
-            cpu_bind_thread = envs.VLLM_OPENVINO_CPU_BIND_THREAD
-            if cpu_bind_thread in {"CORE", "NUMA", "NONE"}:
-                # Explicit affinity helps avoid thread migration penalties.
-                affinity_enum = getattr(getattr(props, "Affinity", None),
-                                        cpu_bind_thread, None)
-                affinity_value = affinity_enum if affinity_enum is not None else cpu_bind_thread
-                affinity_key = getattr(props, "affinity", "AFFINITY")
-                cpu_hint[affinity_key] = affinity_value
-
             num_streams = envs.VLLM_OPENVINO_NUM_STREAMS
             if isinstance(num_streams, int) and num_streams > 0:
                 # Multiple streams can increase throughput on CPUs by enabling

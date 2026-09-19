@@ -9,11 +9,11 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
     VLLM_OPENVINO_PERFORMANCE_MODE: str = "LATENCY"
     VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
-    VLLM_OPENVINO_CPU_BIND_THREAD: str | None = None
     VLLM_OPENVINO_NUM_STREAMS: str | int = "AUTO"
     VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
+    VLLM_OPENVINO_STATEFUL_PA: bool = True
     VLLM_OPENVINO_HYBRID_PA: bool = True
     VLLM_OPENVINO_CACHE_DIR: str | None = None
     VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
@@ -51,12 +51,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # 0 means OpenVINO auto-selects threads
     "VLLM_OPENVINO_CPU_THREADS_NUM":
     lambda: int(os.getenv("VLLM_OPENVINO_CPU_THREADS_NUM", "0")),
-
-    # CPU-only: thread binding policy (CORE, NUMA, NONE)
-    # None means keep OpenVINO default behavior
-    "VLLM_OPENVINO_CPU_BIND_THREAD":
-    lambda: (lambda v: v.upper() if v else None)(
-        os.getenv("VLLM_OPENVINO_CPU_BIND_THREAD", None)),
 
     # Number of CPU inference streams.
     # AUTO keeps OpenVINO heuristic. Numeric values force explicit streams.
