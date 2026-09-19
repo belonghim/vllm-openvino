@@ -58,6 +58,17 @@ from vLLM scheduler blocks.
 - `VLLM_OPENVINO_KVCACHE_SPACE=0` selects the backend default (4 GiB on CPU).
 - KV cache allocation must not add zero-fill to `_allocate_kv_cache()`;
   OpenVINO initializes the cache and extra zero-fill can cause OOM.
+- The KV cache is one fixed-size mapping whose pages become resident only as
+  blocks are used, so RSS grows toward `baseline + KV pool` and then plateaus
+  (measured with a 1 GiB pool: one 1049 MiB mapping, Rss 36 -> 110 MiB over
+  10 rounds while its size stayed fixed; cgroup total 1.6 -> 2.5 GB).
+  Size containers for `baseline + VLLM_OPENVINO_KVCACHE_SPACE`, not for the
+  pool alone.
+- vLLM's prefix caching (default on) retains freed blocks, so workloads with
+  unique prompts keep touching new pool pages over time;
+  `--no-enable-prefix-caching` keeps the resident set at the working set
+  (measured: anon flat at ~477 MiB after warm-up vs +62 MiB over 8 rounds
+  with prefix caching on).
 - SSM/conv state caches are zero-filled; attention KV caches are not.
 - bf16 tensors must be converted to float32 before NumPy conversion because
   OpenVINO does not accept bf16 NumPy arrays.

@@ -89,6 +89,10 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 
 For CPU deployments, especially AVX2-only systems, tuning OpenVINO CPU threading/stream properties can improve sustained tokens/sec.
 
+### Memory Footprint
+
+The KV cache is reserved as one fixed-size mapping and pages become resident only as blocks are used, so RSS climbs toward `baseline + VLLM_OPENVINO_KVCACHE_SPACE` and then plateaus; size the container for that sum (baseline is roughly the model plus ~1.5 GB of runtime for small models). vLLM's prefix caching (on by default) retains freed blocks, so unique-prompt workloads keep touching new pool pages — add `--no-enable-prefix-caching` to hold the resident set at the working set.
+
 ### KV Cache Quantization
 
 The KV cache precision can be reduced to significantly lower memory usage:
