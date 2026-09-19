@@ -6,8 +6,8 @@
 
 **구현 참조**: [OpenVINO GenAI](https://github.com/openvinotoolkit/openvino.genai)의 추론 로직(상태 관리, SDPA 백엔드, 하이브리드 모델 처리)을 참고하여, 동일 OpenVINO IR 모델을 vLLM OpenAI-compatible API로 서빙하는 것이 핵심 목표다.
 
-- **vLLM 버전**: 0.26.0
-- **OpenVINO 버전**: >= 2026.3.0
+- **vLLM 버전**: 0.29.0
+- **OpenVINO 버전**: >= 2026.4.0
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 
 ### 설계 원칙

@@ -60,3 +60,36 @@ def format_memory_size(size: float) -> str:
         unit_index += 1
 
     return f"{size:.2f} {units[unit_index]}"
+
+
+# vLLM 0.27+ validates cache_config.cache_dtype against the CacheDType
+# literal at engine init (KV cache layout resolution). OpenVINO-specific
+# KV precisions ("u8", "i8", ...) live in cache_config.openvino_kv_dtype;
+# cache_config.cache_dtype carries the closest valid vLLM literal instead.
+# Unknown IR element types (e.g. "nf4") map to "auto" ("backend chooses").
+VLLM_CACHE_DTYPE_BY_OV: dict[str, str] = {
+    "u8": "int8_per_token_head",
+    "i8": "int8_per_token_head",
+    "f16": "float16",
+    "fp16": "float16",
+    "bf16": "bfloat16",
+    "f32": "auto",
+    "fp32": "auto",
+}
+
+
+def canonical_vllm_cache_dtype(ov_dtype: str | None) -> str:
+    if ov_dtype is None:
+        return "auto"
+    return VLLM_CACHE_DTYPE_BY_OV.get(ov_dtype, "auto")
+
+
+def ov_cache_dtype(cache_config) -> str:
+    """OpenVINO element type for the KV cache. IR-detected value wins;
+    "fp16" is the fallback before detection completes."""
+    if not hasattr(cache_config, "openvino_kv_dtype"):
+        raise ValueError(
+            "cache_config.openvino_kv_dtype is missing. The OpenVINO platform "
+            "sets it at config time (check_and_update_config); ensure the "
+            "OpenVINO platform plugin is active.")
+    return cache_config.openvino_kv_dtype or "fp16"

@@ -2,6 +2,7 @@
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
 from vllm_openvino import envs
+from vllm_openvino.utils import ov_cache_dtype
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -74,7 +75,7 @@ class OpenVINOCacheEngine:
 
         # OpenVINO uses its own attention backend directly (no vLLM standard backend needed).
 
-        cache_dtype = self.cache_config.cache_dtype
+        cache_dtype = ov_cache_dtype(self.cache_config)
         normalized = envs.KV_CACHE_PRECISION_MAP.get(cache_dtype, cache_dtype)
         if normalized not in str_to_ov_type:
             raise ValueError(

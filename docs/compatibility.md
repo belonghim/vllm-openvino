@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- vLLM `0.26.0`
-- OpenVINO `>= 2026.3.0`
+- vLLM `0.29.0`
+- OpenVINO `>= 2026.4.0`
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
 - Single socket only; tensor and pipeline parallelism are unsupported

@@ -54,14 +54,14 @@ For CPU:
 
 ```bash
 VLLM_OPENVINO_DEVICE=CPU TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_KVCACHE_SPACE=8 \
-  python -m vllm.entrypoints.openai.api_server --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  vllm serve --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 For GPU:
 
 ```bash
 VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
-  python -m vllm.entrypoints.openai.api_server --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  vllm serve --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported OpenVINO IR files (directory containing openvino_model.xml and openvino_model.bin).
@@ -103,7 +103,7 @@ The KV cache precision can be reduced to significantly lower memory usage:
 Set via environment variable:
 ```bash
 VLLM_OPENVINO_KV_CACHE_PRECISION=u8 \
-  python -m vllm.entrypoints.openai.api_server --model <model_id>
+  vllm serve --model <model_id>
 ```
 
 ### CPU Tuning (AVX2)
@@ -133,7 +133,7 @@ VLLM_OPENVINO_CPU_BIND_THREAD=CORE \
 VLLM_OPENVINO_NUM_STREAMS=1 \
 VLLM_OPENVINO_ENABLE_HYPER_THREADING=false \
 TORCH_COMPILE_DISABLE=1 \
-python -m vllm.entrypoints.openai.api_server --model <model_id>
+vllm serve --model <model_id>
 ```
 
 ### Sampling Parameters (large-vocab models)

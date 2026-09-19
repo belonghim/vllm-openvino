@@ -7,6 +7,7 @@ from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
 
 import vllm_openvino.envs as envs
+from vllm_openvino.utils import canonical_vllm_cache_dtype
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -112,7 +113,8 @@ class OpenVinoPlatform(Platform):
     dist_backend: str = "gloo"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, attn_selector_config) -> str:
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config,
+                             num_heads: int | None = None) -> str:
         logger.info("[OV-PLATFORM] Using OpenVINO Attention backend.")
         return "vllm_openvino.attention.backends.openvino.OpenVINOAttentionBackend"
 
@@ -220,13 +222,16 @@ class OpenVinoPlatform(Platform):
             logger.info(
                 "[OV-PLATFORM] KV cache type is overridden to %s via "
                 "VLLM_OPENVINO_KV_CACHE_PRECISION env var.", cache_dtype)
-            cache_config.cache_dtype = cache_dtype
         else:
             logger.info(
                 "[OV-PLATFORM] KV cache type is not specified via "
                 "VLLM_OPENVINO_KV_CACHE_PRECISION env var. "
                 "It will be determined automatically by a plugin")
-            cache_config.cache_dtype = "dynamic"
+        # cache_dtype must be a vLLM CacheDType literal (validated at engine
+        # init); the OpenVINO precision lives in openvino_kv_dtype and is
+        # resolved to the IR element type during load_model.
+        cache_config.openvino_kv_dtype = cache_dtype
+        cache_config.cache_dtype = canonical_vllm_cache_dtype(cache_dtype)
 
         target_block_size = CPU_BLOCK_SIZE if OpenVinoPlatform.is_openvino_cpu() else GPU_BLOCK_SIZE
         if cache_config.block_size != target_block_size:

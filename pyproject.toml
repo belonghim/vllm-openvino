@@ -20,8 +20,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "openvino >= 2026.3.0",
-    "vllm == 0.26.0",
+    "openvino >= 2026.4.0",
+    "vllm == 0.29.0",
 ]
 requires-python = ">=3.10"
 
