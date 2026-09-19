@@ -72,7 +72,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 |----------|-------------|---------|
 | `VLLM_OPENVINO_DEVICE` | Device selection: CPU, GPU, GPU.1, etc. | `CPU` |
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
-| `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: `u8`, `i8`, `f16`/`fp16`, `bf16`, `f32`/`fp32` (unset = auto-detected from model) | unset |
+| `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: `u8`, `i8`, `f16`/`fp16`, `bf16`, `f32`/`fp32` (unset = auto-detected from model). On PagedAttention paths only `u8`/`f16`/`bf16` are supported; `f32`/`i8` fall back to the default. | unset |
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `LATENCY` |
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = auto: cgroup CPU quota if constrained, else OpenVINO auto) | `0` |
 | `VLLM_OPENVINO_CPU_BIND_THREAD` | CPU only. Thread affinity: `CORE`, `NUMA`, `NONE` | unset |
@@ -173,7 +173,7 @@ Models without SDPA ops, or with `ReadValue`-based KV cache but no actual SSM/co
 - Internal KV cache managed by OpenVINO runtime
 - Automatic detection and configuration — no manual flags needed
 
-Opt-in concurrent batching via `VLLM_OPENVINO_STATEFUL_PA=1`: for non-sliding-window stateful models, the plugin applies a PagedAttention transformation at load time (`max_num_seqs` stays at its default 128). Verified on Qwen2.5-Coder-0.5B-in4-ov with near-linear throughput scaling under concurrency (8 concurrent requests: ~5.5x aggregate tok/s vs the stateful path) with a single-stream delta under ~6%. Sliding-window models (e.g. Gemma-4) are excluded from this path and stay sequential even with the flag set. Outputs can differ from the stateful path because the transformed model's KV cache parameters are pinned to u8 by OpenVINO at compile time; `VLLM_OPENVINO_KV_CACHE_PRECISION` does not apply to this path.
+Opt-in concurrent batching via `VLLM_OPENVINO_STATEFUL_PA=1`: for non-sliding-window stateful models, the plugin applies a PagedAttention transformation at load time (`max_num_seqs` stays at its default 128). Verified on Qwen2.5-Coder-0.5B-int4-ov with near-linear throughput scaling under concurrency (8 concurrent requests: ~5.5x aggregate tok/s vs the stateful path) with a single-stream delta under ~6%. Sliding-window models (e.g. Gemma-4) are excluded from this path and stay sequential even with the flag set. The transformed model's KV cache defaults to u8; `VLLM_OPENVINO_KV_CACHE_PRECISION` is honored on this path for `u8`/`f16`/`bf16` (`f32`/`i8` are unsupported by CPU PagedAttention and fall back to the default with a warning). Greedy output can differ from the stateful path — a property of the PagedAttention-transformed attention computation, not of cache precision (u8 and bf16 produced identical output in testing).
 
 ### Hybrid-PA (default for hybrid Mamba/attention models)
 

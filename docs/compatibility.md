@@ -27,11 +27,13 @@ Qwen2.5-Coder-int4-ov) can opt into the PagedAttention path with
 `VLLM_OPENVINO_STATEFUL_PA=1`: the PA transformation runs at load time and
 `max_num_seqs` keeps its default 128. Concurrency-8 aggregate throughput is
 ~5.5x the stateful path (single-stream -6%). Sliding-window models stay on
-the stateful path regardless of the flag. Outputs can differ from the
-stateful path because the transformed model's PagedAttention KV cache
-parameters are pinned to u8 at OpenVINO compile time (setting element types
-pre-compile or passing KV_CACHE_PRECISION as a compile property does not
-survive); `VLLM_OPENVINO_KV_CACHE_PRECISION` remains stateful-path-only.
+the stateful path regardless of the flag. On PA paths the KV cache defaults
+to u8; `VLLM_OPENVINO_KV_CACHE_PRECISION` selects `u8`/`f16`/`bf16` through
+the OpenVINO `KV_CACHE_PRECISION` compile property (`f32`/`i8` are rejected
+by CPU PagedAttention and fall back to the default with a warning). Greedy
+output can differ from the stateful path because the transformed attention
+computation differs; u8 and bf16 caches produced byte-identical output, so
+the difference is not cache precision.
 
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
 Qwen3.5 and LFM2.5. Set `VLLM_OPENVINO_HYBRID_PA=0` to force the stateful path.

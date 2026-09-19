@@ -404,6 +404,7 @@ class OpenVINOCausalLM(nn.Module):
         ov_device_upper = ov_device.upper()
         perf_hint = {hints.performance_mode: hints.PerformanceMode.LATENCY} \
             if perf_mode == "LATENCY" else {hints.performance_mode: hints.PerformanceMode.THROUGHPUT}
+        paged_attention_kv_precision: ov.Type | None = None
 
         if ov_device_upper == "CPU":
             cpu_hint: dict[str, Any] = {}
@@ -466,9 +467,26 @@ class OpenVINOCausalLM(nn.Module):
                         "expected one of PCORE_ONLY/ECORE_ONLY/ANY_CORE; ignoring",
                         core_type)
 
+            kv_prec_key = (envs.VLLM_OPENVINO_KV_CACHE_PRECISION or "").lower()
+            if kv_prec_key and has_op_with_type(ov_model, "PagedAttentionExtension"):
+                paged_attention_kv_precision = {
+                    "u8": ov.Type.u8,
+                    "f16": ov.Type.f16,
+                    "bf16": ov.Type.bf16,
+                }.get(envs.KV_CACHE_PRECISION_MAP.get(kv_prec_key))
+                if paged_attention_kv_precision is None:
+                    logger.warning(
+                        "[OV-LOADER] VLLM_OPENVINO_KV_CACHE_PRECISION=%s is not "
+                        "supported by CPU PagedAttention (supported: u8, f16, "
+                        "bf16); using the model default precision instead.",
+                        kv_prec_key)
+
             perf_hint = {**perf_hint, **cpu_hint}
 
-        ov_compiled = ov_core.compile_model(ov_model, ov_device, perf_hint)
+        main_hint: dict[str, Any] = dict(perf_hint)
+        if paged_attention_kv_precision is not None:
+            main_hint["KV_CACHE_PRECISION"] = paged_attention_kv_precision
+        ov_compiled = ov_core.compile_model(ov_model, ov_device, main_hint)
         self.ov_compiled = ov_compiled
         self.ov_request = ov_compiled.create_infer_request()
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
