@@ -22,6 +22,17 @@ The plugin selects a path from the model IR:
 | `ReadValue` with `ssm`/`conv` variable IDs | Hybrid-PA | External attention/state cache and concurrent batching |
 | Other stateful models | Stateful | OpenVINO internal state and `max_num_seqs=1` |
 
+Stateful plain-attention models (optimum-intel default exports, e.g.
+Qwen2.5-Coder-int4-ov) can opt into the PagedAttention path with
+`VLLM_OPENVINO_STATEFUL_PA=1`: the PA transformation runs at load time and
+`max_num_seqs` keeps its default 128. Concurrency-8 aggregate throughput is
+~5.5x the stateful path (single-stream -6%). Sliding-window models stay on
+the stateful path regardless of the flag. Outputs can differ from the
+stateful path because the transformed model's PagedAttention KV cache
+parameters are pinned to u8 at OpenVINO compile time (setting element types
+pre-compile or passing KV_CACHE_PRECISION as a compile property does not
+survive); `VLLM_OPENVINO_KV_CACHE_PRECISION` remains stateful-path-only.
+
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
 Qwen3.5 and LFM2.5. Set `VLLM_OPENVINO_HYBRID_PA=0` to force the stateful path.
 Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV

@@ -82,6 +82,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (lambda v: None if v in ("", "auto") else v == "true")(
         os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower()),
 
+    # Opt-in PagedAttention transformation for plain-attention stateful
+    # models (ReadValue-based KV cache, e.g. optimum-intel default exports
+    # like Qwen2.5-Coder-int4-ov). Enables concurrent request batching
+    # (max_num_seqs > 1). Default 0 keeps the sequential stateful path.
+    "VLLM_OPENVINO_STATEFUL_PA":
+    lambda: os.getenv("VLLM_OPENVINO_STATEFUL_PA", "0") == "1",
+
     # Default path for hybrid Mamba/attention models (Qwen3.5, LFM2.5):
     # attempt PagedAttention transformation instead of the sequential
     # stateful path, enabling concurrent request batching (max_num_seqs > 1).

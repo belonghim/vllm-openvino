@@ -7,7 +7,7 @@ from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
 
 import vllm_openvino.envs as envs
-from vllm_openvino.utils import canonical_vllm_cache_dtype
+from vllm_openvino.utils import canonical_vllm_cache_dtype, has_sliding_window
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -69,6 +69,26 @@ def _is_stateful_model(model_path: str) -> bool:
 
 
 _VARIABLE_ID_RE = re.compile(rb'variable_id="([^"]*)"')
+
+
+def _is_stateful_pa_candidate(model_path: str) -> bool:
+    """Plain-attention stateful model eligible for PA transformation.
+
+    Requires SDPA ops (transform is a no-op otherwise and would leave a
+    multi-request scheduler on the single-request-only stateful path).
+    Sliding-window exclusion happens later in the loader via hf_config.
+    """
+    ir_path = _find_model_ir_path(model_path)
+    if ir_path is None:
+        return False
+    try:
+        with open(ir_path, 'rb') as f:
+            data = f.read()
+        return b'ScaledDotProductAttention' in data
+    except (IOError, OSError) as e:
+        logger.warning("_is_stateful_pa_candidate: could not read %s: %s",
+                       ir_path, e)
+        return False
 
 
 def _is_hybrid_pa_candidate(model_path: str) -> bool:
@@ -198,6 +218,16 @@ class OpenVinoPlatform(Platform):
                         "attempting Hybrid-PA transformation, keeping "
                         "max_num_seqs=%d. Set VLLM_OPENVINO_HYBRID_PA=0 to "
                         "force the sequential stateful path instead.",
+                        scheduler_config.max_num_seqs)
+                elif (envs.VLLM_OPENVINO_STATEFUL_PA
+                        and _is_stateful_pa_candidate(model_config.model)
+                        and not has_sliding_window(model_config)):
+                    logger.info(
+                        "[OV-PLATFORM] VLLM_OPENVINO_STATEFUL_PA=1: "
+                        "attempting PagedAttention transformation for "
+                        "stateful model, keeping max_num_seqs=%d. "
+                        "Set VLLM_OPENVINO_STATEFUL_PA=0 to force the "
+                        "sequential stateful path instead.",
                         scheduler_config.max_num_seqs)
                 else:
                     logger.warning(

@@ -32,6 +32,7 @@ from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunner
 from vllm_openvino.kv_cache import OpenVINOCacheEngine
 from vllm_openvino.utils import (
     canonical_vllm_cache_dtype,
+    has_sliding_window,
     determine_num_available_blocks,
     get_max_allocatable_memory_gpu,
     format_memory_size,
@@ -220,6 +221,8 @@ class OpenVINOWorkerV1(WorkerBase):
 
             if ssm_cache_config or conv_cache_config:
                 self._preloaded_model_type = HYBRID_MAMBA
+            elif envs.VLLM_OPENVINO_STATEFUL_PA and not has_sliding_window(self.model_config):
+                self._preloaded_model_type = ATTENTION_ONLY
             elif key_cache_config or value_cache_config or has_unknown_readvalue:
                 self._preloaded_model_type = STATEFUL
             else:
@@ -826,6 +829,7 @@ class OpenVINOWorkerV1(WorkerBase):
     def _is_hybrid_pa_model(self) -> bool:
         model = getattr(self.model_runner, 'model', None)
         return getattr(model, '_has_linear_attention_inputs', False)
+
 
     def _conv_reservation_bytes(self) -> int:
         if not self.conv_cache_config and not self.ssm_cache_config:

@@ -81,6 +81,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_INFERENCE_PRECISION` | CPU only. Force inference precision: `f32`, `f16`, `bf16` (unset = OpenVINO default) | unset |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true`, `false`, or `auto` | `auto` |
 | `VLLM_OPENVINO_HYBRID_PA` | Default path for hybrid Mamba/attention models: attempt PagedAttention (concurrent batching) instead of the sequential stateful path. Set to `0` to force the sequential stateful path instead. See [Serving Modes](#serving-modes). | `1` |
+| `VLLM_OPENVINO_STATEFUL_PA` | Opt-in PagedAttention transformation for plain-attention stateful models (optimum-intel default exports), enabling concurrent batching. Sliding-window models are excluded. See [Serving Modes](#serving-modes). | `0` |
 | `VLLM_OPENVINO_CACHE_DIR` | Directory for OpenVINO's compiled-model disk cache. When set, skips recompiling the model on process restart if a matching cached blob exists. Unset by default since not every deployment has a writable, persistent path. | unset |
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | CPU only. Scheduling core type on hybrid P-core/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
@@ -160,17 +161,19 @@ The plugin supports three serving paths depending on the model architecture:
 
 ### PagedAttention (default)
 
-Models with `ScaledDotProductAttention` ops and no state (e.g., Llama 3, Qwen2.5) are transformed to use vLLM's PagedAttention mechanism. This enables:
+Models with `ScaledDotProductAttention` ops and no state are transformed to use vLLM's PagedAttention mechanism. This enables:
 - Concurrent request batching
 - External KV cache management
 - Full vLLM scheduler features
 
 ### Stateful Path (default for pure-stateful models)
 
-Models without SDPA ops, or with `ReadValue` state but no actual SSM/conv state (Gemma-4), run via OpenVINO's internal state management (`ReadValue`/`Assign`) by default. Characteristics:
+Models without SDPA ops, or with `ReadValue`-based KV cache but no actual SSM/conv state (Gemma-4, and optimum-intel's default stateful exports such as Qwen2.5-Coder-int4-ov), run via OpenVINO's internal state management (`ReadValue`/`Assign`) by default. Characteristics:
 - Sequential request processing (`max_num_seqs=1`)
 - Internal KV cache managed by OpenVINO runtime
 - Automatic detection and configuration — no manual flags needed
+
+Opt-in concurrent batching via `VLLM_OPENVINO_STATEFUL_PA=1`: for non-sliding-window stateful models, the plugin applies a PagedAttention transformation at load time (`max_num_seqs` stays at its default 128). Verified on Qwen2.5-Coder-0.5B-in4-ov with near-linear throughput scaling under concurrency (8 concurrent requests: ~5.5x aggregate tok/s vs the stateful path) with a single-stream delta under ~6%. Sliding-window models (e.g. Gemma-4) are excluded from this path and stay sequential even with the flag set. Outputs can differ from the stateful path because the transformed model's KV cache parameters are pinned to u8 by OpenVINO at compile time; `VLLM_OPENVINO_KV_CACHE_PRECISION` does not apply to this path.
 
 ### Hybrid-PA (default for hybrid Mamba/attention models)
 

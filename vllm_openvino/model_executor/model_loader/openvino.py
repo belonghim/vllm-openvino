@@ -25,6 +25,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler as SamplerV1
 
 import vllm_openvino.envs as envs
+from vllm_openvino.utils import has_sliding_window
 
 logger = init_logger(__name__)
 
@@ -364,6 +365,21 @@ class OpenVINOCausalLM(nn.Module):
             self.model_type = preloaded_model_type if preloaded_model_type is not None else detected_type
             self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
+        if self.model_type == STATEFUL and envs.VLLM_OPENVINO_STATEFUL_PA:
+            sliding = has_sliding_window(self.model_config)
+            if sliding:
+                logger.info(
+                    "[OV-LOADER] Sliding-window stateful model keeps the "
+                    "sequential stateful path even with "
+                    "VLLM_OPENVINO_STATEFUL_PA=1.")
+            elif not _has_sdpa_ops(ov_model):
+                raise ValueError(
+                    "VLLM_OPENVINO_STATEFUL_PA=1 requires ScaledDotProduct"
+                    "Attention ops, but this stateful model has none. "
+                    "Unset the env var or keep max_num_seqs=1.")
+            else:
+                self.model_type = ATTENTION_ONLY
+
         apply_selective_paged_attention_transformation(ov_model, self.model_type)
         if has_op_with_type(ov_model, "PagedAttentionExtension"):
             apply_gather_before_matmul_transformation(ov_model)
@@ -476,7 +492,8 @@ class OpenVINOCausalLM(nn.Module):
         if self._has_kv_cache_inputs:
             known_names = {"input_ids", "inputs_embeds", "max_context_len",
                            "past_lens", "subsequence_begins", "block_indices",
-                           "block_indices_begins", "sampled_tokens_indices"}
+                           "block_indices_begins", "sampled_tokens_indices",
+                           "token_type_ids"}
             known_prefixes = ("key_cache.", "value_cache.",
                                "conv_state_table.", "gated_delta_state_table.",
                                "la.")
@@ -986,6 +1003,8 @@ class PAInputBuilder(OpenVINOInputBuilder):
     def __init__(self, model: "OpenVINOCausalLM") -> None:
         self.model = model
         self._use_grouped: bool | None = None
+        self._max_ctx_ov: "ov.Tensor | bool | None" = None
+        self._max_ctx_buf: np.ndarray | None = None
         if model.use_text_embeddings_model:
             self._token_type_ids_buf = np.zeros(
                 (1, model.model_config.max_model_len), dtype=np.int64)
@@ -1004,8 +1023,14 @@ class PAInputBuilder(OpenVINOInputBuilder):
         pixel_position_ids: torch.Tensor | None = None,
         image_grid_thw: torch.Tensor | None = None,
         num_requests: int | None = None,
-    ) -> list:
-        """Build list-based inputs for a PA-transformed model inference request."""
+    ) -> list | dict:
+        """Build inputs for a PA-transformed OpenVINO model inference request.
+
+        Compiled-model parameter order differs across IR producers
+        (optimum-intel stateful exports reordered vs. original ATTENTION_ONLY
+        exports), so single-group models are fed by input name instead of by
+        position.
+        """
         model = self.model
         state_tensors = model._get_flat_kv_caches_template(kv_caches)
 
@@ -1018,45 +1043,94 @@ class PAInputBuilder(OpenVINOInputBuilder):
                 block_indices_groups is not None
                 and block_indices_begins_groups is not None
                 and len(block_indices_groups) == len(block_indices_begins_groups)
+                and len(block_indices_groups) > 1
             )
 
-        if model.use_text_embeddings_model:
-            inputs_embeds_2d = model._prepare_embeddings(
-                input_ids, pixel_values, image_position_ids, pixel_position_ids,
-                image_grid_thw)
-            seq_len_ids = input_ids.shape[0]
-            token_type_ids = (self._token_type_ids_buf[:, :seq_len_ids]
-                              if seq_len_ids <= self._token_type_ids_buf.shape[1]
-                              else np.zeros((1, seq_len_ids), dtype=np.int64))
-            inputs = [
-                positions,
-                token_type_ids,
-                inputs_embeds_2d,
-                *state_tensors,
-                attn_metadata.past_lens,
-                attn_metadata.subsequence_begins,
-            ]
-        else:
-            inputs = [
-                input_ids,
-                positions,
-                *state_tensors,
-                attn_metadata.past_lens,
-                attn_metadata.subsequence_begins,
-            ]
-
         if self._use_grouped:
+            # Multi-group block tables have an undocumented per-group naming
+            # convention; keep the verified positional order for them.
+            if model.use_text_embeddings_model:
+                inputs_embeds_2d = model._prepare_embeddings(
+                    input_ids, pixel_values, image_position_ids, pixel_position_ids,
+                    image_grid_thw)
+                seq_len_ids = input_ids.shape[0]
+                token_type_ids = (self._token_type_ids_buf[:, :seq_len_ids]
+                                  if seq_len_ids <= self._token_type_ids_buf.shape[1]
+                                  else np.zeros((1, seq_len_ids), dtype=np.int64))
+                inputs = [
+                    positions,
+                    token_type_ids,
+                    inputs_embeds_2d,
+                    *state_tensors,
+                ]
+            else:
+                inputs = [
+                    input_ids,
+                    positions,
+                    *state_tensors,
+                ]
+            inputs.append(attn_metadata.past_lens)
+            inputs.append(attn_metadata.subsequence_begins)
             for bi, bib in zip(attn_metadata.block_indices_groups,
                                attn_metadata.block_indices_begins_groups):
                 inputs.append(bi)
                 inputs.append(bib)
-        else:
-            inputs.append(attn_metadata.block_indices)
-            inputs.append(attn_metadata.block_indices_begins)
+            inputs.append(attn_metadata.max_context_len)
+            inputs.append(attn_metadata.sampled_token_indices)
+            return inputs
 
-        inputs.append(attn_metadata.max_context_len)
-        inputs.append(attn_metadata.sampled_token_indices)
-        return inputs
+        named: dict[str, object] = {}
+        if model.use_text_embeddings_model:
+            named["inputs_embeds"] = model._prepare_embeddings(
+                input_ids, pixel_values, image_position_ids, pixel_position_ids,
+                image_grid_thw)
+            seq_len_ids = input_ids.shape[0]
+            named["token_type_ids"] = (
+                self._token_type_ids_buf[:, :seq_len_ids]
+                if seq_len_ids <= self._token_type_ids_buf.shape[1]
+                else np.zeros((1, seq_len_ids), dtype=np.int64))
+        else:
+            named["input_ids"] = input_ids
+        if model._position_input_name is not None:
+            named[model._position_input_name] = positions
+        named["past_lens"] = attn_metadata.past_lens
+        named["subsequence_begins"] = attn_metadata.subsequence_begins
+        named["block_indices"] = attn_metadata.block_indices
+        named["block_indices_begins"] = attn_metadata.block_indices_begins
+        named["max_context_len"] = self._resolve_max_context_len(attn_metadata)
+        named["sampled_tokens_indices"] = attn_metadata.sampled_token_indices
+        for i, (key_cache, value_cache) in enumerate(kv_caches):
+            named[f"key_cache.{i}"] = key_cache
+            named[f"value_cache.{i}"] = value_cache
+        return named
+
+    def _resolve_max_context_len(
+        self,
+        attn_metadata: "OpenVINOAttentionMetadata",
+    ) -> ov.Tensor:
+        """Match max_context_len scalar rank (0-dim vs [1] shape) once.
+
+        optimum-intel stateful exports turn into a scalar max_context_len
+        parameter during PA transformation, while vLLM-side metadata carries
+        a shape-[1] tensor; feeding it by name would fail the static shape
+        check. Cache an in-place-updated shared-memory scalar for this case.
+        """
+        if self._max_ctx_ov is None:
+            shp = None
+            for inp in self.model.ov_compiled.inputs:
+                if inp.get_any_name() == "max_context_len":
+                    shp = inp.get_partial_shape()
+                    break
+            if shp is not None and shp.rank.get_length() == 0:
+                self._max_ctx_buf = np.zeros((), dtype=np.int32)
+                self._max_ctx_ov = ov.Tensor(
+                    self._max_ctx_buf, shared_memory=True)
+            else:
+                self._max_ctx_ov = False
+        if self._max_ctx_ov is False:
+            return attn_metadata.max_context_len
+        self._max_ctx_buf[()] = attn_metadata.max_context_len.data[0]
+        return self._max_ctx_ov
 
 
 class HybridPAInputBuilder(OpenVINOInputBuilder):

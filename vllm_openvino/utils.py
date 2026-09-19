@@ -93,3 +93,15 @@ def ov_cache_dtype(cache_config) -> str:
             "sets it at config time (check_and_update_config); ensure the "
             "OpenVINO platform plugin is active.")
     return cache_config.openvino_kv_dtype or "fp16"
+
+
+def has_sliding_window(model_config) -> bool:
+    for cfg in (model_config,
+                getattr(model_config, "hf_config", None),
+                getattr(getattr(model_config, "hf_config", None), "text_config", None)):
+        if cfg is None:
+            continue
+        window = getattr(cfg, "sliding_window", None)
+        if window is not None and window != 0:
+            return True
+    return False
