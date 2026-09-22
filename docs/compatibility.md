@@ -6,7 +6,7 @@
 - OpenVINO `>= 2026.4.0`
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
-- Single socket only; tensor and pipeline parallelism are unsupported
+- Tensor and pipeline parallelism are unsupported; multi-socket scaling is poor (see CPU Tuning in README)
 - vLLM V1 engine only
 
 Set `TORCH_COMPILE_DISABLE=1`. torch.compile/Inductor is incompatible with

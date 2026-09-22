@@ -128,6 +128,17 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 
 `PERFORMANCE_MODE` measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY (and +28% single-stream on the stateful path), at a higher first-token latency (25 ms → 34 ms). Prefer `THROUGHPUT` for serving throughput, `LATENCY` for interactive first-token response.
 
+**Multi-socket placement**: OpenVINO binds threads to every core the process can see, including cores on a second socket. Measured on a 2-socket Xeon E5-2670 v3 (12 physical cores per socket) with Qwen3.5-0.8B-int4-ov, 90 s guidellm runs:
+
+| Threads | Sockets | Output tok/s, 2 streams | Output tok/s, 8 streams |
+|---------|---------|-------------------------|-------------------------|
+| 8 | node0 only | 14.7 | 22.7 |
+| 8 | node0 + node1 (4+4) | 13.0 (−12%) | 18.6 (−18%) |
+| 12 | node0 only | 18.5 | 27.6 |
+| 24 | node0 + node1 (12+12) | 18.7 (+1%) | 30.0 (+9%) |
+
+Splitting a fixed thread budget across sockets costs 12–18% because the threads on the far socket read the weights over the interconnect, and doubling the thread count across both sockets buys at most ~9% and only under load. `MPOL_INTERLEAVE` across both nodes (`numactl --interleave=all` or the equivalent `set_mempolicy` syscall) does not close the gap — 29.7 vs 30.0 tok/s on the same 24-thread dual-socket run — so the bottleneck is memory bandwidth, not weight locality. Keep inference threads inside one socket by binding the process to that socket's CPU set and setting `VLLM_OPENVINO_CPU_THREADS_NUM` to its core count.
+
 Example (latency-optimized for AVX2, 2-socket Xeon):
 
 ```bash
@@ -157,6 +168,8 @@ To measure throughput/latency improvements, use the provided benchmark script:
 ```
 
 The script runs a warmed-up benchmark against the local OpenAI-compatible endpoint and reports tokens/sec.
+
+`./scripts/socket-experiment.sh <model_name> [seconds]` runs the same guidellm workload against containers bound to different CPU sets (single socket vs split across sockets) and prints the comparison behind the multi-socket numbers above.
 
 ## Serving Modes
 
@@ -195,7 +208,7 @@ The following vLLM features are compatible with the OpenVINO backend:
 - LoRA serving is not supported.
 - Pin memory is not supported.
 - Structured outputs are not supported.
-- Single socket only; tensor/pipeline parallelism is not supported.
+- Tensor/pipeline parallelism is not supported. Threads are scheduled across all visible cores, but multi-socket scaling is poor; see [CPU Tuning](#cpu-tuning-avx2).
 - vLLM V1 engine only.
 - Stateful-path models (e.g. Gemma-4) do not support concurrent request execution (`max_num_seqs=1`).
 

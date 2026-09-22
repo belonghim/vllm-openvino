@@ -70,11 +70,11 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **`TORCH_COMPILE_DISABLE=1` 필수** — torch.compile/Inductor가 OpenVINO와 비호환
 - **bf16 → float32 변환** — `_as_numpy_no_copy()`에서 torch bfloat16을 numpy float32로 캐스팅. OpenVINO는 bf16 numpy 미지원
 - **KV 캐시 `.fill(0)` 복원 금지** — `_allocate_kv_cache()`에 `.fill(0)` 없는 것이 정상(의도된 최적화). 추가하면 OOM 유발. SSM/conv 캐시(`_allocate_state_cache()`)에는 `.fill(0)` 유지됨
-- **Pin memory 미지원** / **LoRA 미지원** / **단일 소켓만 지원**
+- **Pin memory 미지원** / **LoRA 미지원** / **TP·PP 미지원** — 멀티소켓은 OpenVINO가 자동으로 스레드를 배치하지만 이득이 작다: 고부하(8 streams)에서 코어 2배에 +9%, 저부하(2 streams)에서 +1%. 스레드 예산을 소켓에 분산하면 -12~-18% 손해
 - **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 import 시점에 raise하지 말 것. vLLM 플러그인 디스커버리 메커니즘 때문
 - **서빙 경로** — `ReadValue`가 없는 attention-only 모델은 PagedAttention을 사용한다. `ssm`/`conv` 상태가 있는 hybrid 모델(Qwen3.5, LFM2.5)은 Hybrid-PA를 기본 사용하며 `VLLM_OPENVINO_HYBRID_PA=0`으로 stateful 경로를 강제할 수 있다. 그 외 stateful 모델(Gemma-4)은 OpenVINO 내부 KV cache를 사용하고 `max_num_seqs=1`로 동작한다.
 - **Hybrid-PA 후보 판정** — 단순한 `ReadValue`+SDPA 조합이 아니라 IR `variable_id`의 `ssm`/`conv` 상태를 확인한다. Gemma-4의 sliding-window attention은 Hybrid-PA 대상이 아니다.
-- **CPU 스레드 자동감지** — `VLLM_OPENVINO_CPU_THREADS_NUM=0`이면 cgroup CPU quota를 고려해 OpenVINO 스레드 수를 제한한다. 명시적인 환경변수 설정이 우선한다.
+- **CPU 스레드 자동감지** — `VLLM_OPENVINO_CPU_THREADS_NUM=0`이면 cgroup CPU quota를 고려해 OpenVINO 스레드 수를 제한한다. 명시적인 환경변수 설정이 우선한다. 멀티소켓 호스트에서는 프로세스를 소켓별 cpuset에 바인딩하고 스레드 수를 그 소켓의 코어 수로 맞추는 편이 효율적이다.
 - **Gather-before-matmul 변환** — PA-transformed 모델에만 적용한다. stateful 모델에는 적용하지 않는다.
 - **SSM/conv cache** — stateful 경로는 OpenVINO가 내부 상태를 관리하므로 외부 SSM/conv cache를 할당하지 않는다. Hybrid-PA는 스케줄러 블록과 별도의 물리 slot pool을 사용한다.
 - **모델 포맷 필수** — HuggingFace 원본 모델은 직접 로딩하지 않으며 OpenVINO IR로 사전 변환해야 한다. 주요 파일명:
