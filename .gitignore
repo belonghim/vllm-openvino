@@ -17,5 +17,6 @@ build/
 .git/
 scripts/smoke-test-results.json
 scripts/guidellm-results/
+scripts/socket-experiment/
 scripts/*.log
 startup.log
