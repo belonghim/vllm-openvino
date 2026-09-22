@@ -9,7 +9,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 API_URL="http://localhost:8080"
 CONTAINER_NAME="vllm-guidellm"
 IMAGE="quay.io/joopark/vllm-openvino"
-MODEL_BASE="/home/user/hf/OpenVINO"
+MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
 MODELS=(
   "LFM2.5-8B-A1B-int4-ov"
@@ -17,10 +17,10 @@ MODELS=(
   "gemma-4-E2B-it-int4-ov"
 )
 
-GUIDELLM_PROFILE="concurrent"
-GUIDELLM_RATE="2"
-GUIDELLM_MAX_SECONDS="180"
-GUIDELLM_DATA="prompt_tokens=64,output_tokens=64"
+GUIDELLM_STREAMS="${GUIDELLM_STREAMS:-2}"
+GUIDELLM_MAX_SECONDS="${GUIDELLM_MAX_SECONDS:-180}"
+GUIDELLM_PROMPT_TOKENS="${GUIDELLM_PROMPT_TOKENS:-64}"
+GUIDELLM_OUTPUT_TOKENS="${GUIDELLM_OUTPUT_TOKENS:-64}"
 
 cleanup_container() {
   podman stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -72,14 +72,13 @@ run_model() {
 
   podman run --rm \
     --network host \
-    -e GUIDELLM_TARGET="$API_URL" \
-    -e GUIDELLM_MODEL="$hf_model_id" \
-    -e GUIDELLM_PROFILE="$GUIDELLM_PROFILE" \
-    -e GUIDELLM_RATE="$GUIDELLM_RATE" \
-    -e GUIDELLM_MAX_SECONDS="$GUIDELLM_MAX_SECONDS" \
-    -e GUIDELLM_DATA="$GUIDELLM_DATA" \
     -e HF_TOKEN="${HF_TOKEN:-}" \
-    ghcr.io/vllm-project/guidellm:latest \
+    ghcr.io/vllm-project/guidellm:latest run \
+    --backend "kind=openai_http,target=${API_URL},model=${hf_model_id}" \
+    --profile "kind=concurrent,streams=${GUIDELLM_STREAMS}" \
+    --constraint "kind=max_duration,seconds=${GUIDELLM_MAX_SECONDS}" \
+    --data "kind=synthetic_text,prompt_tokens=${GUIDELLM_PROMPT_TOKENS},output_tokens=${GUIDELLM_OUTPUT_TOKENS}" \
+    --disable-console-interactive \
     2>&1 | tee "$result_file" || true
 
   echo "  Saved: $result_file"
@@ -91,8 +90,8 @@ main() {
   mkdir -p "$RESULTS_DIR"
 
   echo "=== guidellm Benchmark — $(date) ==="
-  echo "Profile : $GUIDELLM_PROFILE @ concurrency=${GUIDELLM_RATE}, ${GUIDELLM_MAX_SECONDS}s"
-  echo "Data    : $GUIDELLM_DATA"
+  echo "Profile : concurrent @ streams=${GUIDELLM_STREAMS}, ${GUIDELLM_MAX_SECONDS}s"
+  echo "Data    : prompt_tokens=${GUIDELLM_PROMPT_TOKENS}, output_tokens=${GUIDELLM_OUTPUT_TOKENS}"
   echo "Models  : ${#MODELS[@]}"
   echo "Results : $RESULTS_DIR"
 
