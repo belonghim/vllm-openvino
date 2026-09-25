@@ -155,6 +155,8 @@ vllm serve --model <model_id>
 
 On CPU, vLLM's default top-k/top-p sampling sorts the full logits vector every step. For large-vocab models (e.g. Gemma), this sort can cost more CPU time per step than the model's own OpenVINO inference call. `temperature=0` (greedy) skips the sort and all randomness entirely. To keep randomness but still skip the sort, set both `top_k=-1` and `top_p=1.0` explicitly — some models (e.g. Gemma) ship a `generation_config.json` with non-default top_k/top_p, so both must be overridden together.
 
+**Known optimization lead — in-graph TopK / sampling**: the LM-head matmul returns the full-vocabulary logits, which then cross into PyTorch and get sorted there. Pushing the top-k selection (and eventually the full sampler — temperature, top-p, multinomial) into the compiled OpenVINO graph so the graph emits only the top candidates (or sampled token IDs) would remove this per-step sort. `logprobs`, penalties, and logits processors still need the full vocabulary, so the graph must carry a dual output (topk plus original logits) and the sampler must route per request. Not implemented; the OpenVINO GenAI reference project takes this approach.
+
 ### Memory-Mapped Model Loading
 
 OpenVINO automatically memory-maps model weights, reducing RAM usage during model loading by mapping weights directly from disk rather than copying them into memory. No configuration is required.
