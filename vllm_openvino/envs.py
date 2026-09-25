@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
     VLLM_OPENVINO_PERFORMANCE_MODE: str = "THROUGHPUT"
     VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
-    VLLM_OPENVINO_NUM_STREAMS: str | int = "AUTO"
+    VLLM_OPENVINO_NUM_STREAMS: str | int = 1
     VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
@@ -53,10 +53,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_OPENVINO_CPU_THREADS_NUM", "0")),
 
     # Number of CPU inference streams.
-    # AUTO keeps OpenVINO heuristic. Numeric values force explicit streams.
+    # vLLM V1 issues a single blocking infer per step, so multiple streams
+    # fragment the thread budget without any concurrency to fill them.
+    # Keep this at 1 unless the plugin is modified for async inference.
+    # AUTO remains an accepted user-supplied value (OpenVINO heuristic).
     "VLLM_OPENVINO_NUM_STREAMS":
     lambda: (lambda v: int(v) if v.isdigit() else v.upper())(
-        os.getenv("VLLM_OPENVINO_NUM_STREAMS", "AUTO")),
+        os.getenv("VLLM_OPENVINO_NUM_STREAMS", "1")),
 
     # CPU-only: enable/disable hyperthreading. When disabled, uses 1 thread
     # per physical core instead of 2 (useful on oversubscription-prone systems).
