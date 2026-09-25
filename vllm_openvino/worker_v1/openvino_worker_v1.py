@@ -88,10 +88,20 @@ class OpenVINOWorkerV1(WorkerBase):
         self.ov_core = ov.Core()
         self.ov_core.set_property({ov_props.enable_mmap: True})
         cache_dir = envs.VLLM_OPENVINO_CACHE_DIR
+        if not cache_dir:
+            default_cache = Path.home() / ".cache" / "vllm-openvino"
+            try:
+                default_cache.mkdir(parents=True, exist_ok=True)
+                cache_dir = str(default_cache)
+            except OSError as e:
+                logger.info(
+                    "[OV-WORKER] Compiled model cache disabled: default path "
+                    "%s not writable (%s). Set VLLM_OPENVINO_CACHE_DIR to a "
+                    "writable path to enable caching.", default_cache, e)
+                cache_dir = None
         if cache_dir:
             self.ov_core.set_property({ov_props.cache_dir: cache_dir})
-            logger.info("[OV-WORKER] Compiled model cache enabled at %s",
-                       cache_dir)
+            logger.info("[OV-WORKER] Compiled model cache at %s", cache_dir)
         self.parallel_config.rank = rank
 
         if self.model_config.trust_remote_code:

@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
-    VLLM_OPENVINO_PERFORMANCE_MODE: str = "LATENCY"
+    VLLM_OPENVINO_PERFORMANCE_MODE: str = "THROUGHPUT"
     VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
     VLLM_OPENVINO_NUM_STREAMS: str | int = "AUTO"
     VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
@@ -45,7 +45,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO performance mode: LATENCY or THROUGHPUT
     # LATENCY is recommended for faster first-token response on CPU
     "VLLM_OPENVINO_PERFORMANCE_MODE":
-    lambda: os.getenv("VLLM_OPENVINO_PERFORMANCE_MODE", "LATENCY").upper(),
+    lambda: os.getenv("VLLM_OPENVINO_PERFORMANCE_MODE", "THROUGHPUT").upper(),
 
     # CPU-only: cap total inference threads used by OpenVINO CPU plugin
     # 0 means OpenVINO auto-selects threads

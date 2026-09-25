@@ -73,7 +73,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_DEVICE` | Device selection: CPU, GPU, GPU.1, etc. | `CPU` |
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GB (0 = auto: 4 GB on CPU) | `0` |
 | `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: `u8`, `i8`, `f16`/`fp16`, `bf16`, `f32`/`fp32` (unset = auto-detected from model). On PagedAttention paths only `u8`/`f16`/`bf16` are supported; `f32`/`i8` fall back to the default. | unset |
-| `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `LATENCY` |
+| `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `THROUGHPUT` |
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = auto: cgroup CPU quota if constrained, else OpenVINO auto) | `0` |
 | `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer | `AUTO` |
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true`, `false`, or `auto` | `auto` |
@@ -81,7 +81,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true`, `false`, or `auto` | `auto` |
 | `VLLM_OPENVINO_HYBRID_PA` | Default path for hybrid Mamba/attention models: attempt PagedAttention (concurrent batching) instead of the sequential stateful path. Set to `0` to force the sequential stateful path instead. See [Serving Modes](#serving-modes). | `1` |
 | `VLLM_OPENVINO_STATEFUL_PA` | PagedAttention transformation for plain-attention stateful models (optimum-intel default exports), enabling concurrent batching. Sliding-window models and models without SDPA ops fall back to the sequential stateful path. Set to `0` to force the sequential stateful path. See [Serving Modes](#serving-modes). | `1` |
-| `VLLM_OPENVINO_CACHE_DIR` | Directory for OpenVINO's compiled-model disk cache. When set, skips recompiling the model on process restart if a matching cached blob exists. Unset by default since not every deployment has a writable, persistent path. | unset |
+| `VLLM_OPENVINO_CACHE_DIR` | Directory for OpenVINO's compiled-model disk cache. Skips recompiling the model on process restart if a matching cached blob exists. When unset, the plugin uses `~/.cache/vllm-openvino` if it can be created, otherwise caching is disabled (an INFO log records which path is in use, if any). | auto |
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | CPU only. Scheduling core type on hybrid P-core/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
 | `TORCH_COMPILE_DISABLE` | Must be set to 1; `torch.compile` is incompatible with OpenVINO. | — |
 
@@ -126,7 +126,7 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 | `VLLM_OPENVINO_INFERENCE_PRECISION` | str | `f32`, `f16`, `bf16` (unset = OpenVINO default) | Forces specific precision for matmul operations |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | bool | `true`, `false`, `auto` | Controls thread-to-core pinning |
 
-`PERFORMANCE_MODE` measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY (and +28% single-stream on the stateful path), at a higher first-token latency (25 ms → 34 ms). Prefer `THROUGHPUT` for serving throughput, `LATENCY` for interactive first-token response.
+`PERFORMANCE_MODE` defaults to `THROUGHPUT` because vLLM is used for serving. Measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY (and +28% single-stream on the stateful path), at a higher first-token latency (25 ms → 34 ms). Set `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` for interactive first-token response instead.
 
 **Multi-socket placement**: OpenVINO binds threads to every core the process can see, including cores on a second socket. Measured on a 2-socket Xeon E5-2670 v3 (12 physical cores per socket) with Qwen3.5-0.8B-int4-ov, 90 s guidellm runs:
 
