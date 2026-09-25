@@ -75,7 +75,7 @@ Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported O
 | `VLLM_OPENVINO_KV_CACHE_PRECISION` | KV cache dtype: `u8`, `i8`, `f16`/`fp16`, `bf16`, `f32`/`fp32` (unset = auto-detected from model). On PagedAttention paths only `u8`/`f16`/`bf16` are supported; `f32`/`i8` fall back to the default. | unset |
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | Performance mode: LATENCY or THROUGHPUT | `THROUGHPUT` |
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | CPU only. Inference threads (`0` = auto: cgroup CPU quota if constrained, else OpenVINO auto) | `0` |
-| `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer | `AUTO` |
+| `VLLM_OPENVINO_NUM_STREAMS` | CPU only. Inference streams: `AUTO` or integer. vLLM V1 issues a single blocking `infer` per step, so extra streams fragment the thread budget without ever running concurrently — keep at `1` unless the plugin is modified for async inference. | `1` |
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | CPU only. Enable/disable hyperthreading: `true`, `false`, or `auto` | `auto` |
 | `VLLM_OPENVINO_INFERENCE_PRECISION` | CPU only. Force inference precision: `f32`, `f16`, `bf16` (unset = OpenVINO default) | unset |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true`, `false`, or `auto` | `auto` |
@@ -110,6 +110,8 @@ VLLM_OPENVINO_KV_CACHE_PRECISION=u8 \
   vllm serve --model <model_id>
 ```
 
+> **Warning**: on CPUs without AVX-512-BF16 (e.g. Xeon E5-2670 v3, Haswell), setting `VLLM_OPENVINO_KV_CACHE_PRECISION=bf16` fails engine startup with `executor_pa.cpp:2938: expect kvcache type f32, current: bf16`. Use `f16` or `u8` instead. Observed on this host during Phase-0 diagnosis.
+
 ### CPU Tuning (AVX2)
 
 On AVX2-only CPUs, int4 models usually show a larger throughput gap vs AVX-512/VNNI capable CPUs due to lower effective low-precision compute throughput. In practice, CPU scheduling knobs (threads, affinity, streams) are often the main software lever for improving throughput stability.
@@ -121,12 +123,14 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 | `VLLM_OPENVINO_CPU_THREADS_NUM` | int | `0` (auto), `1..N` | Caps OpenVINO CPU inference threads |
 
 **cgroup-aware auto-detection**: container runtimes (podman/docker `--cpus`, Kubernetes CPU limits) throttle via cgroup CFS quota, but `os.cpu_count()` inside the container still reports the host's full core count. With `VLLM_OPENVINO_CPU_THREADS_NUM=0` (default), the plugin detects the quota and caps both the OpenVINO inference threads and the Torch/OMP thread pools to it when the quota is tighter than the visible core count; an explicit `OMP_NUM_THREADS` is left untouched. On an 8-quota/24-visible-core host, a 32-request burst went from 4.5s wall / 35.6s CPU with 3.1s of CFS throttling to 3.6s wall / 26.6s CPU with none, and the engine process dropped from 147 to 126 threads (earlier OpenVINO-only measurement: 45s/~355% CPU uncapped vs 34s/~300% capped for a 4-request burst). Set `VLLM_OPENVINO_CPU_THREADS_NUM` explicitly to override this detection.
-| `VLLM_OPENVINO_NUM_STREAMS` | str/int | `AUTO`, `1..N` | Controls number of parallel CPU inference streams |
+| `VLLM_OPENVINO_NUM_STREAMS` | str/int | `AUTO`, `1..N` | Controls number of parallel CPU inference streams. Default `1`: vLLM V1 is serial (one blocking `infer` per step), so extra streams only fragment the thread budget |
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | bool | `true`, `false`, `auto` | Disabling prevents HT oversubscription on 2-socket systems |
 | `VLLM_OPENVINO_INFERENCE_PRECISION` | str | `f32`, `f16`, `bf16` (unset = OpenVINO default) | Forces specific precision for matmul operations |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | bool | `true`, `false`, `auto` | Controls thread-to-core pinning |
 
 `PERFORMANCE_MODE` defaults to `THROUGHPUT` because vLLM is used for serving. Measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY (and +28% single-stream on the stateful path), at a higher first-token latency (25 ms → 34 ms). Set `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` for interactive first-token response instead.
+
+Caveat: on this plugin, `NUM_STREAMS=AUTO` under `THROUGHPUT` fragments threads across streams that vLLM V1 never runs concurrently — the runner holds a single `create_infer_request` and issues a single blocking `infer` per step (`vllm_openvino/model_executor/model_loader/openvino.py:439,870`). Setting `NUM_STREAMS=1` explicitly measured a 3.56× throughput gain on Qwen3-1.7B-int4-ov at concurrency 8 (8.53 → 30.38 tok/s), which is why the default is now `1`.
 
 **Multi-socket placement**: OpenVINO binds threads to every core the process can see, including cores on a second socket. Measured on a 2-socket Xeon E5-2670 v3 (12 physical cores per socket) with Qwen3.5-0.8B-int4-ov, 90 s guidellm runs:
 
@@ -153,9 +157,9 @@ vllm serve --model <model_id>
 
 ### Sampling Parameters (large-vocab models)
 
-On CPU, vLLM's default top-k/top-p sampling sorts the full logits vector every step. For large-vocab models (e.g. Gemma), this sort can cost more CPU time per step than the model's own OpenVINO inference call. `temperature=0` (greedy) skips the sort and all randomness entirely. To keep randomness but still skip the sort, set both `top_k=-1` and `top_p=1.0` explicitly — some models (e.g. Gemma) ship a `generation_config.json` with non-default top_k/top_p, so both must be overridden together.
+On CPU, vLLM's default top-k/top-p sampling sorts the full logits vector every step. Phase-0 profiling on Qwen3-1.7B-int4-ov (vocab 151,936) put that sort at about 3% of per-step time, well below the model's own OpenVINO inference cost. `temperature=0` (greedy) skips the sort and all randomness entirely. To keep randomness but still skip the sort, set both `top_k=-1` and `top_p=1.0` explicitly — some models (e.g. Gemma) ship a `generation_config.json` with non-default top_k/top_p, so both must be overridden together.
 
-**Known optimization lead — in-graph TopK / sampling**: the LM-head matmul returns the full-vocabulary logits, which then cross into PyTorch and get sorted there. Pushing the top-k selection (and eventually the full sampler — temperature, top-p, multinomial) into the compiled OpenVINO graph so the graph emits only the top candidates (or sampled token IDs) would remove this per-step sort. `logprobs`, penalties, and logits processors still need the full vocabulary, so the graph must carry a dual output (topk plus original logits) and the sampler must route per request. Not implemented; the OpenVINO GenAI reference project takes this approach.
+**Measured result: in-graph TopK / sampling not pursued**: Phase-0 profiling on Qwen3-1.7B-int4-ov (vocab 151,936, PagedAttention path, concurrency 8 with top_k=50, top_p=0.9, temperature=0.7) found torch sort self-time of 1.83 s per 60 s window, about 3% of per-step time by three converging estimates (wall-time 3.05%, total-process-CPU 2.9%, per-step 3.0%). That caps the possible throughput gain at roughly 3%, which does not justify changing the compiled graph output contract to emit only top candidates. Sort cost grows only as V log V while inference cost grows faster with model size, so the ratio gets worse on bigger models too. OpenVINO GenAI is not a precedent here: it keeps full-vocabulary logits and samples host-side with a C++ min-heap TopKFilter plus host-side temperature, top-p, and multinomial.
 
 ### Memory-Mapped Model Loading
 
