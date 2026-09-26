@@ -385,6 +385,7 @@ class OpenVINOModelRunnerV1:
             all_pixel_position_ids = []
             all_image_grid_thw = []
             all_image_position_ids = []
+            all_mm_hashes = []
 
             mm_req_ids = [
                 req_id for req_id in self._mm_req_ids
@@ -416,6 +417,8 @@ class OpenVINOModelRunnerV1:
                     pos = mm_feature.mm_position
                     all_image_position_ids.append(
                         (pos.offset, pos.offset + pos.length))
+                    if mm_feature.identifier:
+                        all_mm_hashes.append(mm_feature.identifier)
 
             if all_pixel_values:
                 pixel_values = torch.stack(all_pixel_values)
@@ -440,6 +443,11 @@ class OpenVINOModelRunnerV1:
                 if image_position_ids.device != self.device:
                     image_position_ids = image_position_ids.to(self.device)
                 multi_modal_kwargs["image_position_ids"] = image_position_ids
+
+                if all_mm_hashes:
+                    # Single image per request is the only supported shape for
+                    # now; the cache key uniquely identifies that image.
+                    multi_modal_kwargs["mm_hash"] = all_mm_hashes[0]
 
         assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
 
