@@ -444,9 +444,15 @@ class OpenVINOModelRunnerV1:
                     image_position_ids = image_position_ids.to(self.device)
                 multi_modal_kwargs["image_position_ids"] = image_position_ids
 
-                if all_mm_hashes:
-                    # Single image per request is the only supported shape for
-                    # now; the cache key uniquely identifies that image.
+                if len(all_mm_hashes) == 1:
+                    # Only cache when the batch has exactly one mm_feature.
+                    # Multi-mm batches (concurrent VL requests, or a single
+                    # request with multiple images) would silently corrupt
+                    # the cache: vision_embeds_2d is a stacked concatenation
+                    # of all images, but stored under only the first hash,
+                    # so a later cache hit for that first hash would return
+                    # stale non-first-image patches for the non-first slots
+                    # in the new batch's scatter loop.
                     multi_modal_kwargs["mm_hash"] = all_mm_hashes[0]
 
         assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
