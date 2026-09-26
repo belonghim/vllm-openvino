@@ -748,11 +748,11 @@ class OpenVINOCausalLM(nn.Module):
                 vision_embeds_2d = self._vision_embed_cache.get(mm_hash)
                 if vision_embeds_2d is not None:
                     self._vision_embed_cache.move_to_end(mm_hash)
-                    logger.info(
+                    logger.debug(
                         "[OV-VISION] Cache hit for mm_hash=%s (%d tokens)",
                         mm_hash[:16], vision_embeds_2d.shape[0])
                 else:
-                    logger.info(
+                    logger.debug(
                         "[OV-VISION] Cache miss for mm_hash=%s; encoding",
                         mm_hash[:16])
 

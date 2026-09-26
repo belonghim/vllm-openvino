@@ -32,14 +32,19 @@ logger = init_logger(__name__)
 
 # MKL is ~2x faster than numpy PCG64 on the (batch, vocab) shapes this
 # plugin sees at decode, but the container image does not bundle it. Try
-# mkl_random first; fall back to numpy PCG64 when unavailable. mkl_random
-# requires the MKL shared libs (libmkl_rt.so.2) at runtime; if those are
-# missing the import raises ImportError, which we catch here.
+# mkl_random first; fall back to numpy PCG64 when unavailable.
+# mkl_random requires the MKL shared libs (libmkl_rt.so.2) at runtime; if
+# those are missing the import raises ImportError or OSError, which we
+# catch here along with any other init exception.
 try:
     from mkl_random import RandomState as _MKL_RNG
     _mkl_rng = _MKL_RNG()
     _HAS_MKL = True
-except ImportError:
+except Exception:
+    # Broader than ImportError: covers OSError from dlopen, RuntimeError
+    # from broken MKL runtime, etc. Uncatchable symbol-lookup aborts at
+    # import (mkl_random present but libmkl_rt/libiomp5 missing) still
+    # kill the process — that's a broken pip install, not our concern.
     _mkl_rng = None
     _HAS_MKL = False
 
