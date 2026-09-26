@@ -232,6 +232,12 @@ class OpenVinoPlatform(Platform):
         return False
 
     @classmethod
+    def supports_v2_model_runner(cls) -> bool:
+        # OpenVINO cannot install Triton (Inductor is incompatible). Opt out of
+        # the V2 model runner probe added by vllm-project/vllm#58703.
+        return False
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype) -> None:
         return None
 
