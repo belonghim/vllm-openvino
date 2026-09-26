@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_HYBRID_PA: bool = True
     VLLM_OPENVINO_CACHE_DIR: str | None = None
     VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
+    VLLM_OPENVINO_FAST_SAMPLER: bool = True
 
 KV_CACHE_PRECISION_MAP: dict[str, str] = {
     "u8": "u8", "i8": "i8",
@@ -109,6 +110,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OPENVINO_SCHEDULING_CORE_TYPE":
     lambda: (lambda v: v.upper() if v else None)(
         os.getenv("VLLM_OPENVINO_SCHEDULING_CORE_TYPE", None)),
+
+    # Replace vLLM V1's torch.exponential_() Gumbel-max noise draw in
+    # compiled_random_sample with a numpy PCG64 standard_exponential fill.
+    # Default 1 (enabled): ~4x faster on the (batch, vocab) shapes seen
+    # at decode; set to 0 to fall back to stock torch behavior. Only fires
+    # when at least one request in the batch has no per-request seed
+    # (upstream forward_cpu already routes fully-seeded batches through
+    # the per-generator torch path, which this patch does not touch).
+    # Caveat: swapping the RNG changes the token stream produced by a
+    # given user-supplied seed vs stock vLLM (per-repeat determinism is
+    # still preserved on the seeded path, which is unmodified).
+    "VLLM_OPENVINO_FAST_SAMPLER":
+    lambda: os.getenv("VLLM_OPENVINO_FAST_SAMPLER", "1") == "1",
 }
 
 # end-env-vars-definition

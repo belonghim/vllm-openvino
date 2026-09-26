@@ -252,6 +252,15 @@ class OpenVinoPlatform(Platform):
 
         _cap_torch_threads()
 
+        if envs.VLLM_OPENVINO_FAST_SAMPLER:
+            from vllm_openvino import sampler_patch
+            sampler_patch.install()
+        else:
+            logger.info(
+                "[OV-SAMPLER] VLLM_OPENVINO_FAST_SAMPLER=0: keeping stock "
+                "vllm.v1.sample.ops.topk_topp_sampler.compiled_random_sample "
+                "(torch.exponential_()).")
+
         parallel_config = vllm_config.parallel_config
         if parallel_config.world_size != 1:
             raise ValueError("OpenVINO only supports single CPU socket currently.")
