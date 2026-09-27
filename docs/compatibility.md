@@ -104,8 +104,9 @@ uses `pixel_values`.
   `STATEFUL_PA` transformation compiles successfully but crashes at first
   infer with `[CPU] Add ... Eltwise shape infer input shapes dim index: 0
   mismatch` inside a sliding-window layer's residual add (verified on
-  OpenVINO 2026.3.0). Because Gemma-4 has transformer KV state, Hybrid-PA
-  never applies either.
+  OpenVINO 2026.3.0 and 2026.4.0 — same error site
+  `node.cpp:794`/`eltwise.cpp:52`, no fix between the two releases).
+  Because Gemma-4 has transformer KV state, Hybrid-PA never applies either.
 - Stateful models do not support concurrent request execution.
 - Structured outputs, LoRA, pin memory, and multi-socket execution are not
   supported.
