@@ -12,6 +12,22 @@
 Set `TORCH_COMPILE_DISABLE=1`. torch.compile/Inductor is incompatible with
 the OpenVINO execution path.
 
+## Upstream vLLM Compatibility
+
+The plugin runs on vLLM's V1 model runner (MRV1). MRV2 requires Triton, which
+is uninstallable here because Inductor is incompatible with the OpenVINO
+runtime. vLLM 0.29.0 marks MRV1 deprecated with removal targeted for v0.32.
+
+Tracked upstream:
+
+- [vllm-project/vllm#57684](https://github.com/vllm-project/vllm/issues/57684) —
+  support-path policy question for platform plugins that ship their own
+  worker/model runner and cannot install Triton.
+- [vllm-project/vllm#58703](https://github.com/vllm-project/vllm/pull/58703) —
+  adds `Platform.supports_v2_model_runner`; the plugin overrides it to `False`
+  to opt out of the Triton probe (harmless no-op on vLLM builds without the
+  hook).
+
 ## Serving Paths
 
 The plugin selects a path from the model IR:
