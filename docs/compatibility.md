@@ -99,8 +99,13 @@ uses `pixel_values`.
 
 ## Known Limitations
 
-- Gemma-4 sliding-window attention is supported only on the stateful path;
-  Hybrid-PA transformation is not supported for it.
+- Gemma-4 sliding-window attention is supported only on the sequential
+  stateful path. Bypassing the `has_sliding_window` guard and forcing the
+  `STATEFUL_PA` transformation compiles successfully but crashes at first
+  infer with `[CPU] Add ... Eltwise shape infer input shapes dim index: 0
+  mismatch` inside a sliding-window layer's residual add (verified on
+  OpenVINO 2026.3.0). Because Gemma-4 has transformer KV state, Hybrid-PA
+  never applies either.
 - Stateful models do not support concurrent request execution.
 - Structured outputs, LoRA, pin memory, and multi-socket execution are not
   supported.
