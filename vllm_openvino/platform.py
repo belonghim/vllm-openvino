@@ -37,11 +37,16 @@ def _cap_torch_threads() -> None:
     limit, reason = cpu_thread_limit()
     if not limit:
         return
+    # torch.set_num_threads() is the cap that actually takes effect for this
+    # process — the OpenMP runtime is already initialized by `import torch`
+    # above and does not re-read OMP_NUM_THREADS. The env var is still set so
+    # it propagates to any subprocesses (e.g. HF tokenizers workers) and to
+    # OMP-linked libraries that lazy-init on first use.
     os.environ["OMP_NUM_THREADS"] = str(limit)
     if torch.get_num_threads() != limit:
         torch.set_num_threads(limit)
     logger.info(
-        "[OV-PLATFORM] Capping Torch/OMP threads to %d (%s) to avoid CPU "
+        "[OV-PLATFORM] Capping Torch threads to %d (%s) to avoid CPU "
         "oversubscription.", limit, reason)
 
 
