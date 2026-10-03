@@ -6,9 +6,15 @@ draws Gumbel-max noise via `torch.empty_like(probs).exponential_()`,
 which is a single-threaded scalar inverse-CDF loop on CPU. On the
 (batch, vocab) shapes this plugin sees at decode (e.g. (8, 65536) for
 LFM2.5-350M, (8, 151936) for Qwen3-1.7B), numpy PCG64's
-`standard_exponential(dtype=fp32)` fills the same buffer ~4x faster
+`standard_exponential()` fills the same buffer ~4x faster
 (see task-14 microbench). The rest of the Gumbel-max math
 (softmax -> div -> argmax) is unchanged.
+
+The noise is drawn in float64 and cast to float32. numpy's float32 draw has
+only 23 bits of resolution and returns exactly 0 with probability 2**-23 per
+element, i.e. ~3% of decode steps at a 248k vocab. A zero makes `probs / q`
+inf (or NaN where probs == 0), so argmax picks an arbitrary vocabulary token
+regardless of its probability and foreign-script tokens leak into the output.
 
 MKL acceleration: when `mkl_random` is importable (requires the MKL shared
 libs), the exponential draw uses `mkl_random.RandomState.standard_exponential`
@@ -53,11 +59,12 @@ _rng = np.random.default_rng()
 
 def openvino_random_sample(logits: torch.Tensor) -> torch.Tensor:
     probs = logits.softmax(dim=-1, dtype=torch.float32)
+    shape = tuple(probs.shape)
     if _HAS_MKL:
-        q_np = _mkl_rng.standard_exponential(size=tuple(probs.shape)).astype(np.float32)
+        q_np = _mkl_rng.standard_exponential(size=shape)
     else:
-        q_np = _rng.standard_exponential(size=tuple(probs.shape), dtype=np.float32)
-    q = torch.from_numpy(q_np)
+        q_np = _rng.standard_exponential(size=shape)
+    q = torch.from_numpy(q_np.astype(np.float32))
     return probs.div(q).argmax(dim=-1).view(-1)
 
 

@@ -254,7 +254,7 @@ class OpenVinoPlatform(Platform):
         if ov is None:
             raise ImportError(
                 "OpenVINO is required but not installed. "
-                "Install with: pip install openvino>=2026.3.0")
+                "Install with: pip install openvino>=2026.4.1")
 
         _cap_torch_threads()
 

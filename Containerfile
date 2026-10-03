@@ -6,7 +6,7 @@ RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN pip install -U pip setuptools wheel && \
     PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" \
-    pip install --no-cache-dir "torch==2.13.0+cpu" "torchvision==0.28.0+cpu" "openvino==2026.4.0" "transformers==5.17.0" "vllm==0.29.0" && \
+    pip install --no-cache-dir "torch==2.13.0+cpu" "torchvision==0.28.0+cpu" "openvino==2026.4.1" "transformers==5.17.0" "vllm==0.30.0" && \
     pip uninstall -y \
         triton \
         flashinfer-cubin flashinfer-python \

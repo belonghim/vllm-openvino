@@ -7,8 +7,8 @@ This is a single-developer open-source project. Contributions and feedback are w
 ### Prerequisites
 
 - Python >= 3.10
-- vLLM 0.29.0
-- OpenVINO >= 2026.4.0
+- vLLM 0.30.0
+- OpenVINO >= 2026.4.1
 - Linux x86-64 with AVX2+ support
 
 ### Installation from Source
@@ -167,7 +167,7 @@ See `docs/compatibility.md` for current runtime constraints and
 ### Import Errors
 
 If `import openvino` fails:
-- Verify OpenVINO >= 2026.4.0 is installed
+- Verify OpenVINO >= 2026.4.1 is installed
 - Try: `python3 -c "import openvino; print(openvino.__version__)"`
 
 ### Podman Build Failures
