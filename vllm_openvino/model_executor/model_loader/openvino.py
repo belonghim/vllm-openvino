@@ -112,11 +112,6 @@ def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, lis
     return model_type, {"ssm": ssm_shapes, "conv": conv_shapes}
 
 
-def detect_model_type(ov_model: ov.Model) -> str:
-    model_type, _ = detect_model_type_and_shapes(ov_model)
-    return model_type
-
-
 def _has_sdpa_ops(model: ov.Model) -> bool:
     """Check if model has ScaledDotProductAttention operations."""
     for op in model.get_ops():

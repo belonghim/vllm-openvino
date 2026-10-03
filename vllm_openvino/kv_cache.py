@@ -92,7 +92,7 @@ class OpenVINOCacheEngine:
         # Initialize SSM/conv state caches (for hybrid models like Mamba).
         # SSM states are managed internally by OpenVINO infer request; physical
         # slots only need to cover active sequences, not the full block budget.
-        ssm_blocks = num_ssm_blocks if num_ssm_blocks is not None else self.num_device_blocks
+        ssm_blocks = num_ssm_blocks if num_ssm_blocks is not None else 0
         self.ssm_cache: list[ov.Tensor] = self._allocate_ssm_cache(
             ssm_blocks, ov_core, ov_device)
         self.conv_cache: list[ov.Tensor] = self._allocate_conv_cache(
@@ -108,6 +108,12 @@ class OpenVINOCacheEngine:
         self._k_cache: list[ov.Tensor] = [tensor[0] for tensor in self.kv_cache]
         self._v_cache: list[ov.Tensor] = [tensor[1] for tensor in self.kv_cache]
 
+    def _make_cache_dims(self, num_blocks: int, pshape: "ov.PartialShape") -> list[int]:
+        return [
+            num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
+            for i, dim in enumerate(pshape)
+        ]
+
     def _allocate_kv_cache(
         self,
         num_blocks: int,
@@ -118,16 +124,10 @@ class OpenVINOCacheEngine:
         kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = []
 
         for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
-            key_dims = [
-                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
-                for i, dim in enumerate(key_cache_pshape)
-            ]
+            key_dims = self._make_cache_dims(num_blocks, key_cache_pshape)
             key_cache_shape = ov.PartialShape(key_dims).to_shape()
 
-            value_dims = [
-                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
-                for i, dim in enumerate(value_cache_pshape)
-            ]
+            value_dims = self._make_cache_dims(num_blocks, value_cache_pshape)
             value_cache_shape = ov.PartialShape(value_dims).to_shape()
 
             if current_platform.is_openvino_cpu():
@@ -210,14 +210,8 @@ class OpenVINOCacheEngine:
             raise RuntimeError("CPU device isn't supposed to have swap cache")
 
         for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
-            key_dims = [
-                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
-                for i, dim in enumerate(key_cache_pshape)
-            ]
-            value_dims = [
-                num_blocks if i == 0 else (dim.get_length() if dim.is_static else self.block_size)
-                for i, dim in enumerate(value_cache_pshape)
-            ]
+            key_dims = self._make_cache_dims(num_blocks, key_cache_pshape)
+            value_dims = self._make_cache_dims(num_blocks, value_cache_pshape)
             key_blocks = ov.Tensor(self.ov_cache_dtype, ov.PartialShape(key_dims).to_shape())
             value_blocks = ov.Tensor(self.ov_cache_dtype, ov.PartialShape(value_dims).to_shape())
             swap_cache.append((key_blocks, value_blocks))
