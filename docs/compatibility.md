@@ -45,11 +45,13 @@ by default (`VLLM_OPENVINO_STATEFUL_PA=1`): `max_num_seqs` keeps its default
 `VLLM_OPENVINO_KV_CACHE_PRECISION` selects `u8`/`f16`/`bf16` through the
 OpenVINO `KV_CACHE_PRECISION` compile property — `f32`/`i8` are rejected by
 CPU PagedAttention and fall back to the default with a warning). Validated
-on Qwen2.5-Coder-0.5B, Qwen3-1.7B and TinyLlama-1.1B (int4 IR):
-concurrency-8 aggregate throughput was 4.9-7.0x the stateful path,
-single-stream -1.2% to -7.8%. Sliding-window models (Gemma-4,
-Phi-3.5-mini) and stateful models without SDPA ops stay on the stateful
-path. Greedy output matched the stateful path on TinyLlama-1.1B and
+on Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B and Phi-3.5-mini (int4
+IR): concurrency-8 aggregate throughput was 4.9-7.0x the stateful path,
+single-stream -7.8% to +4%. A `sliding_window` at or above `max_model_len`
+(Phi-3.5-mini: 262144) never takes effect and does not block the
+transformation. Models with a smaller window or per-layer
+`sliding_attention` (Gemma-4) and stateful models without SDPA ops stay on
+the stateful path. Greedy output matched the stateful path on TinyLlama-1.1B and
 differed on Qwen-family models; u8 and bf16 caches produced
 byte-identical output, so the difference comes from the transformed
 attention computation, not cache precision. Set
@@ -120,8 +122,8 @@ uses `pixel_values`.
   `STATEFUL_PA` transformation compiles successfully but crashes at first
   infer with `[CPU] Add ... Eltwise shape infer input shapes dim index: 0
   mismatch` inside a sliding-window layer's residual add (verified on
-  OpenVINO 2026.3.0 and 2026.4.0 — same error site
-  `node.cpp:794`/`eltwise.cpp:52`, no fix between the two releases).
+  OpenVINO 2026.3.0, 2026.4.0 and 2026.4.1 — same error site
+  `node.cpp:794`/`eltwise.cpp:52`, no fix in any of the three releases).
   Because Gemma-4 has transformer KV state, Hybrid-PA never applies either.
 - Stateful models do not support concurrent request execution.
 - LoRA, pin memory, and multi-socket execution are not supported.
