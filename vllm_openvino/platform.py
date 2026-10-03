@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
 
@@ -249,6 +250,16 @@ class OpenVinoPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return ""
+
+    @classmethod
+    def validate_request(cls, processed_inputs, params) -> None:
+        # Logits are computed only at sampled positions (gather-before-matmul),
+        # so prompt logprobs would silently come back truncated.
+        if getattr(params, "prompt_logprobs", None) is not None:
+            raise VLLMValidationError(
+                "prompt_logprobs is not supported on the OpenVINO backend.",
+                parameter="prompt_logprobs",
+                value=params.prompt_logprobs)
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
