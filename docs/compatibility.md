@@ -127,3 +127,6 @@ uses `pixel_values`.
   Because Gemma-4 has transformer KV state, Hybrid-PA never applies either.
 - Stateful models do not support concurrent request execution.
 - LoRA, pin memory, and multi-socket execution are not supported.
+- `prompt_logprobs` is not supported: the gather-before-matmul transformation
+  computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
+  rejects such requests with HTTP 400. Output-token `logprobs` work.
