@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.multimodal import BatchedTensorInputs
+from vllm.sampling_params import SamplingType
 
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -247,15 +248,21 @@ class OpenVINOModelRunnerV1:
         # Add new requests
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
+            generator = None
+            if (sampling_params is not None
+                    and sampling_params.sampling_type == SamplingType.RANDOM_SEED):
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(sampling_params.seed)
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 prompt_embeds=getattr(new_req_data, 'prompt_embeds', None),
                 prompt_is_token_ids=getattr(new_req_data, 'prompt_is_token_ids', True),
                 mm_features=new_req_data.mm_features,
-                sampling_params=new_req_data.sampling_params,
+                sampling_params=sampling_params,
                 pooling_params=new_req_data.pooling_params,
-                generator=None,
+                generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],

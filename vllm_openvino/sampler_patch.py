@@ -6,9 +6,8 @@ draws Gumbel-max noise via `torch.empty_like(probs).exponential_()`,
 which is a single-threaded scalar inverse-CDF loop on CPU. On the
 (batch, vocab) shapes this plugin sees at decode (e.g. (8, 65536) for
 LFM2.5-350M, (8, 151936) for Qwen3-1.7B), numpy PCG64's
-`standard_exponential()` fills the same buffer ~4x faster
-(see task-14 microbench). The rest of the Gumbel-max math
-(softmax -> div -> argmax) is unchanged.
+`standard_exponential()` fills the same buffer ~4x faster. The rest of the
+Gumbel-max math (softmax -> div -> argmax) is unchanged.
 
 The noise is drawn in float64 and cast to float32. numpy's float32 draw has
 only 23 bits of resolution and returns exactly 0 with probability 2**-23 per
@@ -22,11 +21,10 @@ which is ~2x faster than numpy PCG64 on the shapes this plugin sees. The
 container image does not bundle MKL; users who install mkl + mkl-random +
 intel-openmp into their custom image get the faster path automatically.
 
-Determinism: the seeded-per-request path in `forward_cpu` uses
-`torch.Generator` on each row of `q` explicitly and is not routed
-through `compiled_random_sample`, so per-request seeds keep their
-stock torch semantics. This patch only affects the batches where at
-least one request has no seed (`len(generators) != batch_size`).
+Determinism: `forward_cpu` calls `compiled_random_sample` only when the
+batch has no per-request `torch.Generator`. A batch containing any seeded
+request takes the explicit per-generator path instead, so per-request
+seeds keep their stock torch semantics.
 """
 from __future__ import annotations
 

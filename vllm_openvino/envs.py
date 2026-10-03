@@ -115,12 +115,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # compiled_random_sample with a numpy PCG64 standard_exponential fill.
     # Default 1 (enabled): ~4x faster on the (batch, vocab) shapes seen
     # at decode; set to 0 to fall back to stock torch behavior. Only fires
-    # when at least one request in the batch has no per-request seed
-    # (upstream forward_cpu already routes fully-seeded batches through
-    # the per-generator torch path, which this patch does not touch).
-    # Caveat: swapping the RNG changes the token stream produced by a
-    # given user-supplied seed vs stock vLLM (per-repeat determinism is
-    # still preserved on the seeded path, which is unmodified).
+    # for batches in which no request carries a per-request seed (upstream
+    # forward_cpu routes any batch with a seeded request through the
+    # per-generator torch path, which this patch does not touch, so seeded
+    # requests keep stock torch.Generator semantics and stay reproducible).
     "VLLM_OPENVINO_FAST_SAMPLER":
     lambda: os.getenv("VLLM_OPENVINO_FAST_SAMPLER", "1") == "1",
 }
