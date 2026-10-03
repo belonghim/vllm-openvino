@@ -120,7 +120,6 @@ class OpenVINOWorkerV1(WorkerBase):
         self.cache_engine: OpenVINOCacheEngine
         self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]]
         self.num_swap_blocks = 0
-        self._pending_output: "ModelRunnerOutput | None" = None
 
         # Cache shape metadata (needed before determine_available_memory()).
         self.key_cache_config = []
@@ -459,12 +458,11 @@ class OpenVINOWorkerV1(WorkerBase):
                 for key_cache, value_cache in self.kv_cache:
                     key_cache.data[valid_ids] = 0
                     value_cache.data[valid_ids] = 0
-        self._pending_output = self.model_runner.execute_model(scheduler_output)
+        self.model_runner.execute_model(scheduler_output)
         return None
 
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
-        # Structured outputs not supported; sampling is done in execute_model.
-        return self._pending_output
+        return self.model_runner.sample_tokens(grammar_output)
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -607,6 +605,7 @@ class OpenVINOWorkerV1(WorkerBase):
             bind_kv_cache({}, self.compilation_config.static_forward_context, [])
             try:
                 self.model_runner.execute_model(scheduler_output)
+                self.model_runner.sample_tokens(None)
             finally:
                 bind_kv_cache({}, self.compilation_config.static_forward_context, [])
                 self.model_runner.kv_caches = prev_kv_caches

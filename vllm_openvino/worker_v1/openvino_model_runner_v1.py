@@ -13,6 +13,7 @@ from vllm.sampling_params import SamplingType
 
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.attention.backend import AttentionMetadata
 
@@ -47,6 +48,7 @@ class OpenVINOModelRunnerV1:
 
         # V1 state management
         self.requests: dict[str, CachedRequestState] = {}
+        self._execute_state: tuple[SchedulerOutput, torch.Tensor] | None = None
         self.num_cache_groups = 1
         self.input_batch = self._create_input_batch(self.num_cache_groups)
 
@@ -524,10 +526,7 @@ class OpenVINOModelRunnerV1:
         )
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> ModelRunnerOutput:
+    def execute_model(self, scheduler_output: SchedulerOutput) -> None:
         self._update_states(scheduler_output)
 
         self.input_batch.condense()
@@ -574,8 +573,17 @@ class OpenVINOModelRunnerV1:
             hidden_states = model_executable(**execute_model_kwargs)
 
         logits = self.model.compute_logits(hidden_states, None)
+        self._execute_state = (scheduler_output, logits)
 
-        # Sample the next token and get logprobs if needed.
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
+        scheduler_output, logits = self._execute_state
+        self._execute_state = None
+
+        if grammar_output is not None:
+            apply_grammar_bitmask(
+                scheduler_output, grammar_output, self.input_batch, logits)
+
         sampling_metadata = self.input_batch.sampling_metadata
 
         sampler_output = self.model.sample(

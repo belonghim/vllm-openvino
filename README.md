@@ -216,6 +216,7 @@ For hybrid Mamba/attention models (Qwen3.5, LFM2.5), this converts attention lay
 The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
+- Structured outputs (`structured_outputs`, `response_format`, forced tool calls) via the grammar bitmask
 - Gemma 3 and Gemma 4 text and multimodal (text + image)
 - Qwen3.5 and LFM2.5 (hybrid Mamba/attention architecture, via Hybrid-PA)
 
@@ -223,7 +224,6 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - LoRA serving is not supported.
 - Pin memory is not supported.
-- Structured outputs are not supported.
 - Tensor/pipeline parallelism is not supported. Threads are scheduled across all visible cores, but multi-socket scaling is poor; see [CPU Tuning](#cpu-tuning-avx2).
 - vLLM V1 engine only.
 - Stateful-path models (e.g. Gemma-4) do not support concurrent request execution (`max_num_seqs=1`).

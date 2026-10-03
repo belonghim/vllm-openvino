@@ -124,5 +124,4 @@ uses `pixel_values`.
   `node.cpp:794`/`eltwise.cpp:52`, no fix between the two releases).
   Because Gemma-4 has transformer KV state, Hybrid-PA never applies either.
 - Stateful models do not support concurrent request execution.
-- Structured outputs, LoRA, pin memory, and multi-socket execution are not
-  supported.
+- LoRA, pin memory, and multi-socket execution are not supported.
