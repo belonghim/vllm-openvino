@@ -115,6 +115,11 @@ text because of prefill vs decode numerics.
   0.49 s (Qwen3.5-0.8B-int4) with no visible startup cost. Stateful models keep
   their own warm-up in `load_model`.
 - SSM/conv state caches are zero-filled; attention KV caches are not.
+- The worker zero-fills scheduler-reported `new_block_ids_to_zero` blocks each
+  step. Removing it changed nothing measurable (Qwen3-1.7B-int4, 8-CPU quota,
+  2 runs each: prefill 16 x ~1.4k tokens at concurrency 8 about 690 tok/s,
+  decode concurrency 8 about 125 tok/s, RSS 6.5 GB, decode output identical),
+  so it is kept to stay aligned with upstream.
 - bf16 tensors must be converted to float32 before NumPy conversion because
   OpenVINO does not accept bf16 NumPy arrays.
 - Pin memory and LoRA serving are unsupported.
