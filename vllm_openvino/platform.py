@@ -300,19 +300,24 @@ class OpenVinoPlatform(Platform):
             model_config.enforce_eager = True
 
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        if scheduler_config and scheduler_config.max_num_seqs != 1:
-            if _is_stateful_model(model_config.model):
-                if (envs.VLLM_OPENVINO_HYBRID_PA
-                        and _is_hybrid_pa_candidate(model_config.model)):
+        cache_config = vllm_config.cache_config
+        keeps_external_state = False
+        if _is_stateful_model(model_config.model):
+            hybrid_pa = (envs.VLLM_OPENVINO_HYBRID_PA
+                         and _is_hybrid_pa_candidate(model_config.model))
+            stateful_pa = (not hybrid_pa and envs.VLLM_OPENVINO_STATEFUL_PA
+                           and _is_stateful_pa_candidate(model_config.model)
+                           and not has_sliding_window(model_config))
+            keeps_external_state = not stateful_pa
+            if scheduler_config and scheduler_config.max_num_seqs != 1:
+                if hybrid_pa:
                     logger.info(
                         "[OV-PLATFORM] Hybrid Mamba/attention model detected: "
                         "attempting Hybrid-PA transformation, keeping "
                         "max_num_seqs=%d. Set VLLM_OPENVINO_HYBRID_PA=0 to "
                         "force the sequential stateful path instead.",
                         scheduler_config.max_num_seqs)
-                elif (envs.VLLM_OPENVINO_STATEFUL_PA
-                        and _is_stateful_pa_candidate(model_config.model)
-                        and not has_sliding_window(model_config)):
+                elif stateful_pa:
                     logger.info(
                         "[OV-PLATFORM] PagedAttention transformation for "
                         "stateful model (VLLM_OPENVINO_STATEFUL_PA), keeping "
@@ -326,8 +331,18 @@ class OpenVinoPlatform(Platform):
                         scheduler_config.max_num_seqs)
                     scheduler_config.max_num_seqs = 1
 
+        # Recurrent/internal state is not stored in vLLM blocks, so a prefix-cache
+        # hit would skip tokens whose state is never restored.
+        if keeps_external_state and cache_config and cache_config.enable_prefix_caching:
+            logger.warning(
+                "[OV-PLATFORM] Disabling prefix caching: this model keeps "
+                "recurrent or internal state outside vLLM KV blocks.")
+            cache_config.enable_prefix_caching = False
+            if hasattr(cache_config, "mamba_cache_mode"):
+                cache_config.mamba_cache_mode = "none"
+                cache_config.mamba_block_size = None
+
         # check and update cache config
-        cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = GPU_BLOCK_SIZE
 

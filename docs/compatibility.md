@@ -93,6 +93,14 @@ from vLLM scheduler blocks.
   `--no-enable-prefix-caching` keeps the resident set at the working set
   (measured: anon flat at ~477 MiB after warm-up vs +62 MiB over 8 rounds
   with prefix caching on).
+- Prefix caching is disabled automatically for Hybrid-PA and stateful models:
+  their recurrent/internal state lives outside vLLM KV blocks, so a prefix hit
+  would skip tokens without restoring that state (repeated long prompts gave
+  different, wrong answers). Pure-attention PA models keep it enabled.
+- Multimodal requests are encoded per image (own grid, merger attention and
+  cache entry) and scattered by explicit `(batch_start, batch_end, patch_offset)`
+  rows, so concurrent requests, differently sized images, multi-image prompts and
+  images split by chunked prefill are handled.
 - SSM/conv state caches are zero-filled; attention KV caches are not.
 - bf16 tensors must be converted to float32 before NumPy conversion because
   OpenVINO does not accept bf16 NumPy arrays.

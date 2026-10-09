@@ -318,6 +318,7 @@ class OpenVINOModelRunnerV1:
         max_query_len = 0
 
         n_reqs = 0
+        req_spans: dict[str, tuple[int, int, int]] = {}
         self._subseq_begins_buf[0] = 0
         self._block_idx_group_offsets.fill(0)
         for group_idx in range(self.num_cache_groups):
@@ -364,6 +365,8 @@ class OpenVINOModelRunnerV1:
                 max_query_len = query_len
             self._input_tokens_buf[token_idx:token_idx + num_tokens] = \
                 self.input_batch.token_ids_cpu[req_index, num_computed:num_tokens_total]
+            if req_id in self._mm_req_ids:
+                req_spans[req_id] = (token_idx, num_computed, num_tokens)
             token_idx += num_tokens
 
             if num_tokens == 1:
@@ -389,80 +392,54 @@ class OpenVINOModelRunnerV1:
         self._sampled_idx_buf[:n_reqs] = self._subseq_begins_buf[1:n_reqs + 1] - 1
 
         multi_modal_kwargs = {}
-        if self._mm_req_ids:
+        if req_spans:
             all_pixel_values = []
             all_pixel_position_ids = []
             all_image_grid_thw = []
             all_image_position_ids = []
             all_mm_hashes = []
 
-            mm_req_ids = [
-                req_id for req_id in self._mm_req_ids
-                if req_id in self.input_batch.req_id_to_index
-            ]
-            mm_req_ids.sort(key=self.input_batch.req_id_to_index.__getitem__)
-            for req_id in mm_req_ids:
-                req_index = self.input_batch.req_id_to_index[req_id]
-                num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
-                if num_computed > 0:
-                    continue
-                request = self.requests[req_id]
-                for mm_feature in request.mm_features:
-                    mm_item = mm_feature.data
-                    if mm_item is not None:
-                        if "pixel_values" in mm_item:
-                            all_pixel_values.append(mm_item["pixel_values"].data)
-                        else:
-                            for _key, elem in mm_item.items():
-                                if hasattr(elem.data, 'shape'):
-                                    all_pixel_values.append(elem.data)
-                                    break
-                        if "pixel_position_ids" in mm_item:
-                            all_pixel_position_ids.append(
-                                mm_item["pixel_position_ids"].data)
-                        if "image_grid_thw" in mm_item:
-                            all_image_grid_thw.append(
-                                mm_item["image_grid_thw"].data)
+            for req_id, (batch_start, num_computed, num_tokens) in req_spans.items():
+                chunk_end = num_computed + num_tokens
+                for mm_feature in self.requests[req_id].mm_features:
                     pos = mm_feature.mm_position
+                    lo = max(pos.offset, num_computed)
+                    hi = min(pos.offset + pos.length, chunk_end)
+                    mm_item = mm_feature.data
+                    if lo >= hi or mm_item is None:
+                        continue
+                    if "pixel_values" in mm_item:
+                        pixels = mm_item["pixel_values"].data
+                    else:
+                        pixels = next(
+                            (elem.data for elem in mm_item.values()
+                             if hasattr(elem.data, 'shape')), None)
+                    if pixels is None:
+                        continue
+                    all_pixel_values.append(pixels)
+                    if "pixel_position_ids" in mm_item:
+                        all_pixel_position_ids.append(
+                            mm_item["pixel_position_ids"].data)
+                    if "image_grid_thw" in mm_item:
+                        all_image_grid_thw.append(mm_item["image_grid_thw"].data)
                     all_image_position_ids.append(
-                        (pos.offset, pos.offset + pos.length))
-                    if mm_feature.identifier:
-                        all_mm_hashes.append(mm_feature.identifier)
+                        (batch_start + lo - num_computed,
+                         batch_start + hi - num_computed,
+                         lo - pos.offset))
+                    all_mm_hashes.append(mm_feature.identifier or None)
 
             if all_pixel_values:
-                pixel_values = torch.stack(all_pixel_values)
-                if pixel_values.device != self.device:
-                    pixel_values = pixel_values.to(self.device)
-                multi_modal_kwargs["pixel_values"] = pixel_values
-
+                multi_modal_kwargs["pixel_values"] = [
+                    t.to(self.device) for t in all_pixel_values]
                 if all_pixel_position_ids:
-                    pixel_position_ids = torch.stack(all_pixel_position_ids)
-                    if pixel_position_ids.device != self.device:
-                        pixel_position_ids = pixel_position_ids.to(self.device)
-                    multi_modal_kwargs["pixel_position_ids"] = pixel_position_ids
-
+                    multi_modal_kwargs["pixel_position_ids"] = [
+                        t.to(self.device) for t in all_pixel_position_ids]
                 if all_image_grid_thw:
-                    image_grid_thw = torch.stack(all_image_grid_thw)
-                    if image_grid_thw.device != self.device:
-                        image_grid_thw = image_grid_thw.to(self.device)
-                    multi_modal_kwargs["image_grid_thw"] = image_grid_thw
-
-                image_position_ids = torch.tensor(
-                    all_image_position_ids, dtype=torch.int64)
-                if image_position_ids.device != self.device:
-                    image_position_ids = image_position_ids.to(self.device)
-                multi_modal_kwargs["image_position_ids"] = image_position_ids
-
-                if len(all_mm_hashes) == 1:
-                    # Only cache when the batch has exactly one mm_feature.
-                    # Multi-mm batches (concurrent VL requests, or a single
-                    # request with multiple images) would silently corrupt
-                    # the cache: vision_embeds_2d is a stacked concatenation
-                    # of all images, but stored under only the first hash,
-                    # so a later cache hit for that first hash would return
-                    # stale non-first-image patches for the non-first slots
-                    # in the new batch's scatter loop.
-                    multi_modal_kwargs["mm_hash"] = all_mm_hashes[0]
+                    multi_modal_kwargs["image_grid_thw"] = [
+                        t.to(self.device) for t in all_image_grid_thw]
+                multi_modal_kwargs["image_position_ids"] = torch.tensor(
+                    all_image_position_ids, dtype=torch.int64).to(self.device)
+                multi_modal_kwargs["mm_hashes"] = all_mm_hashes
 
         assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
 

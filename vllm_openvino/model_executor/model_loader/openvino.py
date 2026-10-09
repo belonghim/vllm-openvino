@@ -246,12 +246,12 @@ class OpenVINOInputBuilder(ABC):
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         ssm_caches: list[ov.Tensor] | None = None,
         conv_caches: list[ov.Tensor] | None = None,
-        pixel_values: torch.Tensor | None = None,
+        pixel_values: list[torch.Tensor] | None = None,
         image_position_ids: torch.Tensor | None = None,
-        pixel_position_ids: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
+        pixel_position_ids: list[torch.Tensor] | None = None,
+        image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
-        mm_hash: str | None = None,
+        mm_hashes: list[str | None] | None = None,
     ) -> list | dict:
         """Build and return inputs for the OpenVINO inference request.
 
@@ -261,13 +261,15 @@ class OpenVINOInputBuilder(ABC):
             kv_caches: List of KV cache tensor pairs.
             ssm_caches: Optional SSM state tensors (hybrid models).
             conv_caches: Optional convolution cache tensors (hybrid models).
-            pixel_values: Optional pixel values for vision embeddings.
-            image_position_ids: Optional image position indices (text insertion).
-            pixel_position_ids: Optional patch spatial coordinates for vision model.
-            image_grid_thw: Optional image grid (T, H, W) for vision rotary embeddings.
+            pixel_values: Optional per-image pixel values for vision embeddings.
+            image_position_ids: Optional [num_images, 3] rows of
+                (batch_start, batch_end, patch_offset) text insertion slots,
+                one per image in ``pixel_values``.
+            pixel_position_ids: Optional per-image patch spatial coordinates.
+            image_grid_thw: Optional per-image grid (T, H, W) for vision rotary embeddings.
             num_requests: Actual number of requests in batch.
-            mm_hash: Optional stable content hash for the image, used as the
-                key of the merged-vision-embedding LRU cache.
+            mm_hashes: Optional per-image stable content hashes, used as the
+                keys of the merged-vision-embedding LRU cache.
 
         Returns:
             A list or dict suitable for ``ov_request.infer()``.
@@ -713,14 +715,75 @@ class OpenVINOCausalLM(nn.Module):
             self._merger_rope_cache[cache_key] = result
         return result
 
+    def _encode_image(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor | None,
+        image_grid_thw: torch.Tensor | None,
+        mm_hash: str | None,
+    ) -> np.ndarray:
+        """Return the merged vision embeddings [num_tokens, hidden] of one image."""
+        if mm_hash is not None:
+            cached = self._vision_embed_cache.get(mm_hash)
+            if cached is not None:
+                self._vision_embed_cache.move_to_end(mm_hash)
+                logger.debug("[OV-VISION] Cache hit for mm_hash=%s (%d tokens)",
+                             mm_hash[:16], cached.shape[0])
+                return cached
+            logger.debug("[OV-VISION] Cache miss for mm_hash=%s; encoding",
+                         mm_hash[:16])
+
+        pixel_values_np, image_pos_np = self._prepare_vision_inputs(
+            pixel_values.unsqueeze(0),
+            pixel_position_ids.unsqueeze(0) if pixel_position_ids is not None else None)
+
+        expected_rank = len(self.ov_vision_emb_compiled.inputs[0].partial_shape)
+        if pixel_values_np.ndim == expected_rank + 1 and pixel_values_np.shape[0] == 1:
+            pixel_values_np = pixel_values_np.squeeze(0)
+
+        if image_pos_np is not None:
+            self.vision_emb_request.infer([pixel_values_np, image_pos_np])
+        else:
+            self.vision_emb_request.infer([pixel_values_np])
+        vision_embeds = self.vision_emb_request.get_output_tensor(0)
+        vision_embeds_2d = vision_embeds.data.reshape(-1, vision_embeds.shape[-1])
+
+        if self.ov_vision_merger_compiled is not None:
+            num_patches = vision_embeds_2d.shape[0]
+            if (self._merger_attn_mask is None
+                    or self._merger_attn_mask.shape[1] != num_patches):
+                self._merger_attn_mask = np.ones(
+                    (1, num_patches, num_patches), dtype=np.float32)
+            if image_grid_thw is not None:
+                rotary_pos_emb = self._compute_merger_rotary_pos_emb(
+                    image_grid_thw.unsqueeze(0), num_patches)
+            else:
+                rotary_pos_emb = np.zeros((num_patches, 32), dtype=np.float32)
+            self.vision_merger_request.infer({
+                "hidden_states": vision_embeds_2d,
+                "attention_mask": self._merger_attn_mask,
+                "rotary_pos_emb": rotary_pos_emb,
+            })
+            vision_embeds = self.vision_merger_request.get_output_tensor(0)
+            vision_embeds_2d = vision_embeds.data.reshape(
+                -1, vision_embeds.shape[-1])
+
+        # OpenVINO reuses output buffers, so detach before the next image.
+        vision_embeds_2d = vision_embeds_2d.copy()
+        if mm_hash is not None:
+            self._vision_embed_cache[mm_hash] = vision_embeds_2d
+            if len(self._vision_embed_cache) > _VISION_EMB_CACHE_MAX_SIZE:
+                self._vision_embed_cache.popitem(last=False)
+        return vision_embeds_2d
+
     def _prepare_embeddings(
         self,
         input_ids: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
+        pixel_values: list[torch.Tensor] | None = None,
         image_position_ids: torch.Tensor | None = None,
-        pixel_position_ids: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
-        mm_hash: str | None = None,
+        pixel_position_ids: list[torch.Tensor] | None = None,
+        image_grid_thw: list[torch.Tensor] | None = None,
+        mm_hashes: list[str | None] | None = None,
     ) -> np.ndarray:
         input_ids_np = self._as_numpy_no_copy(input_ids).reshape(1, -1)
         cache_key = (input_ids_np.tobytes(), input_ids_np.shape,
@@ -737,86 +800,30 @@ class OpenVINOCausalLM(nn.Module):
             if len(self._text_emb_cache) > _TEXT_EMB_CACHE_MAX_SIZE:
                 self._text_emb_cache.popitem(last=False)
 
-        if self.use_vision_embeddings_model and pixel_values is not None:
-            vision_embeds_2d = None
-            if mm_hash is not None:
-                vision_embeds_2d = self._vision_embed_cache.get(mm_hash)
-                if vision_embeds_2d is not None:
-                    self._vision_embed_cache.move_to_end(mm_hash)
-                    logger.debug(
-                        "[OV-VISION] Cache hit for mm_hash=%s (%d tokens)",
-                        mm_hash[:16], vision_embeds_2d.shape[0])
-                else:
-                    logger.debug(
-                        "[OV-VISION] Cache miss for mm_hash=%s; encoding",
-                        mm_hash[:16])
+        if self.use_vision_embeddings_model and pixel_values:
+            vision_embeds = [
+                self._encode_image(
+                    pixel_values[i],
+                    pixel_position_ids[i] if pixel_position_ids else None,
+                    image_grid_thw[i] if image_grid_thw else None,
+                    mm_hashes[i] if mm_hashes else None)
+                for i in range(len(pixel_values))
+            ]
 
-            if vision_embeds_2d is None:
-                pixel_values_np, image_pos_np = self._prepare_vision_inputs(
-                    pixel_values, pixel_position_ids)
-
-                expected_rank = len(self.ov_vision_emb_compiled.inputs[0].partial_shape)
-                if pixel_values_np.ndim == expected_rank + 1 and pixel_values_np.shape[0] == 1:
-                    pixel_values_np = pixel_values_np.squeeze(0)
-
-                if image_pos_np is not None:
-                    self.vision_emb_request.infer(
-                        [pixel_values_np, image_pos_np])
-                else:
-                    self.vision_emb_request.infer([pixel_values_np])
-                vision_embeds = self.vision_emb_request.get_output_tensor(0)
-                vision_embeds_2d = vision_embeds.data.reshape(
-                    -1, vision_embeds.shape[-1])
-
-                if self.ov_vision_merger_compiled is not None:
-                    num_patches = vision_embeds_2d.shape[0]
-                    if (self._merger_attn_mask is None
-                            or self._merger_attn_mask.shape[1] != num_patches):
-                        self._merger_attn_mask = np.ones(
-                            (1, num_patches, num_patches), dtype=np.float32)
-                    attention_mask = self._merger_attn_mask
-                    if image_grid_thw is not None:
-                        rotary_pos_emb = self._compute_merger_rotary_pos_emb(
-                            image_grid_thw, num_patches)
-                    else:
-                        rotary_pos_emb = np.zeros(
-                            (num_patches, 32), dtype=np.float32)
-                    self.vision_merger_request.infer({
-                        "hidden_states": vision_embeds_2d,
-                        "attention_mask": attention_mask,
-                        "rotary_pos_emb": rotary_pos_emb,
-                    })
-                    vision_embeds = self.vision_merger_request.get_output_tensor(0)
-                    vision_embeds_2d = vision_embeds.data.reshape(
-                        -1, vision_embeds.shape[-1])
-
-                if mm_hash is not None:
-                    # OpenVINO reuses output buffers, so cache a detached copy.
-                    self._vision_embed_cache[mm_hash] = vision_embeds_2d.copy()
-                    if len(self._vision_embed_cache) > _VISION_EMB_CACHE_MAX_SIZE:
-                        self._vision_embed_cache.popitem(last=False)
-
-            # image_position_ids from mm_position tells text insertion points
             if image_position_ids is not None:
                 # Scatter mutates in place; copy so cached text embeddings
                 # are never modified.
                 inputs_embeds_2d = inputs_embeds_2d.copy()
-                text_pos_np = self._as_numpy_no_copy(image_position_ids)
-                if text_pos_np.ndim == 1:
-                    text_pos_np = text_pos_np.reshape(1, 2)
-                if text_pos_np.ndim == 2:
-                    text_pos_np = text_pos_np[np.newaxis, :, :]
-                for i in range(text_pos_np.shape[1]):
-                    start, end = text_pos_np[0, i]
-                    num_patches = end - start
-                    patch_offset = i * num_patches
-                    avail = vision_embeds_2d.shape[0] - patch_offset
+                rows = self._as_numpy_no_copy(image_position_ids).tolist()
+                for (start, end, patch_offset), vision_embeds_2d in zip(
+                        rows, vision_embeds):
                     if start >= inputs_embeds_2d.shape[0]:
                         continue
                     end = min(end, inputs_embeds_2d.shape[0])
                     num_patches = end - start
                     if num_patches <= 0:
                         continue
+                    avail = vision_embeds_2d.shape[0] - patch_offset
                     if avail < num_patches:
                         if not self._vision_warning_logged:
                             logger.warning(
@@ -825,8 +832,9 @@ class OpenVINOCausalLM(nn.Module):
                                 avail, num_patches)
                             self._vision_warning_logged = True
                         inputs_embeds_2d[start:end] = 0
-                        inputs_embeds_2d[start:start + avail] = \
-                            vision_embeds_2d[patch_offset:patch_offset + avail]
+                        if avail > 0:
+                            inputs_embeds_2d[start:start + avail] = \
+                                vision_embeds_2d[patch_offset:patch_offset + avail]
                     else:
                         inputs_embeds_2d[start:end] = vision_embeds_2d[
                             patch_offset:patch_offset + num_patches]
@@ -856,12 +864,12 @@ class OpenVINOCausalLM(nn.Module):
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         ssm_caches: list[ov.Tensor] | None = None,
         conv_caches: list[ov.Tensor] | None = None,
-        pixel_values: torch.Tensor | None = None,
+        pixel_values: list[torch.Tensor] | None = None,
         image_position_ids: torch.Tensor | None = None,
-        pixel_position_ids: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
+        pixel_position_ids: list[torch.Tensor] | None = None,
+        image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
-        mm_hash: str | None = None,
+        mm_hashes: list[str | None] | None = None,
     ) -> torch.Tensor:
         if not self._has_kv_cache_inputs and num_requests is not None and num_requests > 1:
             raise RuntimeError(
@@ -879,7 +887,7 @@ class OpenVINOCausalLM(nn.Module):
             pixel_position_ids=pixel_position_ids,
             image_grid_thw=image_grid_thw,
             num_requests=num_requests,
-            mm_hash=mm_hash,
+            mm_hashes=mm_hashes,
         )
         if not self._has_kv_cache_inputs and logger.isEnabledFor(logging.DEBUG):
             if isinstance(inputs, dict):
@@ -1009,12 +1017,12 @@ class PAInputBuilder(OpenVINOInputBuilder):
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         ssm_caches: list[ov.Tensor] | None = None,
         conv_caches: list[ov.Tensor] | None = None,
-        pixel_values: torch.Tensor | None = None,
+        pixel_values: list[torch.Tensor] | None = None,
         image_position_ids: torch.Tensor | None = None,
-        pixel_position_ids: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
+        pixel_position_ids: list[torch.Tensor] | None = None,
+        image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
-        mm_hash: str | None = None,
+        mm_hashes: list[str | None] | None = None,
     ) -> list | dict:
         """Build inputs for a PA-transformed OpenVINO model inference request.
 
@@ -1044,7 +1052,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
             if model.use_text_embeddings_model:
                 inputs_embeds_2d = model._prepare_embeddings(
                     input_ids, pixel_values, image_position_ids, pixel_position_ids,
-                    image_grid_thw, mm_hash)
+                    image_grid_thw, mm_hashes)
                 seq_len_ids = input_ids.shape[0]
                 token_type_ids = (self._token_type_ids_buf[:, :seq_len_ids]
                                   if seq_len_ids <= self._token_type_ids_buf.shape[1]
@@ -1075,7 +1083,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
         if model.use_text_embeddings_model:
             named["inputs_embeds"] = model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids,
-                image_grid_thw, mm_hash)
+                image_grid_thw, mm_hashes)
             seq_len_ids = input_ids.shape[0]
             named["token_type_ids"] = (
                 self._token_type_ids_buf[:, :seq_len_ids]
@@ -1159,12 +1167,12 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         ssm_caches: list[ov.Tensor] | None = None,
         conv_caches: list[ov.Tensor] | None = None,
-        pixel_values: torch.Tensor | None = None,
+        pixel_values: list[torch.Tensor] | None = None,
         image_position_ids: torch.Tensor | None = None,
-        pixel_position_ids: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
+        pixel_position_ids: list[torch.Tensor] | None = None,
+        image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
-        mm_hash: str | None = None,
+        mm_hashes: list[str | None] | None = None,
     ) -> dict:
         model = self.model
         attn_metadata = get_forward_context().attn_metadata
@@ -1175,7 +1183,7 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         if model.use_text_embeddings_model:
             token_input = {"inputs_embeds": model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids,
-                image_grid_thw, mm_hash)}
+                image_grid_thw, mm_hashes)}
         else:
             token_input = {"input_ids": input_ids}
 
@@ -1262,12 +1270,12 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         ssm_caches: list[ov.Tensor] | None = None,
         conv_caches: list[ov.Tensor] | None = None,
-        pixel_values: torch.Tensor | None = None,
+        pixel_values: list[torch.Tensor] | None = None,
         image_position_ids: torch.Tensor | None = None,
-        pixel_position_ids: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
+        pixel_position_ids: list[torch.Tensor] | None = None,
+        image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
-        mm_hash: str | None = None,
+        mm_hashes: list[str | None] | None = None,
     ) -> dict:
         model = self.model
         inputs_dict = self._inputs_dict
@@ -1282,7 +1290,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         if model.use_text_embeddings_model:
             inputs_embeds_2d = model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids,
-                image_grid_thw, mm_hash)
+                image_grid_thw, mm_hashes)
             seq_len = inputs_embeds_2d.shape[0]
         else:
             seq_len = input_ids_np.shape[0] if input_ids_np.ndim == 1 else input_ids_np.shape[1]
