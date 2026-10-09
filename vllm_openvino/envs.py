@@ -111,14 +111,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (lambda v: v.upper() if v else None)(
         os.getenv("VLLM_OPENVINO_SCHEDULING_CORE_TYPE", None)),
 
-    # Replace vLLM V1's torch.exponential_() Gumbel-max noise draw in
-    # compiled_random_sample with a numpy PCG64 standard_exponential fill.
-    # Default 1 (enabled): ~4x faster on the (batch, vocab) shapes seen
-    # at decode; set to 0 to fall back to stock torch behavior. Only fires
-    # for batches in which no request carries a per-request seed (upstream
-    # forward_cpu routes any batch with a seeded request through the
-    # per-generator torch path, which this patch does not touch, so seeded
-    # requests keep stock torch.Generator semantics and stay reproducible).
+    # Replace vLLM V1's CPU sampling routines (random sample, top-k/top-p,
+    # penalties) with versions that avoid full (batch, vocab) work. Default 1
+    # (enabled); set to 0 to fall back to stock vLLM. The random-sample patch
+    # only fires for batches without per-request seeds, so seeded requests
+    # keep stock torch.Generator semantics and stay reproducible.
     "VLLM_OPENVINO_FAST_SAMPLER":
     lambda: os.getenv("VLLM_OPENVINO_FAST_SAMPLER", "1") == "1",
 }

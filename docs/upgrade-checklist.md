@@ -18,7 +18,8 @@ High-risk interfaces include:
 - `vllm.v1.attention.backends.utils`
 - `vllm.v1.outputs`
 - `vllm.v1.sample.metadata`
-- `vllm.v1.sample.sampler`
+- `vllm.v1.sample.sampler` (`apply_all_penalties` is patched by `sampler_patch.py`)
+- `vllm.v1.sample.ops.topk_topp_sampler` (`compiled_random_sample` and `apply_top_k_top_p` are patched by `sampler_patch.py`)
 - `vllm.v1.worker.gpu_input_batch`
 - `vllm.v1.worker.worker_base`
 - `vllm.v1.worker.utils`
