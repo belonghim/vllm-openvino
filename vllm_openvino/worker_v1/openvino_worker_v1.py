@@ -828,7 +828,62 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # OpenVINO compiles in load_model(); callers ignore the return value.
+        model = self.model_runner.get_model()
+        if getattr(model, '_has_kv_cache_inputs', False):
+            self._warm_up_paged_attention()
         return CompilationTimes(language_model=0.0, encoder=0.0)
+
+    def _warm_up_paged_attention(self) -> None:
+        """Run one prefill and one decode step on the reserved null block so the
+        first real request does not pay the CPU kernel JIT cost."""
+        from vllm.v1.core.sched.output import CachedRequestData
+        runner = self.model_runner
+        prompt_len = 16
+        params = SamplingParams(temperature=0.0, max_tokens=2)
+        block_ids = tuple([0] for _ in range(runner.num_cache_groups))
+
+        def step(req_id, num_computed, finished):
+            new_req = NewRequestData(
+                req_id=req_id,
+                prompt_token_ids=[0] * (prompt_len + 1),
+                mm_features=[],
+                sampling_params=params,
+                pooling_params=None,
+                block_ids=block_ids,
+                num_computed_tokens=num_computed,
+                lora_request=None,
+            )
+            num_tokens = prompt_len + 1 - num_computed if num_computed else prompt_len
+            return SchedulerOutput(
+                scheduled_new_reqs=[new_req],
+                scheduled_cached_reqs=CachedRequestData.make_empty(),
+                num_scheduled_tokens={req_id: num_tokens},
+                total_num_scheduled_tokens=num_tokens,
+                scheduled_spec_decode_tokens={},
+                scheduled_encoder_inputs={},
+                num_common_prefix_blocks=[0],
+                finished_req_ids=finished,
+                free_encoder_mm_hashes=[],
+            )
+
+        try:
+            runner.execute_model(step("__warmup_prefill__", 0, set()))
+            runner.sample_tokens(None)
+            runner.execute_model(step("__warmup_decode__", prompt_len,
+                                      {"__warmup_prefill__"}))
+            runner.sample_tokens(None)
+        finally:
+            runner._update_states(SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=CachedRequestData.make_empty(),
+                num_scheduled_tokens={},
+                total_num_scheduled_tokens=0,
+                scheduled_spec_decode_tokens={},
+                scheduled_encoder_inputs={},
+                num_common_prefix_blocks=[0],
+                finished_req_ids={"__warmup_prefill__", "__warmup_decode__"},
+                free_encoder_mm_hashes=[],
+            ))
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.model_config.max_model_len = max_model_len

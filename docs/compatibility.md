@@ -101,6 +101,11 @@ from vLLM scheduler blocks.
   cache entry) and scattered by explicit `(batch_start, batch_end, patch_offset)`
   rows, so concurrent requests, differently sized images, multi-image prompts and
   images split by chunked prefill are handled.
+- PA models run one prefill and one decode step on the reserved null block 0 at
+  startup (`compile_or_warm_up_model`) to absorb the CPU kernel JIT cost; the
+  first request dropped from 1.51 s to 0.79 s (Qwen3-1.7B-int4) and 0.87 s to
+  0.49 s (Qwen3.5-0.8B-int4) with no visible startup cost. Stateful models keep
+  their own warm-up in `load_model`.
 - SSM/conv state caches are zero-filled; attention KV caches are not.
 - bf16 tensors must be converted to float32 before NumPy conversion because
   OpenVINO does not accept bf16 NumPy arrays.
