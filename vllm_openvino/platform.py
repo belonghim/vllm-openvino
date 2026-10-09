@@ -223,6 +223,23 @@ class OpenVinoPlatform(Platform):
         pass
 
     @classmethod
+    def import_kernels(cls) -> None:
+        pass
+
+    @classmethod
+    def validate_environ(cls, hard_fail: bool) -> None:
+        from vllm import envs as vllm_envs
+
+        for env in os.environ:
+            if (env.startswith("VLLM_") and env not in vllm_envs.environment_variables
+                    and env not in envs.environment_variables):
+                if hard_fail:
+                    raise ValueError(
+                        f"Unknown vLLM environment variable detected: {env}")
+                logger.warning(
+                    "Unknown vLLM environment variable detected: %s", env)
+
+    @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         torch.manual_seed(seed)
 
