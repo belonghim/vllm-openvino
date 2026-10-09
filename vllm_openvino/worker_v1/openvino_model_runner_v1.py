@@ -580,22 +580,21 @@ class OpenVINOModelRunnerV1:
             num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
             seq_len = num_computed + num_scheduled
 
-            sampled_entry = sampled_tokens[i]
-            sampled_ids = (sampled_entry if isinstance(sampled_entry, list)
-                           else [sampled_entry])
-            if sampled_ids:
-                start_idx = seq_len
-                end_idx = start_idx + len(sampled_ids)
-                self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = sampled_ids
-                self.input_batch.num_tokens_no_spec[req_index] = end_idx
-                req_state.output_token_ids.extend(sampled_ids)
+            # Partial (chunked) prefill: seq_len is still inside known tokens,
+            # so the sampled token must neither overwrite them nor be emitted.
+            if seq_len < req_state.num_tokens:
+                sampled_tokens[i] = []
+            else:
+                sampled_entry = sampled_tokens[i]
+                sampled_ids = (sampled_entry if isinstance(sampled_entry, list)
+                               else [sampled_entry])
+                if sampled_ids:
+                    end_idx = seq_len + len(sampled_ids)
+                    self.input_batch.token_ids_cpu[req_index, seq_len:end_idx] = sampled_ids
+                    self.input_batch.num_tokens_no_spec[req_index] = end_idx
+                    req_state.output_token_ids.extend(sampled_ids)
 
             self.input_batch.num_computed_tokens_cpu[req_index] = seq_len
-
-            # Ignore the sampled token for partial prefills (chunked prefill).
-            # seq_len < num_prompt_tokens means we haven't finished the prompt.
-            if seq_len < req_state.num_prompt_tokens:
-                sampled_tokens[i] = []
 
         # Snapshot (not a live reference): with async scheduling, a later
         # step can mutate self.input_batch before the scheduler consumes
