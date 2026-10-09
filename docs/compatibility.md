@@ -64,7 +64,13 @@ cache, not SSM/conv state.
 
 Hybrid-PA uses standard PagedAttention for attention layers and a separate
 physical slot pool for conv/SSM state. The slot pool is intentionally separate
-from vLLM scheduler blocks.
+from vLLM scheduler blocks. Slots are released when a request finishes and are
+reset on a fresh or re-prefilled start (`num_computed == 0`). A preempted
+request keeps its slot, so the pool of `max_num_seqs + 1` is never exhausted
+under FCFS scheduling. This was verified on Qwen3.5-0.8B with forced
+preemption (`--num-gpu-blocks-override`, 7 preemptions at `max_num_seqs=2`).
+A recomputed request can diverge from its uninterrupted output late in the
+text because of prefill vs decode numerics.
 
 ## Runtime Constraints
 
