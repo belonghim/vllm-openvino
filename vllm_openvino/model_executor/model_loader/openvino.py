@@ -1001,7 +1001,6 @@ class PAInputBuilder(OpenVINOInputBuilder):
 
     def __init__(self, model: "OpenVINOCausalLM") -> None:
         self.model = model
-        self._use_grouped: bool | None = None
         self._max_ctx_ov: "ov.Tensor | bool | None" = None
         self._max_ctx_buf: np.ndarray | None = None
         if model.use_text_embeddings_model:
@@ -1028,57 +1027,12 @@ class PAInputBuilder(OpenVINOInputBuilder):
 
         Compiled-model parameter order differs across IR producers
         (optimum-intel stateful exports reordered vs. original ATTENTION_ONLY
-        exports), so single-group models are fed by input name instead of by
-        position.
+        exports), so inputs are fed by name instead of by position.
         """
         model = self.model
         state_tensors = model._get_flat_kv_caches_template(kv_caches)
 
         attn_metadata = get_forward_context().attn_metadata
-        if self._use_grouped is None:
-            block_indices_groups = getattr(attn_metadata, "block_indices_groups", None)
-            block_indices_begins_groups = getattr(
-                attn_metadata, "block_indices_begins_groups", None)
-            self._use_grouped = (
-                block_indices_groups is not None
-                and block_indices_begins_groups is not None
-                and len(block_indices_groups) == len(block_indices_begins_groups)
-                and len(block_indices_groups) > 1
-            )
-
-        if self._use_grouped:
-            # Multi-group block tables have an undocumented per-group naming
-            # convention; keep the verified positional order for them.
-            if model.use_text_embeddings_model:
-                inputs_embeds_2d = model._prepare_embeddings(
-                    input_ids, pixel_values, image_position_ids, pixel_position_ids,
-                    image_grid_thw, mm_hashes)
-                seq_len_ids = input_ids.shape[0]
-                token_type_ids = (self._token_type_ids_buf[:, :seq_len_ids]
-                                  if seq_len_ids <= self._token_type_ids_buf.shape[1]
-                                  else np.zeros((1, seq_len_ids), dtype=np.int64))
-                inputs = [
-                    positions,
-                    token_type_ids,
-                    inputs_embeds_2d,
-                    *state_tensors,
-                ]
-            else:
-                inputs = [
-                    input_ids,
-                    positions,
-                    *state_tensors,
-                ]
-            inputs.append(attn_metadata.past_lens)
-            inputs.append(attn_metadata.subsequence_begins)
-            for bi, bib in zip(attn_metadata.block_indices_groups,
-                               attn_metadata.block_indices_begins_groups):
-                inputs.append(bi)
-                inputs.append(bib)
-            inputs.append(attn_metadata.max_context_len)
-            inputs.append(attn_metadata.sampled_token_indices)
-            return inputs
-
         named: dict[str, object] = {}
         if model.use_text_embeddings_model:
             named["inputs_embeds"] = model._prepare_embeddings(

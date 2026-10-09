@@ -15,31 +15,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.config import VllmConfig
 
 
-def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
-                      src_offset: int, dst_offset: int) -> None:
-
-    def create_roi_tensor(
-        tensor: ov.Tensor,
-        block_number: int,
-    ) -> ov.Tensor:
-        roi_begin = ov.Coordinate([0, 0, 0, 0])
-        roi_end = ov.Coordinate(tensor.get_shape())
-
-        roi_begin[0] = block_number
-        roi_end[0] = block_number + 1
-
-        if isinstance(tensor, ov.Tensor):
-            return ov.Tensor(tensor, roi_begin, roi_end)
-        else:
-            return ov.RemoteTensor(tensor, roi_begin, roi_end)
-
-    src_roi_tensor = \
-        create_roi_tensor(src_tensor, src_offset)
-    dst_roi_tensor = \
-        create_roi_tensor(dst_tensor, dst_offset)
-    src_roi_tensor.copy_to(dst_roi_tensor)
-
-
 class OpenVINOAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -65,27 +40,6 @@ class OpenVINOAttentionBackend(AttentionBackend):
     @classmethod
     def supports_sliding_window(cls) -> bool:
         return False
-
-    @staticmethod
-    def swap_blocks(
-        src_tensor: ov.Tensor,
-        dst_tensor: ov.Tensor,
-        src_to_dsts: list[tuple[int, int]],
-    ) -> None:
-        for src, dst in src_to_dsts:
-            copy_cache_block(src_tensor, dst_tensor, src, dst)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
-        src_to_dsts: list[tuple[int, int]],
-    ) -> None:
-        for src, dst in src_to_dsts:
-            if src == dst:
-                continue
-            for key_cache, value_cache in kv_caches:
-                copy_cache_block(key_cache, key_cache, src, dst)
-                copy_cache_block(value_cache, value_cache, src, dst)
 
 
 @dataclass

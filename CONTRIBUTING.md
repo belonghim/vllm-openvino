@@ -7,7 +7,7 @@ This is a single-developer open-source project. Contributions and feedback are w
 ### Prerequisites
 
 - Python >= 3.10
-- vLLM 0.30.0
+- vLLM 0.31.0
 - OpenVINO >= 2026.4.1
 - Linux x86-64 with AVX2+ support
 

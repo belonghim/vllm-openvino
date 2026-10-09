@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
-from vllm_openvino.attention.backends.openvino import OpenVINOAttentionBackend
 from vllm_openvino import envs
 from vllm_openvino.utils import ov_cache_dtype
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
@@ -71,7 +70,6 @@ class OpenVINOCacheEngine:
         # for OpenVINO backend with a CPU target device, because we want
         # to reuse KV cache management in the scheduler.
         self.num_device_blocks = cache_config.num_gpu_blocks
-        self.num_swap_blocks = cache_config.num_cpu_blocks
 
         # OpenVINO uses its own attention backend directly (no vLLM standard backend needed).
 
@@ -97,10 +95,6 @@ class OpenVINOCacheEngine:
             ssm_blocks, ov_core, ov_device)
         self.conv_cache: list[ov.Tensor] = self._allocate_conv_cache(
             ssm_blocks, ov_core, ov_device)
-
-        # Initialize the swap.
-        self.swap_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_swap_cache(
-            self.num_swap_blocks, ov_device)
 
         # Cache k_cache and v_cache lists to avoid rebuilding on every call.
         # self.kv_cache structure is immutable after init (only tensor data changes),
@@ -194,47 +188,6 @@ class OpenVINOCacheEngine:
             num_blocks, ov_core, ov_device,
             self.conv_cache_config, self.conv_cache_dtypes,
         )
-
-    def _allocate_swap_cache(
-        self,
-        num_blocks: int,
-        ov_device: str,
-    ) -> list[tuple[ov.Tensor, ov.Tensor]]:
-        """Allocates swap cache."""
-        swap_cache: list[tuple[ov.Tensor, ov.Tensor]] = []
-
-        if num_blocks == 0:
-            return swap_cache
-
-        if current_platform.is_openvino_cpu():
-            raise RuntimeError("CPU device isn't supposed to have swap cache")
-
-        for key_cache_pshape, value_cache_pshape in zip(self.key_cache_config, self.value_cache_config):
-            key_dims = self._make_cache_dims(num_blocks, key_cache_pshape)
-            value_dims = self._make_cache_dims(num_blocks, value_cache_pshape)
-            key_blocks = ov.Tensor(self.ov_cache_dtype, ov.PartialShape(key_dims).to_shape())
-            value_blocks = ov.Tensor(self.ov_cache_dtype, ov.PartialShape(value_dims).to_shape())
-            swap_cache.append((key_blocks, value_blocks))
-
-        return swap_cache
-
-    def swap_in(self, src_to_dst: list[tuple[int, int]]) -> None:
-        for i in range(self.num_layers):
-            for swap_tensor, kv_tensor in zip(self.swap_cache[i],
-                                              self.kv_cache[i]):
-                OpenVINOAttentionBackend.swap_blocks(swap_tensor, kv_tensor,
-                                                    src_to_dst)
-
-    def swap_out(self, src_to_dst: list[tuple[int, int]]) -> None:
-        for i in range(self.num_layers):
-            for swap_tensor, kv_tensor in zip(self.swap_cache[i],
-                                              self.kv_cache[i]):
-                OpenVINOAttentionBackend.swap_blocks(kv_tensor, swap_tensor,
-                                                    src_to_dst)
-
-    def copy(self, src_to_dsts: list[tuple[int, int]]) -> None:
-        if len(src_to_dsts) > 0:
-            OpenVINOAttentionBackend.copy_blocks(self.kv_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     VLLM_OPENVINO_DEVICE: str = "CPU"
-    VLLM_OPENVINO_KVCACHE_SPACE: int = 0
+    VLLM_OPENVINO_KVCACHE_SPACE: float = 0
     VLLM_OPENVINO_KV_CACHE_PRECISION: str | None = None
     VLLM_OPENVINO_PERFORMANCE_MODE: str = "THROUGHPUT"
     VLLM_OPENVINO_CPU_THREADS_NUM: int = 0
@@ -26,6 +26,18 @@ KV_CACHE_PRECISION_MAP: dict[str, str] = {
     "f32": "f32", "fp32": "f32",
 }
 
+_TRUE_VALUES = ("1", "true", "yes", "on")
+
+
+def _env_bool(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in _TRUE_VALUES
+
+
+def _env_tristate(name: str) -> bool | None:
+    v = os.getenv(name, "").strip().lower()
+    return None if v in ("", "auto") else v in _TRUE_VALUES
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection
     # default is CPU
@@ -33,9 +45,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
-    # default is 0 (auto: 4 GB on CPU)
+    # in GiB (fractions allowed), default is 0 (auto: 4 GB on CPU)
     "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
+    lambda: float(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
 
     # OpenVINO KV cache precision
     # default 'undefined', which means plugin will automatically set
@@ -65,8 +77,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CPU-only: enable/disable hyperthreading. When disabled, uses 1 thread
     # per physical core instead of 2 (useful on oversubscription-prone systems).
     "VLLM_OPENVINO_ENABLE_HYPER_THREADING":
-    lambda: (lambda v: None if v in ("", "auto") else v == "true")(
-        os.getenv("VLLM_OPENVINO_ENABLE_HYPER_THREADING", "").lower()),
+    lambda: _env_tristate("VLLM_OPENVINO_ENABLE_HYPER_THREADING"),
 
     # CPU-only: inference precision hint (f32, f16, bf16). Forces specific
     # precision for matmul operations. On CPUs without int8 acceleration, this
@@ -77,8 +88,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CPU-only: enable/disable CPU core pinning. When enabled, threads are
     # pinned to specific CPU cores to avoid migration penalties.
     "VLLM_OPENVINO_ENABLE_CPU_PINNING":
-    lambda: (lambda v: None if v in ("", "auto") else v == "true")(
-        os.getenv("VLLM_OPENVINO_ENABLE_CPU_PINNING", "").lower()),
+    lambda: _env_tristate("VLLM_OPENVINO_ENABLE_CPU_PINNING"),
 
     # PagedAttention transformation for plain-attention stateful models
     # (ReadValue-based KV cache, e.g. optimum-intel default exports like
@@ -87,7 +97,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # fall back to the sequential stateful path. Set to 0 to force the
     # sequential stateful path.
     "VLLM_OPENVINO_STATEFUL_PA":
-    lambda: os.getenv("VLLM_OPENVINO_STATEFUL_PA", "1") == "1",
+    lambda: _env_bool("VLLM_OPENVINO_STATEFUL_PA", "1"),
 
     # Default path for hybrid Mamba/attention models (Qwen3.5, LFM2.5):
     # attempt PagedAttention transformation instead of the sequential
@@ -95,7 +105,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set to 0 to force the sequential stateful path instead (e.g. if a new,
     # unvalidated hybrid model hits a PA transformation issue).
     "VLLM_OPENVINO_HYBRID_PA":
-    lambda: os.getenv("VLLM_OPENVINO_HYBRID_PA", "1") == "1",
+    lambda: _env_bool("VLLM_OPENVINO_HYBRID_PA", "1"),
 
     # Directory for OpenVINO's compiled-model disk cache. When set, OpenVINO
     # skips recompiling the model on process restart if a matching cached
@@ -117,7 +127,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # only fires for batches without per-request seeds, so seeded requests
     # keep stock torch.Generator semantics and stay reproducible.
     "VLLM_OPENVINO_FAST_SAMPLER":
-    lambda: os.getenv("VLLM_OPENVINO_FAST_SAMPLER", "1") == "1",
+    lambda: _env_bool("VLLM_OPENVINO_FAST_SAMPLER", "1"),
 }
 
 # end-env-vars-definition

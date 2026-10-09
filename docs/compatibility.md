@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- vLLM `0.30.0`
+- vLLM `0.31.0`
 - OpenVINO `>= 2026.4.1`
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
@@ -16,7 +16,7 @@ the OpenVINO execution path.
 
 The plugin runs on vLLM's V1 model runner (MRV1). MRV2 requires Triton, which
 is uninstallable here because Inductor is incompatible with the OpenVINO
-runtime. vLLM 0.29.0 and 0.30.0 mark MRV1 deprecated with removal targeted for v0.32.
+runtime. vLLM marks MRV1 deprecated (0.29.0-0.31.0); 0.31.0 still falls back to MRV1 without Triton.
 
 Tracked upstream:
 

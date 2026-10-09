@@ -392,12 +392,12 @@ class OpenVinoPlatform(Platform):
                     "device. KV cache size will be determined automatically via "
                     "profiling run.")
             else:
-                cache_config.openvino_kvcache_space_bytes = (
+                cache_config.openvino_kvcache_space_bytes = int(
                     kv_cache_space * GIB_BYTES)  # type: ignore
         else:
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE "
-                f"{kv_cache_space}, expect a positive integer value.")
+                f"{kv_cache_space}, expect a non-negative number of GiB.")
 
         if (cache_config.openvino_kvcache_space_bytes
                 and OpenVinoPlatform.is_openvino_cpu()):
