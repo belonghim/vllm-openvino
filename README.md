@@ -158,6 +158,19 @@ TORCH_COMPILE_DISABLE=1 \
 vllm serve --model <model_id>
 ```
 
+### Chunked Prefill Size (`--max-num-batched-tokens`)
+
+The plugin keeps vLLM's default for non-CPU platforms (2048 tokens per step for the API server). On CPU a 2048-token prefill chunk takes about 3 s, and every running decode stalls for that whole step. Measured on Qwen3-1.7B-int4-ov (8-CPU quota): 4 decode streams running while 4 prompts of ~2.7k tokens arrive; decode inter-token latency p99 / prefill TTFT mean:
+
+| `--max-num-batched-tokens` | decode ITL p99 | prefill TTFT mean | total wall |
+|---|---|---|---|
+| 2048 (default) | ~3.3 s | ~17.5 s | ~33 s |
+| 1024 | ~1.75 s | ~16 s | ~33 s |
+| 512 | ~0.9 s | ~15.5 s | ~33 s |
+| 256 | ~0.7 s | ~19–21 s | ~36–42 s |
+
+Pass `--max-num-batched-tokens 512` for interactive/streaming workloads that mix long prompts with ongoing generations: it cuts worst-case decode stalls about 3.5× at no throughput cost. 256 starts losing throughput. Decode-only or batch workloads are unaffected. Multimodal models need a value at least as large as one image's merged tokens (vLLM rejects smaller values at startup). Runs on this shared host varied by ~±15% in wall time; the p99 trend was consistent across repeats.
+
 ### Sampling Parameters (large-vocab models)
 
 Sampling runs on the critical path of every decode step. For small models it costs as much as the OpenVINO inference, so the plugin replaces three of vLLM's CPU sampling routines (see the fast-sampler paragraph below). `temperature=0` (greedy) skips top-k/top-p and all randomness entirely, but still applies the repetition penalty when the model's `generation_config.json` sets one (Qwen2.5-Coder ships `repetition_penalty=1.1`, `top_k=20`, `top_p=0.8`).
