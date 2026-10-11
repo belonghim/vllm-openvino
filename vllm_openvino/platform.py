@@ -23,6 +23,9 @@ else:
 
 logger = init_logger(__name__)
 
+# vLLM 0.31 defaults to MRV2 whenever Triton imports (x86 CPU wheels ship triton-cpu); the runner here is MRV1.
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+
 try:
     import openvino as ov
 except ImportError as e:

@@ -14,9 +14,12 @@ the OpenVINO execution path.
 
 ## Upstream vLLM Compatibility
 
-The plugin runs on vLLM's V1 model runner (MRV1). MRV2 requires Triton, which
-is uninstallable here because Inductor is incompatible with the OpenVINO
-runtime. vLLM marks MRV1 deprecated (0.29.0-0.31.0); 0.31.0 still falls back to MRV1 without Triton.
+The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.31.0
+defaults to MRV2 whenever Triton imports, and x86_64 CPU installs now pull
+triton-cpu ([#58140](https://github.com/vllm-project/vllm/pull/58140)). The
+plugin therefore sets `VLLM_USE_V2_MODEL_RUNNER=0` at import time unless the
+user has set it. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes
+target removal for 0.32, which 0.31.0 does not confirm.
 
 Tracked upstream:
 
@@ -26,7 +29,11 @@ Tracked upstream:
 - [vllm-project/vllm#58703](https://github.com/vllm-project/vllm/pull/58703) —
   adds `Platform.supports_v2_model_runner`; the plugin overrides it to `False`
   to opt out of the Triton probe (harmless no-op on vLLM builds without the
-  hook).
+  hook). Once it ships, the env default becomes redundant.
+
+Open questions on #57684 (whether the MRV1 removal target holds, and whether a
+replacement-runner path exists for plugins) are unanswered. Re-check on the
+0.32 release candidate.
 
 ## Serving Paths
 
