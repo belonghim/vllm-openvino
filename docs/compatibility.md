@@ -216,3 +216,13 @@ the stateful path serves one request at a time and is maintenance-only.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation
   computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
   rejects such requests with HTTP 400. Output-token `logprobs` work.
+- LFM2.5-8B-A1B prefill is ~108 tok/s against ~3000 tok/s for LFM2.5-350M
+  (8 CPUs, constant over 500-4000 token prompts; decode is only ~3x slower).
+  The IR computes all 32 experts for every token (`Tile` to `[32, ?, 2048]`,
+  batched `MatMul`, routing-weight `Multiply`, `ReduceSum`), so prefill cost
+  follows total rather than active parameters. This comes from the IR export,
+  not from the plugin; long prompts have a long time to first token.
+- `VLLM_USE_RUST_FRONTEND=1` starts with the bundled `vllm-rs` binary but gave
+  no throughput change (Qwen3-1.7B, 1/8/16 concurrent, within run-to-run
+  noise): decode runs at 20-300 tok/s, so the frontend is not the bottleneck.
+  Its multimodal support was not tested.
