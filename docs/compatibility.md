@@ -177,6 +177,16 @@ tok/s, baseline -> spec; copy-heavy / free-form output):
 |---|---|---|---|---|
 | Qwen3-1.7B (PA) | 23 -> 57 / 23 -> 23 | 82 -> 148 / 82 -> 85 | 154 -> 282 / 160 -> 149 | 268 -> 358 / 267 -> 274 |
 | Qwen3.5-2B (Hybrid-PA) | 21 -> 43 / 22 -> 21 | 56 -> 92 / 64 -> 64 | 86 -> 114 / 102 -> 90 | - -> 124 / - |
+| LFM2.5-8B-A1B (Hybrid-PA, MoE, conv-only state) | 23 -> 42 / 25 -> 50 | 44 -> 60 / 49 -> 78 | 56 -> 69 / 66 -> 88 | - |
+
+LFM2.5-8B-A1B was run with `--generation-config vllm`; its "free-form" prompt
+degenerates into loops under greedy decoding without a repetition penalty, so
+that column is not representative of free text (acceptance ~99%).
+
+Model `generation_config.json` defaults count as request parameters. LFM2.5
+ships `repetition_penalty: 1.05`, which makes every request ineligible for
+drafts (0 drafts proposed) unless the request sets `repetition_penalty=1.0` or
+the server runs with `--generation-config vllm`.
 
 Free-form output is neutral up to 4 concurrent requests and loses up to ~10%
 on Hybrid-PA at 8, where verification is not free. Keep `prompt_lookup_min`
