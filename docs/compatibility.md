@@ -15,11 +15,14 @@ the OpenVINO execution path.
 ## Upstream vLLM Compatibility
 
 The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.31.0
-defaults to MRV2 whenever Triton imports, and x86_64 CPU installs now pull
-triton-cpu ([#58140](https://github.com/vllm-project/vllm/pull/58140)). The
-plugin therefore sets `VLLM_USE_V2_MODEL_RUNNER=0` at import time unless the
-user has set it. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes
-target removal for 0.32, which 0.31.0 does not confirm.
+selects MRV2 only when `HAS_TRITON` is true. With the PyPI `vllm` wheel it is
+false on CPU hosts even if Triton is installed, because vLLM requires exactly
+one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
+(`+cpu`) ships triton-cpu
+([#58140](https://github.com/vllm-project/vllm/pull/58140)) and would select
+MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set `VLLM_USE_V2_MODEL_RUNNER=0` in
+those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
+removal for 0.32, which 0.31.0 does not confirm.
 
 Tracked upstream:
 
@@ -29,7 +32,7 @@ Tracked upstream:
 - [vllm-project/vllm#58703](https://github.com/vllm-project/vllm/pull/58703) —
   adds `Platform.supports_v2_model_runner`; the plugin overrides it to `False`
   to opt out of the Triton probe (harmless no-op on vLLM builds without the
-  hook). Once it ships, the env default becomes redundant.
+  hook).
 
 Open questions on #57684 (whether the MRV1 removal target holds, and whether a
 replacement-runner path exists for plugins) are unanswered. Re-check on the
