@@ -151,6 +151,24 @@ calls require `hidden_states`, `attention_mask`, and `rotary_pos_emb`.
 Qwen3.5 multimodal inputs use `pixel_values` and `image_grid_thw`; Gemma-4
 uses `pixel_values`.
 
+## N-gram Speculative Decoding
+
+Only `method=ngram` on PagedAttention models is accepted
+(`check_and_update_config` raises otherwise). `execute_model` computes logits
+for the 1+k query positions of each draft request, and `sample_tokens` accepts
+drafts while they match the argmax (the stock rejection sampler needs Triton).
+Drafts are proposed only for greedy requests without penalties, `logit_bias`,
+`allowed_token_ids`, `bad_words`, `min_tokens`, logprobs, or structured output;
+other requests in the same batch use the normal sampler. vLLM disables async
+scheduling for `ngram` automatically.
+
+Measured on Qwen3-1.7B int4 (8 CPUs, k=4, `prompt_lookup_min=5`,
+`prompt_lookup_max=8`): copy-heavy output gains +80% at 4 concurrent requests
+and +33% at 16, and single-request gains reach 2.5x. Free-form output is
+neutral. With `prompt_lookup_min=2` spurious matches cost 7-11% on free-form
+output, so keep `prompt_lookup_min` high. Output can diverge from non-spec
+runs at near-tie tokens because kernel numerics vary with query length.
+
 ## Known Limitations
 
 - Gemma-4 sliding-window attention is supported only on the sequential

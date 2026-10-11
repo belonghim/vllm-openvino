@@ -23,7 +23,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec, MambaSpec
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase, CompilationTimes
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 
@@ -463,6 +463,9 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        return self.model_runner.take_draft_token_ids()
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

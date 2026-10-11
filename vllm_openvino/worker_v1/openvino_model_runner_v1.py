@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import BatchedTensorInputs
 from vllm.sampling_params import SamplingType
 
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -63,7 +63,16 @@ class OpenVINOModelRunnerV1:
         self._past_lens_buf = np.zeros(max_seqs, dtype=np.int32)
         self._subseq_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._block_idx_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
-        self._sampled_idx_buf = np.zeros(max_seqs, dtype=np.int64)
+        spec_config = vllm_config.speculative_config
+        self._num_spec_tokens = (
+            spec_config.num_speculative_tokens if spec_config else 0)
+        self.drafter = None
+        self._draft_token_ids: DraftTokenIds | None = None
+        if spec_config is not None:
+            from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+            self.drafter = NgramProposer(vllm_config)
+        max_sampled_rows = max_seqs * (1 + self._num_spec_tokens)
+        self._sampled_idx_buf = np.zeros(max_sampled_rows, dtype=np.int64)
         self._input_tokens_buf = np.zeros(
             self.scheduler_config.max_num_batched_tokens,
             dtype=np.int64,
@@ -85,7 +94,7 @@ class OpenVINOModelRunnerV1:
         self._subseq_begins_tensor_base = ov.Tensor(
             self._subseq_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
         self._sampled_idx_tensor_base = ov.Tensor(
-            self._sampled_idx_buf, ov.Shape([max_seqs]), ov.Type.i64)
+            self._sampled_idx_buf, ov.Shape([max_sampled_rows]), ov.Type.i64)
         self._input_tokens_tensor_base = ov.Tensor(
             self._input_tokens_buf,
             ov.Shape([max_num_batched_tokens]),
@@ -318,6 +327,8 @@ class OpenVINOModelRunnerV1:
         max_query_len = 0
 
         n_reqs = 0
+        n_rows = 0
+        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         req_spans: dict[str, tuple[int, int, int]] = {}
         self._subseq_begins_buf[0] = 0
         self._block_idx_group_offsets.fill(0)
@@ -357,6 +368,12 @@ class OpenVINOModelRunnerV1:
             num_tokens_total = num_computed + num_scheduled_tokens
             num_tokens = num_tokens_total - num_computed
 
+            drafts = spec_tokens.get(req_id)
+            if drafts:
+                n_known = self.input_batch.num_tokens_no_spec[req_index]
+                self.input_batch.token_ids_cpu[
+                    req_index, n_known:n_known + len(drafts)] = drafts
+
             seq_len = num_tokens_total
             if seq_len > max_seq_len:
                 max_seq_len = seq_len
@@ -387,9 +404,17 @@ class OpenVINOModelRunnerV1:
                 self._la_past_lens_buf[n_reqs] = num_computed
                 self._la_cache_interval_buf[n_reqs] = 0
 
-            n_reqs += 1
+            sub_end = self._subseq_begins_buf[n_reqs + 1]
+            if drafts:
+                sample_rows = 1 + len(drafts)
+                self._sampled_idx_buf[n_rows:n_rows + sample_rows] = np.arange(
+                    sub_end - sample_rows, sub_end)
+                n_rows += sample_rows
+            else:
+                self._sampled_idx_buf[n_rows] = sub_end - 1
+                n_rows += 1
 
-        self._sampled_idx_buf[:n_reqs] = self._subseq_begins_buf[1:n_reqs + 1] - 1
+            n_reqs += 1
 
         multi_modal_kwargs = {}
         if req_spans:
@@ -445,7 +470,7 @@ class OpenVINOModelRunnerV1:
 
         input_tokens = self._slice_tensor(self._input_tokens_tensor_base, token_idx)
         input_positions = self._slice_tensor(self._input_positions_tensor_base, pos_idx)
-        sampled_token_indices_tensor = self._slice_tensor(self._sampled_idx_tensor_base, n_reqs)
+        sampled_token_indices_tensor = self._slice_tensor(self._sampled_idx_tensor_base, n_rows)
         past_lens_tensor = self._slice_tensor(self._past_lens_tensor_base, n_reqs)
         subsequence_begins_tensor = self._slice_tensor(self._subseq_begins_tensor_base, n_reqs + 1)
         for group_idx in range(self.num_cache_groups):
@@ -552,6 +577,90 @@ class OpenVINOModelRunnerV1:
         logits = self.model.compute_logits(hidden_states, None)
         self._execute_state = (scheduler_output, logits)
 
+    def _sample_with_drafts(
+        self,
+        logits: torch.Tensor,
+        spec_tokens: dict[str, list[int]],
+    ) -> tuple[list, object]:
+        """Greedy verification of draft tokens; other requests use the sampler.
+
+        Drafts are only proposed for greedy requests without penalties, so the
+        target token is the plain argmax of the logits row.
+        """
+        req_ids = self.input_batch.req_ids
+        target = logits.argmax(dim=-1).tolist()
+        sampled: list = [None] * len(req_ids)
+        last_rows = []
+        row = 0
+        for i, req_id in enumerate(req_ids):
+            drafts = spec_tokens.get(req_id)
+            if drafts:
+                accepted = 0
+                for token in drafts:
+                    if token != target[row + accepted]:
+                        break
+                    accepted += 1
+                sampled[i] = target[row:row + accepted + 1]
+                row += 1 + len(drafts)
+            else:
+                row += 1
+            last_rows.append(row - 1)
+
+        logprobs_lists = None
+        if any(entry is None for entry in sampled):
+            sampler_output = self.model.sample(
+                logits=logits.index_select(0, torch.tensor(last_rows)),
+                sampling_metadata=self.input_batch.sampling_metadata,
+            )
+            plain = sampler_output.sampled_token_ids.tolist()
+            for i, entry in enumerate(sampled):
+                if entry is None:
+                    sampled[i] = plain[i]
+            if sampler_output.logprobs_tensors is not None:
+                logprobs_lists = sampler_output.logprobs_tensors.tolists()
+        return sampled, logprobs_lists
+
+    @staticmethod
+    def _supports_drafts(sampling_params) -> bool:
+        if sampling_params is None or sampling_params.temperature != 0:
+            return False
+        return not (
+            sampling_params.logprobs is not None
+            or sampling_params.frequency_penalty
+            or sampling_params.presence_penalty
+            or sampling_params.repetition_penalty != 1.0
+            or sampling_params.logit_bias
+            or sampling_params.allowed_token_ids
+            or sampling_params.bad_words
+            or sampling_params.min_tokens
+            or sampling_params.structured_outputs is not None)
+
+    def _propose_draft_token_ids(
+        self,
+        scheduler_output: SchedulerOutput,
+        sampled_tokens: list,
+    ) -> None:
+        sampled_lists = [
+            entry if isinstance(entry, list) else [entry]
+            for entry in sampled_tokens
+        ]
+        drafts = self.drafter.propose(
+            scheduler_output.num_spec_tokens_to_schedule,
+            sampled_lists,
+            self.input_batch.num_tokens_no_spec,
+            self.input_batch.token_ids_cpu,
+        )
+        req_ids = list(self.input_batch.req_ids)
+        for i, req_id in enumerate(req_ids):
+            if drafts[i] and not self._supports_drafts(
+                    self.requests[req_id].sampling_params):
+                drafts[i] = []
+        self._draft_token_ids = DraftTokenIds(req_ids, drafts)
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        draft_token_ids, self._draft_token_ids = self._draft_token_ids, None
+        return draft_token_ids
+
     @torch.inference_mode()
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
         scheduler_output, logits = self._execute_state
@@ -561,24 +670,27 @@ class OpenVINOModelRunnerV1:
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits)
 
-        sampling_metadata = self.input_batch.sampling_metadata
-
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
-
-        sampled_tokens = sampler_output.sampled_token_ids.tolist()
-
-        logprobs_lists = sampler_output.logprobs_tensors.tolists() \
-            if sampler_output.logprobs_tensors is not None else None
+        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        if spec_tokens:
+            sampled_tokens, logprobs_lists = self._sample_with_drafts(
+                logits, spec_tokens)
+        else:
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=self.input_batch.sampling_metadata,
+            )
+            sampled_tokens = sampler_output.sampled_token_ids.tolist()
+            logprobs_lists = sampler_output.logprobs_tensors.tolists() \
+                if sampler_output.logprobs_tensors is not None else None
 
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             req_index = self.input_batch.req_id_to_index[req_id]
             num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
             num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
-            seq_len = num_computed + num_scheduled
+            num_drafts = len(spec_tokens.get(req_id, ()))
+            seq_len = num_computed + num_scheduled - num_drafts
+            new_computed = seq_len
 
             # Partial (chunked) prefill: seq_len is still inside known tokens,
             # so the sampled token must neither overwrite them nor be emitted.
@@ -593,8 +705,15 @@ class OpenVINOModelRunnerV1:
                     self.input_batch.token_ids_cpu[req_index, seq_len:end_idx] = sampled_ids
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
                     req_state.output_token_ids.extend(sampled_ids)
+                    # Rejected draft positions stay uncomputed; only the
+                    # accepted ones advance the sequence.
+                    if num_drafts:
+                        new_computed = seq_len + len(sampled_ids) - 1
 
-            self.input_batch.num_computed_tokens_cpu[req_index] = seq_len
+            self.input_batch.num_computed_tokens_cpu[req_index] = new_computed
+
+        if self.drafter is not None:
+            self._propose_draft_token_ids(scheduler_output, sampled_tokens)
 
         # Snapshot (not a live reference): with async scheduling, a later
         # step can mutate self.input_batch before the scheduler consumes

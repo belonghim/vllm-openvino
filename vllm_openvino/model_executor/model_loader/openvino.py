@@ -918,7 +918,8 @@ class OpenVINOCausalLM(nn.Module):
     ) -> torch.Tensor:
         if logits.dim() == 3:
             last_token_logits = logits[:, -1, :]
-            if num_requests is not None and num_requests < last_token_logits.shape[0]:
+            if (not self._has_kv_cache_inputs and num_requests is not None
+                    and num_requests < last_token_logits.shape[0]):
                 return last_token_logits[:num_requests]
             return last_token_logits
         return logits

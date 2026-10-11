@@ -348,6 +348,18 @@ class OpenVinoPlatform(Platform):
                         scheduler_config.max_num_seqs)
                     scheduler_config.max_num_seqs = 1
 
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if speculative_config.method != "ngram":
+                raise ValueError(
+                    "OpenVINO only supports ngram speculative decoding, got "
+                    f"method={speculative_config.method!r}.")
+            if keeps_external_state:
+                raise ValueError(
+                    "ngram speculative decoding requires a PagedAttention "
+                    "model; this model keeps recurrent or internal state "
+                    "outside vLLM KV blocks.")
+
         # Recurrent/internal state is not stored in vLLM blocks, so a prefix-cache
         # hit would skip tokens whose state is never restored.
         if keeps_external_state and cache_config and cache_config.enable_prefix_caching:
