@@ -28,7 +28,8 @@ from vllm.v1.worker.worker_base import WorkerBase, CompilationTimes
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 
 import vllm_openvino.envs as envs
-from vllm_openvino.worker_v1.openvino_model_runner_v1 import OpenVINOModelRunnerV1
+from vllm_openvino.worker_v1.openvino_model_runner_v1 import (
+    OpenVINOModelRunnerV1, num_state_slots)
 from vllm_openvino.kv_cache import OpenVINOCacheEngine
 from vllm_openvino.utils import (
     canonical_vllm_cache_dtype,
@@ -394,7 +395,7 @@ class OpenVINOWorkerV1(WorkerBase):
         is_stateful = self._is_model_stateful()
         is_hybrid_pa = self._is_hybrid_pa_model()
         if is_hybrid_pa and (self.ssm_cache_config or self.conv_cache_config):
-            num_ssm_blocks = self.scheduler_config.max_num_seqs + 1
+            num_ssm_blocks = num_state_slots(self.vllm_config)
             logger.info(
                 "[OV-WORKER] Hybrid-PA model: conv/SSM physical slots=%d "
                 "(scheduler blocks=%d)",
@@ -907,7 +908,7 @@ class OpenVINOWorkerV1(WorkerBase):
     def _conv_reservation_bytes(self) -> int:
         if not self.conv_cache_config and not self.ssm_cache_config:
             return 0
-        num_conv_slots = self.scheduler_config.max_num_seqs + 1
+        num_conv_slots = num_state_slots(self.vllm_config)
         per_slot_bytes = OpenVINOCacheEngine.get_cache_block_size(
             _resolve_cache_dtype(
                 getattr(self, 'cache_dtype', None)

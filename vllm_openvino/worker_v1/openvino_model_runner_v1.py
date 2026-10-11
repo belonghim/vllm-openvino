@@ -25,6 +25,16 @@ from vllm.v1.core.sched.output import SchedulerOutput
 logger = init_logger(__name__)
 
 
+def num_state_slots(vllm_config: VllmConfig) -> int:
+    """Physical conv/SSM state slots: one committed slot per request, plus
+    1+k temporary per-token slots per request when drafts are verified."""
+    max_seqs = vllm_config.scheduler_config.max_num_seqs
+    spec_config = vllm_config.speculative_config
+    num_spec_tokens = spec_config.num_speculative_tokens if spec_config else 0
+    extra = max_seqs * (1 + num_spec_tokens) if num_spec_tokens else 0
+    return max_seqs + 1 + extra
+
+
 class OpenVINOModelRunnerV1:
     def __init__(
         self,
@@ -118,15 +128,17 @@ class OpenVINOModelRunnerV1:
         # vLLM-scheduler-managed: bypasses MambaSpec's multi-group block
         # striping, which is incompatible with these models' single shared
         # set of state-table inputs.
-        num_conv_slots = max_seqs + 1
+        num_conv_slots = num_state_slots(vllm_config)
         self._conv_slot_by_req: dict[str, int] = {}
         self._conv_slot_free: list[int] = list(range(num_conv_slots))
-        self._la_block_indices_buf = np.zeros(2 * max_seqs, dtype=np.int32)
+        self._spec_temp_slots: dict[str, list[int]] = {}
+        max_la_indices = max_seqs * (2 + self._num_spec_tokens)
+        self._la_block_indices_buf = np.zeros(max_la_indices, dtype=np.int32)
         self._la_block_indices_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
         self._la_past_lens_buf = np.zeros(max_seqs, dtype=np.int32)
         self._la_cache_interval_buf = np.zeros(max_seqs, dtype=np.int32)
         self._la_block_indices_tensor_base = ov.Tensor(
-            self._la_block_indices_buf, ov.Shape([2 * max_seqs]), ov.Type.i32)
+            self._la_block_indices_buf, ov.Shape([max_la_indices]), ov.Type.i32)
         self._la_block_indices_begins_tensor_base = ov.Tensor(
             self._la_block_indices_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
         self._la_past_lens_tensor_base = ov.Tensor(
@@ -234,6 +246,11 @@ class OpenVINOModelRunnerV1:
             preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
             preloaded_ov_model=preloaded_ov_model,
         )
+        if (self.drafter is not None
+                and not getattr(self.model, '_has_kv_cache_inputs', True)):
+            raise ValueError(
+                "ngram speculative decoding requires a PagedAttention or "
+                "Hybrid-PA model; this model fell back to the stateful path.")
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -328,6 +345,7 @@ class OpenVINOModelRunnerV1:
 
         n_reqs = 0
         n_rows = 0
+        la_offset = 0
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         req_spans: dict[str, tuple[int, int, int]] = {}
         self._subseq_begins_buf[0] = 0
@@ -398,11 +416,26 @@ class OpenVINOModelRunnerV1:
 
             if self.conv_caches or self.ssm_caches:
                 conv_slot = self._get_conv_slot(req_id, num_computed)
-                self._la_block_indices_buf[2 * n_reqs] = conv_slot
-                self._la_block_indices_buf[2 * n_reqs + 1] = conv_slot
-                self._la_block_indices_begins_buf[n_reqs + 1] = 2 * (n_reqs + 1)
+                if drafts:
+                    # Per-token checkpoints: token t's state lands in write
+                    # slot t, so a rejected suffix never touches the
+                    # committed slot.
+                    temp_slots = [self._conv_slot_free.pop()
+                                  for _ in range(1 + len(drafts))]
+                    self._spec_temp_slots[req_id] = temp_slots
+                    num_la = 1 + len(temp_slots)
+                    self._la_block_indices_buf[la_offset] = conv_slot
+                    self._la_block_indices_buf[
+                        la_offset + 1:la_offset + num_la] = temp_slots
+                    self._la_cache_interval_buf[n_reqs] = 1
+                else:
+                    num_la = 2
+                    self._la_block_indices_buf[la_offset] = conv_slot
+                    self._la_block_indices_buf[la_offset + 1] = conv_slot
+                    self._la_cache_interval_buf[n_reqs] = 0
+                la_offset += num_la
+                self._la_block_indices_begins_buf[n_reqs + 1] = la_offset
                 self._la_past_lens_buf[n_reqs] = num_computed
-                self._la_cache_interval_buf[n_reqs] = 0
 
             sub_end = self._subseq_begins_buf[n_reqs + 1]
             if drafts:
@@ -497,7 +530,7 @@ class OpenVINOModelRunnerV1:
         la_block_indices = la_block_indices_begins = None
         la_past_lens = la_cache_interval = None
         if self.conv_caches or self.ssm_caches:
-            la_block_indices = self._slice_tensor(self._la_block_indices_tensor_base, 2 * n_reqs)
+            la_block_indices = self._slice_tensor(self._la_block_indices_tensor_base, la_offset)
             la_block_indices_begins = self._slice_tensor(self._la_block_indices_begins_tensor_base, n_reqs + 1)
             la_past_lens = self._slice_tensor(self._la_past_lens_tensor_base, n_reqs)
             la_cache_interval = self._slice_tensor(self._la_cache_interval_tensor_base, n_reqs)
@@ -708,7 +741,15 @@ class OpenVINOModelRunnerV1:
                     # Rejected draft positions stay uncomputed; only the
                     # accepted ones advance the sequence.
                     if num_drafts:
-                        new_computed = seq_len + len(sampled_ids) - 1
+                        num_accepted = len(sampled_ids) - 1
+                        new_computed = seq_len + num_accepted
+                        temp_slots = self._spec_temp_slots.pop(req_id, None)
+                        if temp_slots:
+                            self._conv_slot_free.append(
+                                self._conv_slot_by_req[req_id])
+                            self._conv_slot_by_req[req_id] = temp_slots.pop(
+                                num_accepted)
+                            self._conv_slot_free.extend(temp_slots)
 
             self.input_batch.num_computed_tokens_cpu[req_index] = new_computed
 

@@ -153,21 +153,36 @@ uses `pixel_values`.
 
 ## N-gram Speculative Decoding
 
-Only `method=ngram` on PagedAttention models is accepted
-(`check_and_update_config` raises otherwise). `execute_model` computes logits
-for the 1+k query positions of each draft request, and `sample_tokens` accepts
-drafts while they match the argmax (the stock rejection sampler needs Triton).
-Drafts are proposed only for greedy requests without penalties, `logit_bias`,
-`allowed_token_ids`, `bad_words`, `min_tokens`, logprobs, or structured output;
-other requests in the same batch use the normal sampler. vLLM disables async
-scheduling for `ngram` automatically.
+Only `method=ngram` is accepted, on PagedAttention and Hybrid-PA models
+(`check_and_update_config` raises otherwise; a model that falls back to the
+stateful path fails at load). `execute_model` computes logits for the 1+k query
+positions of each draft request, and `sample_tokens` accepts drafts while they
+match the argmax (the stock rejection sampler needs Triton). Drafts are
+proposed only for greedy requests without penalties, `logit_bias`,
+`allowed_token_ids`, `bad_words`, `min_tokens`, logprobs, or structured
+output; other requests in the same batch use the normal sampler. vLLM disables
+async scheduling for `ngram` automatically.
 
-Measured on Qwen3-1.7B int4 (8 CPUs, k=4, `prompt_lookup_min=5`,
-`prompt_lookup_max=8`): copy-heavy output gains +80% at 4 concurrent requests
-and +33% at 16, and single-request gains reach 2.5x. Free-form output is
-neutral. With `prompt_lookup_min=2` spurious matches cost 7-11% on free-form
-output, so keep `prompt_lookup_min` high. Output can diverge from non-spec
-runs at near-tie tokens because kernel numerics vary with query length.
+Hybrid-PA: a draft request runs with `la.cache_interval=1` and
+`la.block_indices = [committed slot, 1+d temporary slots]`, so token t's
+conv/SSM state lands in temporary slot t. After verification the slot of the
+last accepted token becomes the committed slot and the rest return to the pool.
+With speculation the pool holds `max_num_seqs * (k + 2) + 1` slots, so lower
+`--max-num-seqs` when enabling it on a large-state model.
+
+Measured (8 CPUs, k=4, `prompt_lookup_min=5`, `prompt_lookup_max=8`,
+tok/s, baseline -> spec; copy-heavy / free-form output):
+
+| Model | 1 request | 4 concurrent | 8 concurrent | 16 concurrent |
+|---|---|---|---|---|
+| Qwen3-1.7B (PA) | 23 -> 57 / 23 -> 23 | 82 -> 148 / 82 -> 85 | 154 -> 282 / 160 -> 149 | 268 -> 358 / 267 -> 274 |
+| Qwen3.5-2B (Hybrid-PA) | 21 -> 43 / 22 -> 21 | 56 -> 92 / 64 -> 64 | 86 -> 114 / 102 -> 90 | - -> 124 / - |
+
+Free-form output is neutral up to 4 concurrent requests and loses up to ~10%
+on Hybrid-PA at 8, where verification is not free. Keep `prompt_lookup_min`
+high: with 2, spurious matches cost 7-11% on free-form output for Qwen3-1.7B.
+Output can diverge from non-spec runs at near-tie tokens because kernel
+numerics vary with query length.
 
 ## Known Limitations
 

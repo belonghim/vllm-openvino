@@ -231,7 +231,7 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
 - Structured outputs (`structured_outputs`, `response_format`, forced tool calls) via the grammar bitmask
-- N-gram speculative decoding (`--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":5,"prompt_lookup_max":8}'`) on PagedAttention models; drafts are verified greedily and only for greedy requests without penalties, logprobs, or structured output. Hybrid and stateful models reject it. It speeds up copy-heavy output (code edits, quoting, RAG); see `docs/compatibility.md`
+- N-gram speculative decoding (`--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":5,"prompt_lookup_max":8}'`) on PagedAttention and Hybrid-PA models; drafts are verified greedily and only for greedy requests without penalties, logprobs, or structured output. Stateful-path models reject it. It speeds up copy-heavy output (code edits, quoting, RAG); see `docs/compatibility.md`
 - Gemma 3 and Gemma 4 text and multimodal (text + image)
 - Qwen3.5 and LFM2.5 (hybrid Mamba/attention architecture, via Hybrid-PA)
 

@@ -354,10 +354,10 @@ class OpenVinoPlatform(Platform):
                 raise ValueError(
                     "OpenVINO only supports ngram speculative decoding, got "
                     f"method={speculative_config.method!r}.")
-            if keeps_external_state:
+            if keeps_external_state and not hybrid_pa:
                 raise ValueError(
                     "ngram speculative decoding requires a PagedAttention "
-                    "model; this model keeps recurrent or internal state "
+                    "or Hybrid-PA model; this model keeps internal state "
                     "outside vLLM KV blocks.")
 
         # Recurrent/internal state is not stored in vLLM blocks, so a prefix-cache
