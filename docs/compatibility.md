@@ -184,6 +184,13 @@ high: with 2, spurious matches cost 7-11% on free-form output for Qwen3-1.7B.
 Output can diverge from non-spec runs at near-tie tokens because kernel
 numerics vary with query length.
 
+Stateful-path models (Gemma-4) are not supported. Rolling back rejected tokens
+by trimming every KV state on the sequence axis (`get_state`/`set_state`) is
+exact, sliding-window layers included (Gemma-4 E2B, 700-token context,
+logits identical to the untrimmed run), but the trim copies all states at
+10-33 ms for 700-4000 tokens of context against a 53-130 ms decode step, and
+the stateful path serves one request at a time and is maintenance-only.
+
 ## Known Limitations
 
 - Gemma-4 sliding-window attention is supported only on the sequential
