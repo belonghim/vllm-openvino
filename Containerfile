@@ -22,6 +22,8 @@ RUN pip install -U pip setuptools wheel && \
 WORKDIR /opt/vllm
 COPY pyproject.toml ./
 RUN pip install --no-deps --no-cache-dir .
+# Patched CPU plugin (openvinotoolkit/openvino#38517), see patches/README.md. Remove once upstream ships the fix.
+COPY patches/libopenvino_intel_cpu_plugin.so /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/
 FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
 RUN microdnf install -y python3 shadow-utils && microdnf clean all
 COPY --from=builder /opt/vllm-env /opt/vllm-env

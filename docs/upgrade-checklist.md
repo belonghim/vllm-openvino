@@ -40,6 +40,12 @@ Pay particular attention to `WorkerBase`, `ModelRunnerOutput`,
 `SchedulerOutput`, `InputBatch`, `AttentionMetadata`, `KVCacheSpec`,
 `MambaSpec`, `bind_kv_cache`, and `CompilationTimes`.
 
+## OpenVINO Upgrades
+
+The image overwrites the wheel's CPU plugin with a patched build tied to
+OpenVINO 2026.4.1. On an OpenVINO version change, follow `patches/README.md`
+to drop or rebuild it.
+
 ## Validation
 
 1. Run `python3 -m py_compile` on changed Python files.
