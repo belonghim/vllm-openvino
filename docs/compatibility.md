@@ -24,6 +24,15 @@ MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set `VLLM_USE_
 those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
 removal for 0.32, which 0.31.0 does not confirm.
 
+Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
+not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
+`"cpu" in version("vllm")`, so the probe still reports no active driver,
+`HAS_TRITON` stays false and MRV1 is selected. With the version string faked to
+`+cpu` (MRV2 selected by config), the plugin's own worker still served
+Qwen3-1.7B on the PagedAttention path. Hybrid-PA, stateful (Gemma-4),
+multimodal, n-gram speculation and structured output were not tested under
+that configuration.
+
 Tracked upstream:
 
 - [vllm-project/vllm#57684](https://github.com/vllm-project/vllm/issues/57684) —
