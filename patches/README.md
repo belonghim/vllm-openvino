@@ -5,7 +5,7 @@ with `libopenvino_intel_cpu_plugin.so` from this directory (see `Containerfile`)
 
 - Problem: `GatherMatmulDnnlExecutor::execute` uses GEMM for M > 1 only on
   bf16+AMX, so MoE prefill elsewhere runs one GEMV per routed row.
-  Upstream: openvinotoolkit/openvino#38517.
+  Upstream: openvinotoolkit/openvino#38517; PR openvinotoolkit/openvino#38822 (open).
 - Patch: `openvino-gathermatmul-grouped-gemm.patch` (2 files, +64/-10). Without
   AMX each expert runs one GEMM over its own routed rows. The AMX branch is untouched.
 - Binary: CPU plugin only, built from tag `2026.4.1` (e213a147) with the patch
