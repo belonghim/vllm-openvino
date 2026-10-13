@@ -1,8 +1,18 @@
 diff --git a/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.cpp b/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.cpp
-index e29fdccc..1afeea1c 100644
+index e29fdccc75..0c3dcf704e 100644
 --- a/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.cpp
 +++ b/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.cpp
-@@ -402,10 +402,6 @@ GatherMatmulDnnlExecutor::GatherMatmulDnnlExecutor([[maybe_unused]] const Gather
+@@ -227,6 +227,9 @@ private:
+ 
+ namespace {
+ 
++// Below this many routed rows the gather/scatter and M padding cost more than re-reading the weights per row.
++constexpr size_t kMinRowsForGemm = 4;
++
+ // ---- normalizeM helper -------------------------------------------------------
+ 
+ Dim normalizeM(Dim M) {
+@@ -402,10 +405,6 @@ GatherMatmulDnnlExecutor::GatherMatmulDnnlExecutor([[maybe_unused]] const Gather
  }
  
  bool GatherMatmulDnnlExecutor::update(const MemoryArgs& memory) {
@@ -13,7 +23,7 @@ index e29fdccc..1afeea1c 100644
      const auto& srcMem = memory.at(ARG_SRC);
      const auto& srcShape = srcMem->getStaticDims();
      // srcShape is [B, M, K]
-@@ -454,11 +450,18 @@ bool GatherMatmulDnnlExecutor::update(const MemoryArgs& memory) {
+@@ -454,11 +453,18 @@ bool GatherMatmulDnnlExecutor::update(const MemoryArgs& memory) {
          }
      }
  
@@ -37,7 +47,7 @@ index e29fdccc..1afeea1c 100644
      const auto& eng = m_context->getEngine();
      const auto threadPool = m_context->getThreadPool();
      auto cache = m_context->getRuntimeCache();
-@@ -468,6 +471,17 @@ bool GatherMatmulDnnlExecutor::update(const MemoryArgs& memory) {
+@@ -468,6 +474,17 @@ bool GatherMatmulDnnlExecutor::update(const MemoryArgs& memory) {
      return true;
  }
  
@@ -55,7 +65,7 @@ index e29fdccc..1afeea1c 100644
  void GatherMatmulDnnlExecutor::execute(const MemoryArgs& memory) {
      const auto& cpu_parallel = m_context->getCpuParallel();
      const auto& srcMem = memory.at(ARG_SRC);
-@@ -563,14 +577,46 @@ void GatherMatmulDnnlExecutor::execute(const MemoryArgs& memory) {
+@@ -563,14 +580,46 @@ void GatherMatmulDnnlExecutor::execute(const MemoryArgs& memory) {
              }
          } else {
              OPENVINO_ASSERT(m_gemvImpl, "GEMV implementation is not created");
@@ -78,7 +88,7 @@ index e29fdccc..1afeea1c 100644
                  auto* bias = bias_offset(gather_axis_index);
                  auto* scale = scale_offset(gather_axis_index);
                  auto* zp = zp_offset(gather_axis_index);
-+                if (num_valid_rows > 1) {
++                if (num_valid_rows >= kMinRowsForGemm) {
 +                    const size_t rows = normalizeM(num_valid_rows);
 +                    cpu_parallel->parallel_for(rows, [&](size_t m) {
 +                        auto* dst_row = input_ptr + m * K_size * element_size;
@@ -104,7 +114,7 @@ index e29fdccc..1afeea1c 100644
                      const auto row_id = gather_idx_map[gather_axis_index * M + m].first;
                      const auto batch_index = gather_idx_map[gather_axis_index * M + m].second;
 diff --git a/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.hpp b/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.hpp
-index e09f0bd6..0b301504 100644
+index e09f0bd6a0..0b301504d3 100644
 --- a/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.hpp
 +++ b/src/plugins/intel_cpu/src/nodes/executors/dnnl/dnnl_gathermatmul_executor.hpp
 @@ -32,6 +32,8 @@ private:
