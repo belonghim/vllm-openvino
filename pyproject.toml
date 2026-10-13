@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "openvino >= 2026.4.1",
-    "vllm == 0.31.0",
+    "vllm == 0.32.0rc0",
 ]
 requires-python = ">=3.10"
 

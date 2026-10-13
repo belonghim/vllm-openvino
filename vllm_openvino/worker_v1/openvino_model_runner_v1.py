@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import numpy as np
 import openvino as ov
 import openvino.properties as ov_props
@@ -117,6 +119,22 @@ class OpenVINOModelRunnerV1:
         self._position_range_buf = np.arange(
             self.model_config.max_model_len, dtype=np.int64)
 
+        # MiniCPM-V 4.7 canvas M-RoPE: the LM takes [3, n] positions, with
+        # image tokens placed on the slice canvas (computed by vLLM's own
+        # model code) and decode positions offset by a per-request delta.
+        self._canvas_mrope = None
+        self._mrope_by_req: dict[str, tuple[np.ndarray, int]] = {}
+        hf_config = self.model_config.hf_config
+        if getattr(hf_config, "model_type", None) == "minicpmv4_7":
+            from vllm.model_executor.models.minicpmv4_7 import (
+                MiniCPMV4_7ForConditionalGeneration as minicpm_model)
+            canvas = SimpleNamespace(config=hf_config)
+            minicpm_model._init_canvas_mrope(canvas, vllm_config)
+            self._canvas_mrope = (minicpm_model, canvas)
+            self._mrope_buf = np.zeros(
+                (3, self.scheduler_config.max_num_batched_tokens),
+                dtype=np.int64)
+
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
         self._new_req_ids: set[str] = set()
@@ -223,7 +241,6 @@ class OpenVINOModelRunnerV1:
             device=self.device,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=block_sizes,
-            kernel_block_sizes=block_sizes,
             max_num_blocks_per_req=max_num_blocks_per_req,
             is_pooling_model=getattr(self.model_config, 'is_pooling_model', False),
         )
@@ -262,6 +279,7 @@ class OpenVINOModelRunnerV1:
             self.requests.pop(req_id, None)
             self.input_batch.remove_request(req_id)
             self._mm_req_ids.discard(req_id)
+            self._mrope_by_req.pop(req_id, None)
             slot = self._conv_slot_by_req.pop(req_id, None)
             if slot is not None:
                 self._conv_slot_free.append(slot)
@@ -301,6 +319,12 @@ class OpenVINOModelRunnerV1:
             self._new_req_ids.add(req_id)
             if req_state.mm_features:
                 self._mm_req_ids.add(req_id)
+                if self._canvas_mrope is not None:
+                    minicpm_model, canvas = self._canvas_mrope
+                    pos3d, delta = minicpm_model.get_mrope_input_positions(
+                        canvas, list(req_state.prompt_token_ids),
+                        req_state.mm_features)
+                    self._mrope_by_req[req_id] = (pos3d.numpy(), delta)
 
         # Update cached (running) requests
         req_data = scheduler_output.scheduled_cached_reqs
@@ -321,6 +345,38 @@ class OpenVINOModelRunnerV1:
             req_state.num_computed_tokens = num_computed_tokens
             if req_id not in self.input_batch.req_id_to_index:
                 self.input_batch.add_request(req_state)
+
+    @staticmethod
+    def _embed_runs(pos, lo: int, hi: int) -> list[tuple[int, int, int]]:
+        """Contiguous (start, end, embed_offset) runs of embedding slots in [lo, hi)."""
+        if pos.is_embed is None:
+            return [(lo, hi, lo - pos.offset)]
+        mask = pos.is_embed[lo - pos.offset:hi - pos.offset].numpy().astype(np.int8)
+        edges = np.diff(np.concatenate(([0], mask, [0])))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        embed_base = pos.embeds_cumsum[lo - pos.offset - 1] if lo > pos.offset else 0
+        runs = []
+        embed_offset = embed_base
+        for start, end in zip(starts.tolist(), ends.tolist()):
+            runs.append((lo + start, lo + end, embed_offset))
+            embed_offset += end - start
+        return runs
+
+    def _fill_mrope_positions(
+        self, req_id: str, pos_idx: int, num_computed: int, num_tokens_total: int,
+    ) -> None:
+        out = self._mrope_buf[:, pos_idx:pos_idx + num_tokens_total - num_computed]
+        state = self._mrope_by_req.get(req_id)
+        if state is None:
+            out[:] = self._position_range_buf[num_computed:num_tokens_total]
+            return
+        pos3d, delta = state
+        num_prompt = max(0, min(num_tokens_total, pos3d.shape[1]) - num_computed)
+        out[:, :num_prompt] = pos3d[:, num_computed:num_computed + num_prompt]
+        out[:, num_prompt:] = (
+            self._position_range_buf[num_computed + num_prompt:num_tokens_total]
+            + delta)
 
     def _prepare_inputs(
         self,
@@ -409,6 +465,9 @@ class OpenVINOModelRunnerV1:
             else:
                 self._input_positions_buf[pos_idx:pos_idx + num_tokens] = \
                     self._position_range_buf[num_computed:num_tokens_total]
+            if self._canvas_mrope is not None:
+                self._fill_mrope_positions(
+                    req_id, pos_idx, num_computed, num_tokens_total)
             pos_idx += num_tokens
 
             self._past_lens_buf[n_reqs] = num_computed
@@ -466,6 +525,9 @@ class OpenVINOModelRunnerV1:
                     mm_item = mm_feature.data
                     if lo >= hi or mm_item is None:
                         continue
+                    runs = self._embed_runs(pos, lo, hi)
+                    if not runs:
+                        continue
                     if "pixel_values" in mm_item:
                         pixels = mm_item["pixel_values"].data
                     else:
@@ -480,10 +542,14 @@ class OpenVINOModelRunnerV1:
                             mm_item["pixel_position_ids"].data)
                     if "image_grid_thw" in mm_item:
                         all_image_grid_thw.append(mm_item["image_grid_thw"].data)
-                    all_image_position_ids.append(
-                        (batch_start + lo - num_computed,
-                         batch_start + hi - num_computed,
-                         lo - pos.offset))
+                    elif "tgt_sizes" in mm_item:
+                        all_image_grid_thw.append(mm_item["tgt_sizes"].data)
+                    image_idx = len(all_pixel_values) - 1
+                    for run_lo, run_hi, patch_offset in runs:
+                        all_image_position_ids.append(
+                            (batch_start + run_lo - num_computed,
+                             batch_start + run_hi - num_computed,
+                             patch_offset, image_idx))
                     all_mm_hashes.append(mm_feature.identifier or None)
 
             if all_pixel_values:
@@ -502,7 +568,11 @@ class OpenVINOModelRunnerV1:
         assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
 
         input_tokens = self._slice_tensor(self._input_tokens_tensor_base, token_idx)
-        input_positions = self._slice_tensor(self._input_positions_tensor_base, pos_idx)
+        if self._canvas_mrope is not None:
+            input_positions = torch.from_numpy(self._mrope_buf[:, :pos_idx])
+        else:
+            input_positions = self._slice_tensor(
+                self._input_positions_tensor_base, pos_idx)
         sampled_token_indices_tensor = self._slice_tensor(self._sampled_idx_tensor_base, n_rows)
         past_lens_tensor = self._slice_tensor(self._past_lens_tensor_base, n_reqs)
         subsequence_begins_tensor = self._slice_tensor(self._subseq_begins_tensor_base, n_reqs + 1)

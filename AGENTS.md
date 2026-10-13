@@ -6,7 +6,7 @@
 
 **구현 참조**: [OpenVINO GenAI](https://github.com/openvinotoolkit/openvino.genai)의 추론 로직(상태 관리, SDPA 백엔드, 하이브리드 모델 처리)을 참고하여, 동일 OpenVINO IR 모델을 vLLM OpenAI-compatible API로 서빙하는 것이 핵심 목표다.
 
-- **vLLM 버전**: 0.31.0
+- **vLLM 버전**: 0.32.0rc0
 - **OpenVINO 버전**: >= 2026.4.1
 - **플러그인 등록**: `pyproject.toml`의 `[project.entry-points."vllm.platform_plugins"]`
 
@@ -85,4 +85,4 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
   - 텍스트 임베딩: `openvino_text_embeddings_model.xml`
   - 비전 인코더: `openvino_vision_embeddings_model.xml` (입력: **2D** `[num_patches, features]`, 배치 dim 없음 — 필요 시 squeeze)
   - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
-- **mm_item 키 차이** — Qwen3.5는 `pixel_values` + `image_grid_thw`, Gemma-4는 `pixel_values`를 사용한다.
+- **mm_item 키 차이** — Qwen3.5는 `pixel_values` + `image_grid_thw`, Gemma-4는 `pixel_values`, MiniCPM-V 4.7은 `pixel_values` + `tgt_sizes`(`image_grid_thw` 슬롯으로 전달)를 사용한다. MiniCPM-V 4.7은 crop 단위 vision 인코딩과 canvas M-RoPE `[3, n]` 위치를 쓰며, 필요한 vLLM 모델 코드는 0.32.0rc0부터 포함된다.

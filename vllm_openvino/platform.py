@@ -177,6 +177,19 @@ def _is_hybrid_pa_candidate(model_path: str) -> bool:
         return False
 
 
+def _register_cpu_sampler_ops() -> None:
+    # vLLM's Sampler calls torch.ops._C.greedy_argmax whenever the platform
+    # reports CPU; the wheel here has no CPU kernels, so provide it.
+    if hasattr(torch.ops._C, "greedy_argmax"):
+        return
+    lib = torch.library.Library("_C", "FRAGMENT")
+    lib.define("greedy_argmax(Tensor logits) -> Tensor")
+    lib.impl("greedy_argmax", lambda logits: logits.argmax(dim=-1).view(-1), "CPU")
+    _register_cpu_sampler_ops.lib = lib  # type: ignore[attr-defined]
+
+
+_register_cpu_sampler_ops()
+
 # Constants for memory and block size configuration
 GIB_BYTES = 1024 ** 3
 CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead

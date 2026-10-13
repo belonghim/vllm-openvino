@@ -262,11 +262,13 @@ class OpenVINOInputBuilder(ABC):
             ssm_caches: Optional SSM state tensors (hybrid models).
             conv_caches: Optional convolution cache tensors (hybrid models).
             pixel_values: Optional per-image pixel values for vision embeddings.
-            image_position_ids: Optional [num_images, 3] rows of
-                (batch_start, batch_end, patch_offset) text insertion slots,
-                one per image in ``pixel_values``.
+            image_position_ids: Optional [num_slots, 4] rows of
+                (batch_start, batch_end, patch_offset, image_index) text
+                insertion slots; image_index selects the entry of
+                ``pixel_values`` whose embeddings fill the slot.
             pixel_position_ids: Optional per-image patch spatial coordinates.
-            image_grid_thw: Optional per-image grid (T, H, W) for vision rotary embeddings.
+            image_grid_thw: Optional per-image grid (T, H, W) for vision rotary
+                embeddings; per-crop (H, W) ``tgt_sizes`` for MiniCPM-V.
             num_requests: Actual number of requests in batch.
             mm_hashes: Optional per-image stable content hashes, used as the
                 keys of the merged-vision-embedding LRU cache.
@@ -279,6 +281,33 @@ class OpenVINOInputBuilder(ABC):
 
 _TEXT_EMB_CACHE_MAX_SIZE = 8
 _VISION_EMB_CACHE_MAX_SIZE = 8
+
+
+def _crop_position_ids(h: int, w: int, grid_side: int) -> np.ndarray:
+    """Nearest-neighbour bucket of each patch in the grid_side x grid_side table."""
+    boundaries = np.arange(1, grid_side) / grid_side
+    rows = np.searchsorted(boundaries, np.arange(h) / h, side="right")
+    cols = np.searchsorted(boundaries, np.arange(w) / w, side="right")
+    return (rows[:, None] * grid_side + cols[None, :]).reshape(-1).astype(np.int64)
+
+
+def _crop_window_index(h: int, w: int, window: int) -> np.ndarray:
+    """Patch order grouped into window x window attention windows."""
+    pad_h = -(-h // window) * window
+    pad_w = -(-w // window) * window
+    grid = np.full((pad_h, pad_w), -1, dtype=np.int64)
+    grid[:h, :w] = np.arange(h * w).reshape(h, w)
+    grid = grid.reshape(pad_h // window, window, pad_w // window, window)
+    grid = grid.transpose(0, 2, 1, 3).reshape(-1)
+    return grid[grid >= 0]
+
+
+def _crop_merge_index(h: int, w: int, window: int, merge: int) -> np.ndarray:
+    """Token order grouped into merge x merge blocks after window downsample."""
+    post_h, post_w = h // window, w // window
+    index = np.arange(post_h * post_w, dtype=np.int64).reshape(
+        post_h // merge, merge, post_w // merge, merge)
+    return index.transpose(0, 2, 1, 3).reshape(-1)
 
 
 class OpenVINOCausalLM(nn.Module):
@@ -511,6 +540,20 @@ class OpenVINOCausalLM(nn.Module):
                 vision_emb_model, ov_device, perf_hint)
             self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
 
+            # MiniCPM-V 4.6/4.7 encoder: one packed crop per infer plus
+            # host-built position/window/merge index tensors.
+            vision_input_names = {
+                inp.get_any_name() for inp in self.ov_vision_emb_compiled.inputs}
+            self._crop_vision = {"window_index", "merge_index"} <= vision_input_names
+            if self._crop_vision:
+                hf_config = model_config.hf_config
+                vision_config = hf_config.vision_config
+                self._crop_patch_size = vision_config.patch_size
+                self._crop_grid_side = (
+                    vision_config.image_size // vision_config.patch_size)
+                self._crop_window = vision_config.window_kernel_size[0]
+                self._crop_merge = hf_config.merge_kernel_size[0]
+
             vision_merger_path = model_dir / "openvino_vision_embeddings_merger_model.xml"
             if vision_merger_path.exists():
                 vision_merger_model = ov_core.read_model(str(vision_merger_path))
@@ -733,6 +776,10 @@ class OpenVINOCausalLM(nn.Module):
             logger.debug("[OV-VISION] Cache miss for mm_hash=%s; encoding",
                          mm_hash[:16])
 
+        if self._crop_vision:
+            return self._cache_vision_embeds(
+                mm_hash, self._encode_crops(pixel_values, image_grid_thw))
+
         pixel_values_np, image_pos_np = self._prepare_vision_inputs(
             pixel_values.unsqueeze(0),
             pixel_position_ids.unsqueeze(0) if pixel_position_ids is not None else None)
@@ -769,12 +816,37 @@ class OpenVINOCausalLM(nn.Module):
                 -1, vision_embeds.shape[-1])
 
         # OpenVINO reuses output buffers, so detach before the next image.
-        vision_embeds_2d = vision_embeds_2d.copy()
+        return self._cache_vision_embeds(mm_hash, vision_embeds_2d.copy())
+
+    def _cache_vision_embeds(
+        self, mm_hash: str | None, vision_embeds_2d: np.ndarray,
+    ) -> np.ndarray:
         if mm_hash is not None:
             self._vision_embed_cache[mm_hash] = vision_embeds_2d
             if len(self._vision_embed_cache) > _VISION_EMB_CACHE_MAX_SIZE:
                 self._vision_embed_cache.popitem(last=False)
         return vision_embeds_2d
+
+    def _encode_crops(
+        self, pixel_values: torch.Tensor, tgt_sizes: torch.Tensor,
+    ) -> np.ndarray:
+        """Encode zero-padded crops [n, 3, patch, L_max] one at a time."""
+        crops = self._as_numpy_no_copy(pixel_values)
+        sizes = self._as_numpy_no_copy(tgt_sizes).reshape(-1, 2)
+        outputs = []
+        for crop, (h, w) in zip(crops, sizes.tolist()):
+            length = h * w * self._crop_patch_size
+            self.vision_emb_request.infer({
+                "pixel_values": np.ascontiguousarray(
+                    crop[np.newaxis, :, :, :length], dtype=np.float32),
+                "position_ids": _crop_position_ids(h, w, self._crop_grid_side),
+                "window_index": _crop_window_index(h, w, self._crop_window),
+                "merge_index": _crop_merge_index(
+                    h, w, self._crop_window, self._crop_merge),
+            })
+            out = self.vision_emb_request.get_output_tensor(0)
+            outputs.append(out.data.reshape(-1, out.shape[-1]).copy())
+        return np.concatenate(outputs)
 
     def _prepare_embeddings(
         self,
@@ -815,8 +887,8 @@ class OpenVINOCausalLM(nn.Module):
                 # are never modified.
                 inputs_embeds_2d = inputs_embeds_2d.copy()
                 rows = self._as_numpy_no_copy(image_position_ids).tolist()
-                for (start, end, patch_offset), vision_embeds_2d in zip(
-                        rows, vision_embeds):
+                for start, end, patch_offset, image_idx in rows:
+                    vision_embeds_2d = vision_embeds[image_idx]
                     if start >= inputs_embeds_2d.shape[0]:
                         continue
                     end = min(end, inputs_embeds_2d.shape[0])
@@ -1156,8 +1228,11 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
             "la.cache_interval": attn_metadata.la_cache_interval,
         }
         if model._position_input_name is not None:
-            if model._position_input_channels > 1:
-                pos_np = model._as_numpy_no_copy(positions).reshape(-1)
+            pos_np = model._as_numpy_no_copy(positions)
+            if pos_np.ndim == 2:
+                inputs[model._position_input_name] = np.ascontiguousarray(pos_np)
+            elif model._position_input_channels > 1:
+                pos_np = pos_np.reshape(-1)
                 seq_len = pos_np.shape[0]
                 if (self._pos_multi_buf is None
                         or self._pos_multi_buf.shape[1] != seq_len):

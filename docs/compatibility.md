@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- vLLM `0.31.0`
+- vLLM `0.32.0rc0`
 - OpenVINO `>= 2026.4.1`
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
@@ -14,7 +14,7 @@ the OpenVINO execution path.
 
 ## Upstream vLLM Compatibility
 
-The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.31.0
+The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.32.0rc0
 selects MRV2 only when `HAS_TRITON` is true. With the PyPI `vllm` wheel it is
 false on CPU hosts even if Triton is installed, because vLLM requires exactly
 one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
@@ -22,7 +22,7 @@ one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
 ([#58140](https://github.com/vllm-project/vllm/pull/58140)) and would select
 MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set `VLLM_USE_V2_MODEL_RUNNER=0` in
 those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
-removal for 0.32, which 0.31.0 does not confirm.
+removal for 0.32; 0.32.0rc0 still ships it.
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
 not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
@@ -44,8 +44,11 @@ Tracked upstream:
   hook).
 
 Open questions on #57684 (whether the MRV1 removal target holds, and whether a
-replacement-runner path exists for plugins) are unanswered. Re-check on the
-0.32 release candidate.
+replacement-runner path exists for plugins) are unanswered.
+
+Since 0.32.0rc0 the vLLM `Sampler` calls `torch.ops._C.greedy_argmax` whenever the
+platform reports CPU, and the PyPI-style wheel has no CPU kernels. `platform.py`
+registers an argmax implementation for that op when it is missing.
 
 ## Serving Paths
 
@@ -123,8 +126,9 @@ text because of prefill vs decode numerics.
   would skip tokens without restoring that state (repeated long prompts gave
   different, wrong answers). Pure-attention PA models keep it enabled.
 - Multimodal requests are encoded per image (own grid, merger attention and
-  cache entry) and scattered by explicit `(batch_start, batch_end, patch_offset)`
-  rows, so concurrent requests, differently sized images, multi-image prompts and
+  cache entry) and scattered by explicit
+  `(batch_start, batch_end, patch_offset, image_index)` rows (one per contiguous
+  `is_embed` run of the placeholder), so concurrent requests, differently sized images, multi-image prompts and
   images split by chunked prefill are handled. For text-only serving of a
   multimodal checkpoint, `--limit-mm-per-prompt '{"image":0,"video":0}'` skips
   the multimodal warmup (startup 64 s to 50 s on Qwen3.5-0.8B-int4).
@@ -159,6 +163,23 @@ The vision encoder expects a 2D `[num_patches, features]` input. Vision merger
 calls require `hidden_states`, `attention_mask`, and `rotary_pos_emb`.
 Qwen3.5 multimodal inputs use `pixel_values` and `image_grid_thw`; Gemma-4
 uses `pixel_values`.
+
+### MiniCPM-V 4.7
+
+The vision IR takes one packed crop per infer: `pixel_values [1,3,14,h*w*14]`
+plus host-built `position_ids`, `window_index` and `merge_index` (same algorithms
+as OpenVINO GenAI's `VisionEncoderMiniCPMv4_7`) and returns merged tokens
+`[tokens, hidden]`. vLLM's zero-padded `pixel_values [n_slices,3,14,L_max]` is
+cut by `tgt_sizes` (passed through the `image_grid_thw` slot). The slice
+placeholders interleave `<slice>`/newline tokens with `<|image_pad|>` runs, so
+embeddings go to the `is_embed` runs only. The LM takes `[3, n]` canvas M-RoPE
+positions computed by vLLM's `MiniCPMV4_7ForConditionalGeneration`
+(`get_mrope_input_positions`); decode positions are `index + rope_delta`.
+
+Requires vLLM >= 0.32.0rc0 (contains vllm-project/vllm #58674 and #56372) and
+Transformers >= 5.18.0; vLLM 0.31.0 and Transformers 5.17.0 lack them. Verified
+on the 0.32.0rc0 image: single and multi-slice images, concurrent requests and
+chunked prefill describe the image correctly.
 
 ## N-gram Speculative Decoding
 
