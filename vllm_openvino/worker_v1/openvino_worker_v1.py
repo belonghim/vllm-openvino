@@ -350,9 +350,9 @@ class OpenVINOWorkerV1(WorkerBase):
         num_device_blocks = num_gpu_blocks
         num_swap_blocks = num_cpu_blocks
 
-        if current_platform.is_openvino_cpu():
-            assert (num_swap_blocks == 0
-                    ), f"{type(self)} does not support swappable cache for CPU"
+        if current_platform.is_openvino_cpu() and num_swap_blocks != 0:
+            raise ValueError(
+                f"{type(self).__name__} does not support swappable cache for CPU")
 
         self._validate_num_blocks(num_device_blocks)
         self.cache_config.num_gpu_blocks = num_device_blocks
@@ -429,7 +429,8 @@ class OpenVINOWorkerV1(WorkerBase):
         bind_kv_cache({}, self.compilation_config.static_forward_context, [])
         self.model_runner.block_size = self.cache_engine.block_size
 
-        assert self.kv_cache is not None
+        if self.kv_cache is None:
+            raise RuntimeError("kv_cache was not initialized by _init_cache_engine")
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
@@ -511,8 +512,8 @@ class OpenVINOWorkerV1(WorkerBase):
     def profile_run(self) -> int:
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
-        assert not current_platform.is_openvino_cpu(), \
-            "CPU device isn't supposed to use profile run."
+        if current_platform.is_openvino_cpu():
+            raise RuntimeError("profile_run is not supported on CPU device")
 
         import openvino.properties.device as device
         import openvino.properties.intel_gpu as intel_gpu
@@ -693,7 +694,8 @@ class OpenVINOWorkerV1(WorkerBase):
         cache_type = _resolve_cache_dtype(
             getattr(self, 'cache_dtype', None)
             or getattr(self.cache_config, 'openvino_kv_dtype', None))
-        assert cache_type in str_to_torch_type, f"Unexpected cache type {cache_type}"
+        if cache_type not in str_to_torch_type:
+            raise ValueError(f"Unexpected cache type {cache_type!r}")
         kv_cache_spec = {}
 
         logger.info(

@@ -424,8 +424,9 @@ class OpenVINOModelRunnerV1:
                 num_group_blocks = len(group_block_table)
                 if num_group_blocks:
                     group_offset = int(self._block_idx_group_offsets[group_idx])
-                    assert group_offset + num_group_blocks <= self._max_block_indices, \
-                        f"block_indices overflow: {group_offset + num_group_blocks} > {self._max_block_indices}"
+                    if group_offset + num_group_blocks > self._max_block_indices:
+                        raise RuntimeError(
+                            f"block_indices overflow: {group_offset + num_group_blocks} > {self._max_block_indices}")
                     self._block_indices_group_data[group_idx][
                         group_offset:group_offset + num_group_blocks
                     ] = group_block_table
@@ -565,7 +566,8 @@ class OpenVINOModelRunnerV1:
                     all_image_position_ids, dtype=torch.int64).to(self.device)
                 multi_modal_kwargs["mm_hashes"] = all_mm_hashes
 
-        assert max_query_len > 0, "Invalid: all scheduled sequences have zero query length"
+        if max_query_len <= 0:
+            raise RuntimeError("Invalid: all scheduled sequences have zero query length")
 
         input_tokens = self._slice_tensor(self._input_tokens_tensor_base, token_idx)
         if self._canvas_mrope is not None:
