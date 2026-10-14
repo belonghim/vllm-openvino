@@ -4,16 +4,8 @@
 At decode, sampling runs on the critical path of every step and, for small
 models, costs as much as the OpenVINO inference itself. Upstream's CPU
 implementations are tuned for neither the batch nor the vocabulary size seen
-here (batch <= 128, vocab 65k-250k), so three of them are replaced:
+here (batch <= 128, vocab 65k-250k), so two of them are replaced:
 
-* `compiled_random_sample`: upstream draws a full (batch, vocab) buffer of
-  exponential noise (Gumbel-max). A categorical draw needs one uniform number
-  per row: softmax -> cumsum -> searchsorted(right=True) is ~7x faster at
-  (8, 151936) and samples the same distribution. `right=True` returns the
-  first index whose cumulative mass is strictly greater than the draw, so
-  zero-probability (masked) tokens are never selected; the draw is scaled by
-  the row's own cumulative total, so float32 rounding cannot push it past the
-  last bucket.
 * `apply_top_k_top_p` with top-p: upstream sorts the entire vocabulary. Top-k
   and the nucleus only ever keep a handful of tokens, so a partial `topk` over
   the candidates is enough. Falls back to upstream when the candidates cannot
@@ -23,10 +15,18 @@ here (batch <= 128, vocab 65k-250k), so three of them are replaced:
   appeared in the prompt or output, so it is applied on those positions only.
   Batches that use presence/frequency penalties take the upstream path.
 
-Determinism: `forward_cpu` calls `compiled_random_sample` only when the
-batch has no per-request `torch.Generator`. A batch containing any seeded
-request takes the explicit per-generator path instead, so per-request
-seeds keep their stock torch semantics.
+`fused_gumbel_argmax` is not a patch: upstream `forward_cpu` calls
+`torch.ops._C.fused_gumbel_argmax`, a C++ kernel this wheel (built with
+`VLLM_TARGET_DEVICE=empty`) does not ship, so platform.py always registers
+this implementation. The kernel draws per-token Gumbel noise over the whole
+vocabulary; a categorical draw needs one uniform number per row:
+softmax -> cumsum -> searchsorted(right=True) samples the same distribution.
+`right=True` returns the first index whose cumulative mass is strictly
+greater than the draw, so zero-probability (masked) tokens are never
+selected; the draw is scaled by the row's own cumulative total, so float32
+rounding cannot push it past the last bucket. Each row's draw comes from its
+`seeds` entry, which upstream takes from the request's `torch.Generator` when
+the request has a seed, so seeded requests stay reproducible.
 """
 from __future__ import annotations
 
@@ -40,11 +40,14 @@ logger = init_logger(__name__)
 _NUCLEUS_CANDIDATES = 1024
 
 
-def openvino_random_sample(logits: torch.Tensor) -> torch.Tensor:
+def fused_gumbel_argmax(logits: torch.Tensor, seeds: torch.Tensor) -> torch.Tensor:
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     cdf = probs.cumsum(dim=-1)
-    draw = torch.rand(cdf.shape[0], 1) * cdf[:, -1:]
-    return torch.searchsorted(cdf, draw, right=True).clamp_(
+    draw = torch.empty(cdf.shape[0], 1)
+    generator = torch.Generator()
+    for row, seed in enumerate(seeds.tolist()):
+        draw[row] = torch.rand(1, generator=generator.manual_seed(seed))
+    return torch.searchsorted(cdf, draw * cdf[:, -1:], right=True).clamp_(
         max=cdf.shape[-1] - 1).view(-1)
 
 
@@ -139,13 +142,12 @@ def install() -> None:
     from vllm.v1.sample import sampler
     from vllm.v1.sample.ops import topk_topp_sampler as tk
 
-    tk.compiled_random_sample = openvino_random_sample
     tk.apply_top_k_top_p = _make_top_k_top_p(tk.apply_top_k_top_p)
     sampler.apply_all_penalties = _make_apply_all_penalties(
         sampler.apply_all_penalties)
     _installed = True
     logger.info(
-        "[OV-SAMPLER] Installed CPU fast paths (inverse-CDF sample, partial "
-        "top-k/top-p, sparse repetition penalty) "
+        "[OV-SAMPLER] Installed CPU fast paths (partial top-k/top-p, sparse "
+        "repetition penalty) "
         "(VLLM_OPENVINO_FAST_SAMPLER=1). Set VLLM_OPENVINO_FAST_SAMPLER=0 "
         "to fall back to stock vLLM.")

@@ -178,13 +178,23 @@ def _is_hybrid_pa_candidate(model_path: str) -> bool:
 
 
 def _register_cpu_sampler_ops() -> None:
-    # vLLM's Sampler calls torch.ops._C.greedy_argmax whenever the platform
-    # reports CPU; the wheel here has no CPU kernels, so provide it.
-    if hasattr(torch.ops._C, "greedy_argmax"):
-        return
-    lib = torch.library.Library("_C", "FRAGMENT")
-    lib.define("greedy_argmax(Tensor logits) -> Tensor")
-    lib.impl("greedy_argmax", lambda logits: logits.argmax(dim=-1).view(-1), "CPU")
+    # vLLM's CPU sampler calls these torch.ops._C kernels whenever the platform
+    # reports CPU; the wheel here has no CPU kernels, so provide them.
+    from vllm_openvino.sampler_patch import fused_gumbel_argmax
+    ops = {
+        "greedy_argmax(Tensor logits) -> Tensor":
+        lambda logits: logits.argmax(dim=-1).view(-1),
+        "fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor":
+        fused_gumbel_argmax,
+    }
+    lib = None
+    for schema, impl in ops.items():
+        name = schema.split("(", 1)[0]
+        if hasattr(torch.ops._C, name):
+            continue
+        lib = lib or torch.library.Library("_C", "FRAGMENT")
+        lib.define(schema)
+        lib.impl(name, impl, "CPU")
     _register_cpu_sampler_ops.lib = lib  # type: ignore[attr-defined]
 
 
