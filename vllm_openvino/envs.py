@@ -38,6 +38,22 @@ def _env_tristate(name: str) -> bool | None:
     return None if v in ("", "auto") else v in _TRUE_VALUES
 
 
+def _env_float(name: str, default: str) -> float:
+    val = os.getenv(name, default)
+    try:
+        return float(val)
+    except ValueError:
+        raise ValueError(f"Invalid value for {name}={val!r}: expected a number.")
+
+
+def _env_int(name: str, default: str) -> int:
+    val = os.getenv(name, default)
+    try:
+        return int(val)
+    except ValueError:
+        raise ValueError(f"Invalid value for {name}={val!r}: expected an integer.")
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO device selection
     # default is CPU
@@ -47,7 +63,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # OpenVINO key-value cache space
     # in GiB (fractions allowed), default is 0 (auto: 4 GB on CPU)
     "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: float(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
+    lambda: _env_float("VLLM_OPENVINO_KVCACHE_SPACE", "0"),
 
     # OpenVINO KV cache precision
     # default 'undefined', which means plugin will automatically set
@@ -63,7 +79,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CPU-only: cap total inference threads used by OpenVINO CPU plugin
     # 0 means OpenVINO auto-selects threads
     "VLLM_OPENVINO_CPU_THREADS_NUM":
-    lambda: int(os.getenv("VLLM_OPENVINO_CPU_THREADS_NUM", "0")),
+    lambda: _env_int("VLLM_OPENVINO_CPU_THREADS_NUM", "0"),
 
     # Number of CPU inference streams.
     # vLLM V1 issues a single blocking infer per step, so multiple streams
@@ -109,9 +125,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Directory for OpenVINO's compiled-model disk cache. When set, OpenVINO
     # skips recompiling the model on process restart if a matching cached
-    # blob exists (keyed by model + OpenVINO version). Unset (default) keeps
-    # cold-compile-every-start behavior, since not every deployment has a
-    # writable, persistent path available.
+    # blob exists (keyed by model + OpenVINO version). When unset (default),
+    # the plugin auto-uses ~/.cache/vllm-openvino if it can be created;
+    # caching is disabled (with an INFO log) if that path is not writable.
     "VLLM_OPENVINO_CACHE_DIR":
     lambda: os.getenv("VLLM_OPENVINO_CACHE_DIR", None),
 

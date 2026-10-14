@@ -304,6 +304,12 @@ class OpenVinoPlatform(Platform):
 
         _cap_torch_threads()
 
+        if not os.environ.get("TORCH_COMPILE_DISABLE"):
+            logger.warning(
+                "[OV-PLATFORM] TORCH_COMPILE_DISABLE is not set. "
+                "torch.compile is incompatible with OpenVINO; set "
+                "TORCH_COMPILE_DISABLE=1 to prevent unexpected failures.")
+
         if envs.VLLM_OPENVINO_FAST_SAMPLER:
             from vllm_openvino import sampler_patch
             sampler_patch.install()
@@ -315,7 +321,9 @@ class OpenVinoPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.world_size != 1:
-            raise ValueError("OpenVINO only supports single CPU socket currently.")
+            raise ValueError(
+                "OpenVINO does not support tensor or pipeline parallelism "
+                f"(world_size={parallel_config.world_size}).")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = \

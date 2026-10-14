@@ -129,7 +129,13 @@ def _make_apply_all_penalties(upstream):
     return openvino_apply_all_penalties
 
 
+_installed = False
+
+
 def install() -> None:
+    global _installed
+    if _installed:
+        return
     from vllm.v1.sample import sampler
     from vllm.v1.sample.ops import topk_topp_sampler as tk
 
@@ -137,6 +143,7 @@ def install() -> None:
     tk.apply_top_k_top_p = _make_top_k_top_p(tk.apply_top_k_top_p)
     sampler.apply_all_penalties = _make_apply_all_penalties(
         sampler.apply_all_penalties)
+    _installed = True
     logger.info(
         "[OV-SAMPLER] Installed CPU fast paths (inverse-CDF sample, partial "
         "top-k/top-p, sparse repetition penalty) "
