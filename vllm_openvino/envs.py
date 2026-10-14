@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
     VLLM_OPENVINO_STATEFUL_PA: bool = True
     VLLM_OPENVINO_HYBRID_PA: bool = True
+    VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER: int = 0
     VLLM_OPENVINO_CACHE_DIR: str | None = None
     VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
     VLLM_OPENVINO_FAST_SAMPLER: bool = True
@@ -122,6 +123,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # unvalidated hybrid model hits a PA transformation issue).
     "VLLM_OPENVINO_HYBRID_PA":
     lambda: _env_bool("VLLM_OPENVINO_HYBRID_PA", "1"),
+
+    # Hybrid-PA prefix caching: the scheduler block (and conv/SSM checkpoint
+    # interval) spans this many OpenVINO KV blocks. 0 (default) = auto, as in
+    # OpenVINO GenAI's cache_interval_multiplier: max(8, checkpoint bytes /
+    # KV block bytes), so a checkpoint costs about one KV block. Smaller values
+    # give finer prefix hits at the cost of more checkpoint memory.
+    "VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER":
+    lambda: _env_int("VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER", "0"),
 
     # Directory for OpenVINO's compiled-model disk cache. When set, OpenVINO
     # skips recompiling the model on process restart if a matching cached

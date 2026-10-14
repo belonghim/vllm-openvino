@@ -78,7 +78,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **Gather-before-matmul 변환** — PA-transformed 모델에만 적용한다. stateful 모델에는 적용하지 않는다. 샘플링 위치에서만 logits를 계산하므로 `prompt_logprobs`는 지원하지 않고, `OpenVinoPlatform.validate_request`가 HTTP 400으로 거부한다.
 - **2단계 실행** — `execute_model`은 forward와 `compute_logits`까지만 수행하고 `None`을 반환하며, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream MRV1 패턴). 구조화 출력이 이 경계에 의존하므로 두 단계를 합치지 않는다.
 - **Stateful-PA 제외 조건** — `has_sliding_window()`는 `layer_types`에 `sliding_attention`이 있거나 `sliding_window < max_model_len`일 때만 참이다. Gemma-4는 OpenVINO 2026.4.1에서도 PA 변환 후 첫 infer가 실패하므로 stateful 경로를 유지하고, `sliding_window=262144`인 Phi-3.5는 PA를 사용한다.
-- **SSM/conv cache** — stateful 경로는 OpenVINO가 내부 상태를 관리하므로 외부 SSM/conv cache를 할당하지 않는다. Hybrid-PA는 스케줄러 블록과 별도의 물리 slot pool을 사용한다.
+- **SSM/conv cache** — stateful 경로는 OpenVINO가 내부 상태를 관리하므로 외부 SSM/conv cache를 할당하지 않는다. Hybrid-PA는 prefix caching이 켜지면(기본, spec decode 없음) 스케줄러 블록마다 같은 인덱스의 conv/SSM checkpoint를 두고(`la.cache_interval` = 스케줄러 블록 크기, OpenVINO KV 블록 32의 배수), 꺼지거나 spec decode가 있으면 스케줄러 블록과 별도의 물리 slot pool을 사용한다. 같은 step에서 채워지는 블록에 prefix hit한 요청은 runner가 infer를 wave로 나눠 checkpoint를 쓴 뒤에 읽는다.
 - **모델 포맷 필수** — HuggingFace 원본 모델은 직접 로딩하지 않으며 OpenVINO IR로 사전 변환해야 한다. 주요 파일명:
   - 텍스트 모델: `openvino_model.xml`
   - 멀티모달 언어 모델: `openvino_language_model.xml`

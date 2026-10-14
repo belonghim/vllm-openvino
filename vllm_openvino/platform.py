@@ -340,6 +340,7 @@ class OpenVinoPlatform(Platform):
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         cache_config = vllm_config.cache_config
         keeps_external_state = False
+        hybrid_pa = False
         if _is_stateful_model(model_config.model):
             hybrid_pa = (envs.VLLM_OPENVINO_HYBRID_PA
                          and _is_hybrid_pa_candidate(model_config.model))
@@ -382,15 +383,19 @@ class OpenVinoPlatform(Platform):
                     "outside vLLM KV blocks.")
 
         # Recurrent/internal state is not stored in vLLM blocks, so a prefix-cache
-        # hit would skip tokens whose state is never restored.
-        if keeps_external_state and cache_config and cache_config.enable_prefix_caching:
+        # hit would skip tokens whose state is never restored. Hybrid-PA keeps
+        # a conv/SSM checkpoint per scheduler block instead (see the model runner),
+        # except with drafts, whose per-token state slots are not checkpointed.
+        restores_state = hybrid_pa and speculative_config is None
+        if (keeps_external_state and not restores_state and cache_config
+                and cache_config.enable_prefix_caching):
             logger.warning(
                 "[OV-PLATFORM] Disabling prefix caching: this model keeps "
                 "recurrent or internal state outside vLLM KV blocks.")
             cache_config.enable_prefix_caching = False
-            if hasattr(cache_config, "mamba_cache_mode"):
-                cache_config.mamba_cache_mode = "none"
-                cache_config.mamba_block_size = None
+        if keeps_external_state and hasattr(cache_config, "mamba_cache_mode"):
+            cache_config.mamba_cache_mode = "none"
+            cache_config.mamba_block_size = None
 
         # check and update cache config
         if cache_config and cache_config.block_size is None:

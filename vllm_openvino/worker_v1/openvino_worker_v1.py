@@ -30,7 +30,7 @@ from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import (
     OpenVINOModelRunnerV1, num_state_slots)
-from vllm_openvino.kv_cache import OpenVINOCacheEngine
+from vllm_openvino.kv_cache import OpenVINOCacheEngine, str_to_ov_type
 from vllm_openvino.utils import (
     canonical_vllm_cache_dtype,
     has_sliding_window,
@@ -132,6 +132,8 @@ class OpenVINOWorkerV1(WorkerBase):
         self._preloaded_model_type = ATTENTION_ONLY
         self._preloaded_ssm_state_shapes = None
         self._preloaded_ov_model = None
+        self._la_state_bytes = 0
+        self._kv_blocks_per_block = 1
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
         # hybrid-model state tensors even before load_model() is called.
@@ -337,6 +339,45 @@ class OpenVINOWorkerV1(WorkerBase):
                 "key=%d, value=%d",
                 len(self.key_cache_config), len(self.value_cache_config),
             )
+        self._configure_la_prefix_cache()
+
+    def _configure_la_prefix_cache(self) -> None:
+        """Hybrid-PA prefix caching keeps one conv/SSM checkpoint per scheduler
+        block, so a prefix hit (always block-aligned) restores the recurrent
+        state from the last hit block. A scheduler block spans
+        ``kv_blocks_per_block`` OpenVINO KV blocks; that span is the
+        checkpoint interval (OpenVINO GenAI's cache_interval)."""
+        self._la_state_bytes = 0
+        self._kv_blocks_per_block = 1
+        if not (self._is_hybrid_pa_model()
+                and self.cache_config.enable_prefix_caching
+                and (self.ssm_cache_config or self.conv_cache_config)):
+            return
+        for shapes, dtypes in ((self.ssm_cache_config, self.ssm_cache_dtypes),
+                               (self.conv_cache_config, self.conv_cache_dtypes)):
+            for pshape, dtype in zip(shapes, dtypes):
+                self._la_state_bytes += str_to_ov_type[dtype].size * math.prod(
+                    dim.get_length() for dim in list(pshape)[1:])
+        kv_block_bytes = OpenVINOCacheEngine.get_cache_block_size(
+            self._kv_cache_dtype(), self.key_cache_config,
+            self.value_cache_config)
+        multiplier = (envs.VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER
+                      or max(8, math.ceil(self._la_state_bytes / kv_block_bytes)))
+        ov_block_size = self.cache_config.block_size
+        self._kv_blocks_per_block = multiplier
+        self.cache_config.block_size = ov_block_size * multiplier
+        self.model_runner.configure_la_prefix_cache(
+            self.cache_config.block_size, multiplier)
+        logger.info(
+            "[OV-WORKER] Hybrid-PA prefix caching: checkpoint every %d tokens "
+            "(%d KV blocks of %d), checkpoint=%d bytes, KV block=%d bytes",
+            self.cache_config.block_size, multiplier, ov_block_size,
+            self._la_state_bytes, kv_block_bytes)
+
+    def _kv_cache_dtype(self) -> str:
+        return _resolve_cache_dtype(
+            getattr(self, 'cache_dtype', None)
+            or getattr(self.cache_config, 'openvino_kv_dtype', None))
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -394,7 +435,10 @@ class OpenVINOWorkerV1(WorkerBase):
         num_ssm_blocks = None
         is_stateful = self._is_model_stateful()
         is_hybrid_pa = self._is_hybrid_pa_model()
-        if is_hybrid_pa and (self.ssm_cache_config or self.conv_cache_config):
+        if self._la_state_bytes:
+            # One checkpoint per scheduler block, zeroed on a fresh prefill.
+            num_ssm_blocks = self.cache_config.num_gpu_blocks
+        elif is_hybrid_pa and (self.ssm_cache_config or self.conv_cache_config):
             num_ssm_blocks = num_state_slots(self.vllm_config)
             logger.info(
                 "[OV-WORKER] Hybrid-PA model: conv/SSM physical slots=%d "
@@ -419,6 +463,8 @@ class OpenVINOWorkerV1(WorkerBase):
             self.ssm_cache_dtypes,
             self.conv_cache_dtypes,
             num_ssm_blocks,
+            kv_blocks_per_block=self._kv_blocks_per_block,
+            zero_state=not self._la_state_bytes,
         )
         self.kv_cache = self.cache_engine.kv_cache
         self.model_runner.kv_caches = self.kv_cache
@@ -453,9 +499,10 @@ class OpenVINOWorkerV1(WorkerBase):
         new_block_ids_to_zero = getattr(scheduler_output, 'new_block_ids_to_zero', None)
         if new_block_ids_to_zero and self.kv_cache:
             num_blocks = self.kv_cache[0][0].shape[0]
-            valid_ids = np.array(
-                [bid for bid in new_block_ids_to_zero if bid < num_blocks],
-                dtype=np.int64)
+            ratio = self._kv_blocks_per_block
+            valid_ids = (np.asarray(new_block_ids_to_zero, dtype=np.int64)[:, None]
+                         * ratio + np.arange(ratio)).ravel()
+            valid_ids = valid_ids[valid_ids < num_blocks]
             if valid_ids.size:
                 for key_cache, value_cache in self.kv_cache:
                     key_cache.data[valid_ids] = 0
@@ -492,6 +539,11 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block."""
+        if self._la_state_bytes:
+            return OpenVINOCacheEngine.get_cache_block_size(
+                self._kv_cache_dtype(), self.key_cache_config,
+                self.value_cache_config,
+            ) * self._kv_blocks_per_block + self._la_state_bytes
         # Hybrid-PA models reserve conv/SSM state as a separate fixed-size
         # pool (see _conv_reservation_bytes); excluded here to avoid
         # double-counting it as if it scaled per attention KV block.
@@ -706,12 +758,19 @@ class OpenVINOWorkerV1(WorkerBase):
             block_size, cache_type,
         )
 
+        # Hybrid-PA checkpoints live in the attention blocks' pages so vLLM
+        # sizes the block pool for KV + one conv/SSM checkpoint per block.
+        page_size_padded = None
+        if self._la_state_bytes and key_cache_config:
+            page_size_padded = -(-self.get_cache_block_size_bytes()
+                                 // len(key_cache_config))
         for idx, (key_cache_shape, value_cache_shape) in enumerate(zip(key_cache_config, value_cache_config)):
             kv_cache_spec[str(idx)] = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=max(key_cache_shape[1].get_length(), value_cache_shape[1].get_length()),
                 head_size=max(key_cache_shape[3].get_length(), value_cache_shape[3].get_length()),
-                dtype=str_to_torch_type[cache_type])
+                dtype=str_to_torch_type[cache_type],
+                page_size_padded=page_size_padded)
 
         # Hybrid-PA models (PA-transformed) manage conv/SSM state via a
         # private slot pool in the model runner, bypassing vLLM's MambaSpec
@@ -801,7 +860,9 @@ class OpenVINOWorkerV1(WorkerBase):
             "cache_block_size=%d bytes, kv_space=%d bytes",
             cache_dtype, cache_block_size, kv_space,
         )
-        conv_reservation = self._conv_reservation_bytes() if self._is_hybrid_pa_model() else 0
+        conv_reservation = (self._conv_reservation_bytes()
+                            if self._is_hybrid_pa_model() and not self._la_state_bytes
+                            else 0)
         original_space_bytes = self.cache_config.openvino_kvcache_space_bytes
         if conv_reservation:
             self.cache_config.openvino_kvcache_space_bytes = max(

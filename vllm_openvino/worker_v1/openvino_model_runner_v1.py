@@ -139,6 +139,13 @@ class OpenVINOModelRunnerV1:
         self._mm_req_ids: set[str] = set()
         self._new_req_ids: set[str] = set()
 
+        # Hybrid-PA prefix caching (set by configure_la_prefix_cache): a
+        # scheduler block spans _kv_blocks_per_block OpenVINO KV blocks and
+        # owns the conv/SSM checkpoint slot of the same index.
+        self._la_interval = 0
+        self._kv_blocks_per_block = 1
+        self._kv_block_offsets = np.arange(1, dtype=np.int32)
+
         # Pre-allocated block-index tensors.
         self._init_block_index_tensors()
 
@@ -168,7 +175,7 @@ class OpenVINOModelRunnerV1:
         max_seqs = self.scheduler_config.max_num_seqs
         block_size = self.cache_config.block_size
         max_blocks_per_seq = max(1, (self.model_config.max_model_len + block_size - 1) // block_size)
-        self._max_block_indices = max_seqs * max_blocks_per_seq
+        self._max_block_indices = max_seqs * max_blocks_per_seq * self._kv_blocks_per_block
 
         self._block_indices_group_tensors_base = [
             ov.Tensor(ov.Type.i32, ov.Shape([self._max_block_indices]))
@@ -249,6 +256,55 @@ class OpenVINOModelRunnerV1:
         self.num_cache_groups = max(1, num_cache_groups)
         self.input_batch = self._create_input_batch(self.num_cache_groups)
         self._init_block_index_tensors()
+
+    def configure_la_prefix_cache(self, interval: int, kv_blocks_per_block: int) -> None:
+        self._la_interval = interval
+        self._kv_blocks_per_block = kv_blocks_per_block
+        self._kv_block_offsets = np.arange(kv_blocks_per_block, dtype=np.int32)
+        # Per request: one read slot plus one write slot per touched interval.
+        max_la_indices = (3 * self.scheduler_config.max_num_seqs
+                          + self.scheduler_config.max_num_batched_tokens // interval)
+        self._la_block_indices_buf = np.zeros(max_la_indices, dtype=np.int32)
+        self._la_block_indices_tensor_base = ov.Tensor(
+            self._la_block_indices_buf, ov.Shape([max_la_indices]), ov.Type.i32)
+        self.configure_cache_groups(self.num_cache_groups)
+
+    def _la_dependency_waves(self, scheduler_output: SchedulerOutput) -> list[list[str]] | None:
+        """vLLM caches a block when it allocates it, so a request can hit a
+        block that another request fills in this same step. Its checkpoint
+        read must follow the writer's infer: split the batch into waves.
+        Returns None when one wave suffices (the common case)."""
+        interval = self._la_interval
+        writer: dict[int, str] = {}
+        reads: dict[str, int] = {}
+        for req_id in self.input_batch.req_ids:
+            req_index = self.input_batch.req_id_to_index[req_id]
+            num_computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            blocks = self.requests[req_id].block_ids[0]
+            for block in blocks[num_computed // interval:
+                                (num_computed + num_tokens - 1) // interval + 1]:
+                writer[block] = req_id
+            if num_computed:
+                reads[req_id] = blocks[(num_computed - 1) // interval]
+
+        levels: dict[str, int] = {}
+
+        def level(req_id: str) -> int:
+            if req_id not in levels:
+                levels[req_id] = 0
+                source = writer.get(reads.get(req_id, -1))
+                if source is not None and source != req_id:
+                    levels[req_id] = level(source) + 1
+            return levels[req_id]
+
+        num_waves = 1 + max(level(req_id) for req_id in self.input_batch.req_ids)
+        if num_waves == 1:
+            return None
+        waves: list[list[str]] = [[] for _ in range(num_waves)]
+        for req_id in self.input_batch.req_ids:
+            waves[levels[req_id]].append(req_id)
+        return waves
 
     def load_model(
         self,
@@ -381,10 +437,13 @@ class OpenVINOModelRunnerV1:
     def _prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
+        req_ids: list[str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
                SamplingMetadata, BatchedTensorInputs]:
         """Prepare the model input based on scheduled requests.
         """
+        if req_ids is None:
+            req_ids = self.input_batch.req_ids
         if len(self.requests) == 0:
             return (
                 torch.empty(0, device=self.device),
@@ -409,7 +468,7 @@ class OpenVINOModelRunnerV1:
         for group_idx in range(self.num_cache_groups):
             self._block_idx_begins_group_data[group_idx][0] = 0
 
-        for req_id in self.input_batch.req_ids:
+        for req_id in req_ids:
             req_index = self.input_batch.req_id_to_index[req_id]
             request = self.requests[req_id]
             for group_idx in range(self.num_cache_groups):
@@ -420,6 +479,10 @@ class OpenVINOModelRunnerV1:
                     group_block_table = request.block_ids[0]
                 else:
                     group_block_table = []
+                if self._kv_blocks_per_block > 1 and group_block_table:
+                    group_block_table = (
+                        np.asarray(group_block_table, dtype=np.int32)[:, None]
+                        * self._kv_blocks_per_block + self._kv_block_offsets).ravel()
 
                 num_group_blocks = len(group_block_table)
                 if num_group_blocks:
@@ -474,7 +537,26 @@ class OpenVINOModelRunnerV1:
             self._past_lens_buf[n_reqs] = num_computed
             self._subseq_begins_buf[n_reqs + 1] = self._subseq_begins_buf[n_reqs] + query_len
 
-            if self.conv_caches or self.ssm_caches:
+            if self._la_interval:
+                # Read the checkpoint after token num_computed-1 and write one
+                # per touched interval (OpenVINO GenAI's prefix layout); a
+                # fresh prefill reads the zeroed first write slot.
+                interval = self._la_interval
+                blocks = request.block_ids[0]
+                if num_computed == 0:
+                    for cache in (*self.conv_caches, *self.ssm_caches):
+                        cache.data[blocks[0]] = 0
+                first = num_computed // interval
+                num_writes = (num_computed % interval + num_tokens + interval - 1) // interval
+                self._la_block_indices_buf[la_offset] = (
+                    blocks[(num_computed - 1) // interval] if num_computed else blocks[0])
+                self._la_block_indices_buf[la_offset + 1:la_offset + 1 + num_writes] = \
+                    blocks[first:first + num_writes]
+                la_offset += 1 + num_writes
+                self._la_block_indices_begins_buf[n_reqs + 1] = la_offset
+                self._la_past_lens_buf[n_reqs] = num_computed
+                self._la_cache_interval_buf[n_reqs] = interval
+            elif self.conv_caches or self.ssm_caches:
                 conv_slot = self._get_conv_slot(req_id, num_computed)
                 if drafts:
                     # Per-token checkpoints: token t's state lands in write
@@ -655,16 +737,40 @@ class OpenVINOModelRunnerV1:
                 logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
                 self.model.recreate_infer_request()
 
+        self._new_req_ids.clear()
+
+        waves = (self._la_dependency_waves(scheduler_output)
+                 if self._la_interval and self.requests else None)
+        if waves is None:
+            logits = self._forward(scheduler_output)
+        else:
+            logger.debug("[OV-RUNNER] Prefix hit on blocks filled this step: "
+                         "%d waves of %s requests", len(waves),
+                         [len(wave) for wave in waves])
+            # Logits alias the infer request's output tensor; copy each wave's.
+            wave_logits = torch.cat([
+                self._forward(scheduler_output, wave).clone() for wave in waves])
+            row_of = {req_id: row for row, req_id in
+                      enumerate(req_id for wave in waves for req_id in wave)}
+            logits = wave_logits[torch.tensor(
+                [row_of[req_id] for req_id in self.input_batch.req_ids])]
+        self._execute_state = (scheduler_output, logits)
+
+    def _forward(
+        self,
+        scheduler_output: SchedulerOutput,
+        req_ids: list[str] | None = None,
+    ) -> torch.Tensor:
         (
             input_tokens,
             input_positions,
             attn_metadata,
             sampling_metadata,
             multi_modal_kwargs,
-        ) = self._prepare_inputs(scheduler_output)
-        self._new_req_ids.clear()
+        ) = self._prepare_inputs(scheduler_output, req_ids)
 
-        actual_num_requests = len(self.input_batch.req_id_to_index)
+        actual_num_requests = (len(req_ids) if req_ids is not None
+                               else len(self.input_batch.req_id_to_index))
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids": input_tokens,
@@ -679,8 +785,7 @@ class OpenVINOModelRunnerV1:
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             hidden_states = model_executable(**execute_model_kwargs)
 
-        logits = self.model.compute_logits(hidden_states, None)
-        self._execute_state = (scheduler_output, logits)
+        return self.model.compute_logits(hidden_states, None)
 
     def _sample_with_drafts(
         self,

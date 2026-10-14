@@ -46,6 +46,8 @@ class OpenVINOCacheEngine:
         ssm_cache_dtypes: list[str] | None = None,
         conv_cache_dtypes: list[str] | None = None,
         num_ssm_blocks: int | None = None,
+        kv_blocks_per_block: int = 1,
+        zero_state: bool = True,
     ) -> None:
         # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
         # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
@@ -69,7 +71,8 @@ class OpenVINOCacheEngine:
         # Note: In CacheConfig, num_gpu_blocks actual is num_cpu_blocks
         # for OpenVINO backend with a CPU target device, because we want
         # to reuse KV cache management in the scheduler.
-        self.num_device_blocks = cache_config.num_gpu_blocks
+        self.num_device_blocks = cache_config.num_gpu_blocks * kv_blocks_per_block
+        self.zero_state = zero_state
 
         # OpenVINO uses its own attention backend directly (no vLLM standard backend needed).
 
@@ -156,12 +159,14 @@ class OpenVINOCacheEngine:
 
             if current_platform.is_openvino_cpu():
                 tensor = ov.Tensor(ov_type, shape)
-                tensor.data.fill(0)
+                if self.zero_state:
+                    tensor.data.fill(0)
             else:
                 remote_context = ov_core.get_default_context(ov_device)
                 tensor = remote_context.create_tensor(ov_type, shape, {})
                 try:
-                    tensor.data.fill(0)
+                    if self.zero_state:
+                        tensor.data.fill(0)
                 except (AttributeError, RuntimeError) as e:
                     logger.warning("[OV-CACHE] GPU state tensor zero-init failed: %s", e)
             cache.append(tensor)

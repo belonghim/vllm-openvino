@@ -84,8 +84,42 @@ Qwen3.5 and LFM2.5. Set `VLLM_OPENVINO_HYBRID_PA=0` to force the stateful path.
 Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV
 cache, not SSM/conv state.
 
-Hybrid-PA uses standard PagedAttention for attention layers and a separate
-physical slot pool for conv/SSM state. The slot pool is intentionally separate
+Hybrid-PA uses standard PagedAttention for attention layers. Conv/SSM state
+storage depends on prefix caching:
+
+- Prefix caching on (default, no speculative decoding): each vLLM scheduler
+  block owns one conv/SSM checkpoint slot with the same index. The
+  linear-attention inputs follow OpenVINO GenAI's prefix layout: read the
+  checkpoint of the block holding token `num_computed - 1`, write one
+  checkpoint per touched interval (`la.cache_interval` = scheduler block
+  size). A prefix hit is always block-aligned, so it restores the state
+  from the last hit block. A scheduler block spans `N` OpenVINO KV blocks of
+  32 tokens; the runner expands each block id to its `N` KV block ids. `N` is
+  `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`, or by default
+  `max(8, checkpoint bytes / KV block bytes)` as in GenAI: LFM2.5-350M 8
+  (256 tokens, 61 KB checkpoint), Qwen3.5-0.8B and MiniCPM-V 4.7 47 (1504
+  tokens, 10.3 MB checkpoint). Checkpoint bytes are part of the block page
+  size, so the 4 GiB pool holds 570k tokens for LFM2.5 (619k without) and
+  280k for Qwen3.5 (90k with multiplier 8).
+- vLLM caches a block when it allocates it, so a request can hit a block that
+  another request fills in the same step. The runner then splits the batch
+  into waves (writer first) so the checkpoint read follows its write. Without
+  waves, 3 of 4 concurrent identical prompts had different logprobs.
+- Prefix caching off, or speculative decoding configured: a separate
+  physical slot pool, described below.
+
+Verification (8 CPUs, greedy): a hit run's first-token logprobs were
+bit-identical to a no-prefix-caching run whose chunk boundary is at the same
+interval (`--max-num-batched-tokens 1504`), and to a cold run with the same
+chunking, including MiniCPM-V and Qwen3.5 image prompts whose hit boundary falls
+inside the image tokens. A cold run with a different chunk boundary can differ
+slightly because the bf16 checkpoint is stored at the boundary, the same
+effect chunked prefill already has. Hit TTFT: LFM2.5 2.1k-token prompt 0.74 s
+-> 0.06 s; Qwen3.5 2.4k/4.0k-token prompts 8.2/13.9 s -> 2.9/3.4 s (default,
+1504-token hits) or 0.20/0.56 s (multiplier 8). Concurrency-8 decode was
+unchanged (LFM2.5 410 vs 403 tok/s, Qwen3.5 133 vs 134 tok/s).
+
+The slot pool (prefix caching off) is intentionally separate
 from vLLM scheduler blocks. Slots are released when a request finishes and are
 reset on a fresh or re-prefilled start (`num_computed == 0`). A preempted
 request keeps its slot, so the pool of `max_num_seqs + 1` is never exhausted
@@ -96,7 +130,8 @@ text because of prefill vs decode numerics.
 
 ## Runtime Constraints
 
-- CPU KV block size is `32`; GPU KV block size is `16`.
+- CPU KV block size is `32`; GPU KV block size is `16`. Hybrid-PA with prefix
+  caching uses a larger scheduler block (a multiple of the KV block size).
 - `VLLM_OPENVINO_CPU_THREADS_NUM=0` uses cgroup CPU quota when available;
   an explicit value takes precedence. The same quota caps the Torch/OMP
   thread pools at engine config time unless `OMP_NUM_THREADS` is set
@@ -121,10 +156,12 @@ text because of prefill vs decode numerics.
   `--no-enable-prefix-caching` keeps the resident set at the working set
   (measured: anon flat at ~477 MiB after warm-up vs +62 MiB over 8 rounds
   with prefix caching on).
-- Prefix caching is disabled automatically for Hybrid-PA and stateful models:
-  their recurrent/internal state lives outside vLLM KV blocks, so a prefix hit
-  would skip tokens without restoring that state (repeated long prompts gave
-  different, wrong answers). Pure-attention PA models keep it enabled.
+- Prefix caching is disabled automatically for stateful models, and for
+  Hybrid-PA models with speculative decoding: their recurrent/internal state
+  is not checkpointed per vLLM block, so a prefix hit would skip tokens
+  without restoring that state (repeated long prompts gave different, wrong
+  answers). Pure-attention PA models and Hybrid-PA models without
+  speculative decoding keep it enabled.
 - Multimodal requests are encoded per image (own grid, merger attention and
   cache entry) and scattered by explicit
   `(batch_start, batch_end, patch_offset, image_index)` rows (one per contiguous
