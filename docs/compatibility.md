@@ -95,12 +95,15 @@ storage depends on prefix caching:
   size). A prefix hit is always block-aligned, so it restores the state
   from the last hit block. A scheduler block spans `N` OpenVINO KV blocks of
   32 tokens; the runner expands each block id to its `N` KV block ids. `N` is
-  `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`, or by default
-  `max(8, checkpoint bytes / KV block bytes)` as in GenAI: LFM2.5-350M 8
-  (256 tokens, 61 KB checkpoint), Qwen3.5-0.8B and MiniCPM-V 4.7 47 (1504
-  tokens, 10.3 MB checkpoint). Checkpoint bytes are part of the block page
-  size, so the 4 GiB pool holds 570k tokens for LFM2.5 (619k without) and
-  280k for Qwen3.5 (90k with multiplier 8).
+  `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`, default 8 (256 tokens) for
+  every model. `0` selects GenAI's automatic rule
+  `max(8, checkpoint bytes / KV block bytes)`: 8 for LFM2.5-350M (61 KB
+  checkpoint) and 47 (1504 tokens) for Qwen3.5-0.8B and MiniCPM-V 4.7
+  (10.3 MB checkpoint). Checkpoint bytes are part of the block page size, so
+  the 4 GiB pool holds 570k tokens for LFM2.5 (619k without prefix caching)
+  and 90k for Qwen3.5 (280k with the automatic 1504-token interval). With
+  multiplier 1 (32 tokens, the plain PA block) LFM2.5 holds 466k tokens and
+  hits like a pure-attention model; Qwen3.5 would hold about 13k.
 - vLLM caches a block when it allocates it, so a request can hit a block that
   another request fills in the same step. The runner then splits the batch
   into waves (writer first) so the checkpoint read follows its write. Without
@@ -115,8 +118,8 @@ chunking, including MiniCPM-V and Qwen3.5 image prompts whose hit boundary falls
 inside the image tokens. A cold run with a different chunk boundary can differ
 slightly because the bf16 checkpoint is stored at the boundary, the same
 effect chunked prefill already has. Hit TTFT: LFM2.5 2.1k-token prompt 0.74 s
--> 0.06 s; Qwen3.5 2.4k/4.0k-token prompts 8.2/13.9 s -> 2.9/3.4 s (default,
-1504-token hits) or 0.20/0.56 s (multiplier 8). Concurrency-8 decode was
+-> 0.06 s; Qwen3.5 2.4k/4.0k-token prompts 8.2/13.9 s -> 0.20/0.56 s
+(multiplier 8) or 2.9/3.4 s (1504-token hits). Concurrency-8 decode was
 unchanged (LFM2.5 410 vs 403 tok/s, Qwen3.5 133 vs 134 tok/s).
 
 The slot pool (prefix caching off) is intentionally separate
