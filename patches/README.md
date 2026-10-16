@@ -46,8 +46,10 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   It is open, with maxnick's change request awaiting re-review.
 - If #38830 merges alone, non-AMX CPUs (all AMD, Intel client, pre-Sapphire Rapids
   Xeon) and f32 sources stay on per-row GEMV, so this patch is still needed there.
-- Plan for #38822: after #38830 merges, a follow-up that drops the AMX-only
-  condition and keeps the GEMV fallback for few-row experts.
+- Proposed on #38822 (2026-10-16, awaiting replies from maxnick and the #38830
+  author): close #38822 and, after #38830 merges, open a follow-up that drops the
+  AMX-only condition and keeps the GEMV fallback for few-row experts, or fold the
+  fallback into #38830.
 
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
 - If the release takes the per-expert GEMM on non-AMX CPUs (#38822 or the follow-up
