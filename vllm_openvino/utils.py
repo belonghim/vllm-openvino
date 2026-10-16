@@ -76,6 +76,18 @@ def detect_cgroup_memory_limit() -> int | None:
     return None
 
 
+def get_process_rss_bytes() -> int:
+    """Read current process RSS from /proc/self/status (Linux)."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) * 1024  # kB → bytes
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def model_weights_bytes(model_path: str) -> int:
     model_dir = Path(model_path)
     if not model_dir.is_dir():

@@ -860,6 +860,35 @@ class OpenVINOWorkerV1(WorkerBase):
             "cache_block_size=%d bytes, kv_space=%d bytes",
             cache_dtype, cache_block_size, kv_space,
         )
+        # Post-load RSS recheck: the initial budget (set in
+        # check_and_update_config before model load) used .bin file sizes to
+        # estimate model RAM, which understates compiled-model overhead (IR
+        # graph parsing, PA/Gather-before-matmul transformation ops, OV
+        # compilation artifacts). Now that the model is compiled and in memory
+        # we can measure actual RSS and tighten the KV cache budget if needed.
+        if current_platform.is_openvino_cpu():
+            from vllm_openvino.utils import (  # noqa: PLC0415
+                get_process_rss_bytes, detect_cgroup_memory_limit,
+                format_memory_size)
+            from vllm_openvino.platform import (  # noqa: PLC0415
+                KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES)
+            rss = get_process_rss_bytes()
+            cgroup_limit = detect_cgroup_memory_limit()
+            if rss > 0 and cgroup_limit is not None:
+                rss_available = cgroup_limit - rss - KV_CACHE_MEMORY_MARGIN_BYTES
+                kvcache_now = self.cache_config.openvino_kvcache_space_bytes
+                if kvcache_now > rss_available:
+                    fitted = max(KV_CACHE_MIN_BYTES, rss_available)
+                    logger.warning(
+                        "[OV-WORKER] Post-load RSS %s under cgroup limit %s "
+                        "leaves only %s for KV cache (initially %s); reducing "
+                        "pool to avoid OOM. Increase container memory limit or "
+                        "set VLLM_OPENVINO_KVCACHE_SPACE.",
+                        format_memory_size(rss),
+                        format_memory_size(cgroup_limit),
+                        format_memory_size(max(0, rss_available)),
+                        format_memory_size(kvcache_now))
+                    self.cache_config.openvino_kvcache_space_bytes = fitted
         conv_reservation = (self._conv_reservation_bytes()
                             if self._is_hybrid_pa_model() and not self._la_state_bytes
                             else 0)
