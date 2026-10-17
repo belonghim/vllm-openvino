@@ -1,10 +1,12 @@
 # vllm-openvino
 
-[GitHub](https://github.com/belonghim/vllm-openvino) · OpenVINO plugin for vLLM — run LLM inference on Intel CPUs and GPUs.
+[GitHub](https://github.com/belonghim/vllm-openvino) · OpenVINO plugin for vLLM — run LLM inference on Intel CPUs.
 
 ## What is this?
 
-This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's OpenAI-compatible API server on Intel CPUs and GPUs. It integrates OpenVINO as the inference execution layer, leveraging vLLM's scheduler, PagedAttention, and API server infrastructure. Models must be pre-exported to OpenVINO IR format (openvino_model.xml + openvino_model.bin).
+This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's OpenAI-compatible API server on Intel CPUs. It integrates OpenVINO as the inference execution layer, leveraging vLLM's scheduler, PagedAttention, and API server infrastructure. Models must be pre-exported to OpenVINO IR format (openvino_model.xml + openvino_model.bin).
+
+GPU code paths exist (`VLLM_OPENVINO_DEVICE=GPU`) but are not part of the validated configuration; every measurement in this README is CPU-only.
 
 ## Requirements
 
@@ -42,29 +44,32 @@ podman run -d --name vllm-server -p 8080:8080 \
   -e VLLM_OPENVINO_DEVICE=CPU \
   -e TORCH_COMPILE_DISABLE=1 \
   -e VLLM_OPENVINO_KVCACHE_SPACE=8 \
+  -e VLLM_OPENVINO_CACHE_DIR=/cache \
+  -v ~/models:/models:Z \
+  -v ~/ov-cache:/cache:Z \
   quay.io/joopark/vllm-openvino \
-  --port=8080 --model <model_id>
+  --port=8080 --model /models/<model_dir>
 ```
+
+`--model` must be a local directory holding the exported IR files, not a HuggingFace
+repository id: the image runs with `HF_HUB_OFFLINE=1` and the plugin never downloads
+weights. Mounting `VLLM_OPENVINO_CACHE_DIR` keeps the compiled-model blob across
+container restarts; without it every start recompiles the model (22 s for a 14 GB
+IR, more for larger ones).
 
 ## Quick Start
 
 Run the vLLM API server with OpenVINO backend.
 
-For CPU:
-
 ```bash
 VLLM_OPENVINO_DEVICE=CPU TORCH_COMPILE_DISABLE=1 VLLM_OPENVINO_KVCACHE_SPACE=8 \
-  vllm serve --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  vllm serve --model /models/<model_dir>
 ```
 
-For GPU:
-
-```bash
-VLLM_OPENVINO_DEVICE=GPU TORCH_COMPILE_DISABLE=1 \
-  vllm serve --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
-```
-
-Replace `TinyLlama/TinyLlama-1.1B-Chat-v1.0` with a local path to pre-exported OpenVINO IR files (directory containing openvino_model.xml and openvino_model.bin).
+`<model_dir>` is a local directory with pre-exported OpenVINO IR files
+(`openvino_model.xml` for text models, `openvino_language_model.xml` for
+multimodal ones). Export a HuggingFace checkpoint with
+[optimum-intel](https://github.com/huggingface/optimum-intel) first.
 
 ## Environment Variables
 
@@ -93,7 +98,20 @@ For CPU deployments, especially AVX2-only systems, tuning OpenVINO CPU threading
 
 ### Memory Footprint
 
-The KV cache is reserved as one fixed-size mapping and pages become resident only as blocks are used, so RSS climbs toward `baseline + VLLM_OPENVINO_KVCACHE_SPACE` and then plateaus; size the container for that sum (baseline is roughly the model plus ~1.5 GB of runtime for small models). vLLM's prefix caching (on by default) retains freed blocks, so unique-prompt workloads keep touching new pool pages — add `--no-enable-prefix-caching` to hold the resident set at the working set. On CPU the pool is also sized against the container memory limit: if it does not fit alongside the model weights, a 1.5 GB runtime baseline and 512 MB headroom, the plugin reduces it automatically and logs the new size, and it warns when under 10% headroom remains; run without a cgroup memory limit and the check is skipped.
+The KV cache is reserved as one fixed-size mapping and pages become resident only as blocks are used, so RSS climbs toward `baseline + VLLM_OPENVINO_KVCACHE_SPACE` and then plateaus; size the container for that sum. vLLM's prefix caching (on by default) retains freed blocks, so unique-prompt workloads keep touching new pool pages — add `--no-enable-prefix-caching` to hold the resident set at the working set.
+
+Measured baseline, no swap allowed, KV pool fully filled (8 CPUs, `max-model-len 4096`):
+
+| | EngineCore anon RSS | APIServer anon RSS |
+|---|---|---|
+| Qwen3-1.7B-int4 | weights + 2.5 GiB | 0.84 GiB |
+| gemma-4-E2B-int4 | weights + 2.6 GiB | 2.5 GiB (vision) |
+| LFM2.5-8B-A1B-int4 | weights + 3.5 GiB | 0.87 GiB |
+| Phi-3.5-mini-int4 | weights + 3.0 GiB | 0.55 GiB |
+| Qwen3.6-35B-A3B-int4 | weights + 3.6 GiB | 2.1 GiB (vision) |
+| gemma-4-26B-A4B-int4 | weights + 7.2 GiB | 2.7 GiB (vision) |
+
+The surplus over the weights is the CPU plugin repacking weights into anonymous memory at the first infer (about 1.5 GiB on the 26B), plus prefill/decode buffers that grow with the model and with concurrent prefill. Leave at least the largest figure for your model on top of weights and the KV pool; the 26B needs roughly `weights + 10 GiB` before any KV budget. On CPU the pool is also sized against the container memory limit: when it does not fit alongside the weights, a 1.5 GB runtime baseline and 512 MB headroom, the plugin reduces it and logs the new size, and it warns when under 10% headroom remains. A pool squeezed this way can still fail: on the 26B at a 24 GiB limit with swap disabled the engine came up but every request returned HTTP 500. Raise the limit or lower `VLLM_OPENVINO_KVCACHE_SPACE` deliberately instead of relying on the automatic fit; run without a cgroup memory limit and the check is skipped.
 
 ### KV Cache Quantization
 

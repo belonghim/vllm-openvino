@@ -24,7 +24,10 @@ WORKDIR /opt/vllm
 COPY pyproject.toml ./
 RUN pip install --no-deps --no-cache-dir .
 # Patched CPU plugin (openvinotoolkit/openvino#38517), see patches/README.md. Remove once upstream ships the fix.
+# The .so is gitignored, so a stale or locally rebuilt file is easy to copy in by
+# accident; the hash pins it to the 2026.4.1 wheel it must match.
 COPY patches/libopenvino_intel_cpu_plugin.so /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/
+RUN echo "bd4b1036c173a900944b5f6e0dd99b656c194a49f6dbdada8f2b381bc6361c38  /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/libopenvino_intel_cpu_plugin.so" | sha256sum -c -
 FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
 RUN microdnf install -y python3 shadow-utils && microdnf clean all
 COPY --from=builder /opt/vllm-env /opt/vllm-env

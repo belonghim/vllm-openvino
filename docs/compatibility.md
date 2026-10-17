@@ -303,6 +303,11 @@ Gemma-4 runs n-gram speculation on the PA path.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation
   computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
   rejects such requests with HTTP 400. Output-token `logprobs` work.
+- Gemma-4 image prompts pass `token_type_ids` as zeros, so image tokens do not
+  attend to each other bidirectionally the way the HuggingFace and OpenVINO GenAI
+  pipelines arrange them (`ModelRunner` feeds the sequence's real token types).
+  Text prompts are unaffected; simple image questions answered correctly in both
+  PA and stateful paths, but complex image reasoning may differ from HF.
 - MoE prefill is slow on CPUs without AMX: LFM2.5-8B-A1B ~108 tok/s,
   Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), with `GatherMatmulCompressed`
   taking 80-90% of the time. The OpenVINO CPU plugin batches routed rows per
