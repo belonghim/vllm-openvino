@@ -935,6 +935,8 @@ class OpenVINOWorkerV1(WorkerBase):
                 from vllm_openvino.utils import (  # noqa: PLC0415
                     get_process_rss_bytes, get_cgroup_memory_usage_bytes,
                     format_memory_size)
+                from vllm_openvino.platform import (  # noqa: PLC0415
+                    MULTIMODAL_API_SERVER_OVERHEAD_BYTES, _has_vision_ir)
                 rss_after = get_process_rss_bytes()
                 cgroup_after = get_cgroup_memory_usage_bytes()
                 if rss_after > 0:
@@ -944,6 +946,16 @@ class OpenVINOWorkerV1(WorkerBase):
                         format_memory_size(rss_after),
                         format_memory_size(cgroup_after)
                         if cgroup_after > 0 else "unknown")
+                if (rss_after > 0 and cgroup_after > rss_after
+                        and _has_vision_ir(self.model_config.model)):
+                    observed = cgroup_after - rss_after
+                    budgeted = MULTIMODAL_API_SERVER_OVERHEAD_BYTES
+                    logger.info(
+                        "[OV-WARMUP] APIServer MM footprint: observed %s, "
+                        "budgeted %s. Tune MULTIMODAL_API_SERVER_OVERHEAD_BYTES "
+                        "in platform.py if the delta is large.",
+                        format_memory_size(observed),
+                        format_memory_size(budgeted))
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def _warm_up_paged_attention(self) -> None:
