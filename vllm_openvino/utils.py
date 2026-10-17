@@ -148,6 +148,34 @@ def get_process_rss_bytes() -> int:
     return 0
 
 
+def get_cgroup_memory_usage_bytes() -> int:
+    """Returns anonymous (non-reclaimable) memory used by this cgroup.
+
+    Uses 'anon' from memory.stat rather than memory.current because
+    memory.current includes reclaimable file-backed page cache which can
+    inflate to the container limit even when committed memory is much less.
+    """
+    try:
+        with open('/sys/fs/cgroup/memory.stat') as f:
+            for line in f:
+                if line.startswith('anon '):
+                    value = int(line.split()[1])
+                    if value > 0:
+                        return value
+    except (OSError, ValueError):
+        pass
+    try:
+        with open('/sys/fs/cgroup/memory/memory.stat') as f:
+            for line in f:
+                if line.startswith('rss '):
+                    value = int(line.split()[1])
+                    if value > 0:
+                        return value
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def detect_memory_limit() -> int | None:
     """Effective memory ceiling for this process.
 
