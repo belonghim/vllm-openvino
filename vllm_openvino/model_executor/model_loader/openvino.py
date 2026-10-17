@@ -254,6 +254,7 @@ class OpenVINOInputBuilder(ABC):
         image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
         mm_hashes: list[str | None] | None = None,
+        token_type_ids: np.ndarray | None = None,
     ) -> list | dict:
         """Build and return inputs for the OpenVINO inference request.
 
@@ -274,6 +275,8 @@ class OpenVINOInputBuilder(ABC):
             num_requests: Actual number of requests in batch.
             mm_hashes: Optional per-image stable content hashes, used as the
                 keys of the merged-vision-embedding LRU cache.
+            token_type_ids: Optional per-token types (1 for image embedding
+                positions, 0 otherwise); ``None`` keeps the text-only default.
 
         Returns:
             A list or dict suitable for ``ov_request.infer()``.
@@ -949,6 +952,7 @@ class OpenVINOCausalLM(nn.Module):
         image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
         mm_hashes: list[str | None] | None = None,
+        token_type_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
         if not self._has_kv_cache_inputs and num_requests is not None and num_requests > 1:
             raise RuntimeError(
@@ -967,6 +971,7 @@ class OpenVINOCausalLM(nn.Module):
             image_grid_thw=image_grid_thw,
             num_requests=num_requests,
             mm_hashes=mm_hashes,
+            token_type_ids=token_type_ids,
         )
         if not self._has_kv_cache_inputs and logger.isEnabledFor(logging.DEBUG):
             if isinstance(inputs, dict):
@@ -1108,6 +1113,7 @@ class PAInputBuilder(OpenVINOInputBuilder):
         image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
         mm_hashes: list[str | None] | None = None,
+        token_type_ids: np.ndarray | None = None,
     ) -> list | dict:
         """Build inputs for a PA-transformed OpenVINO model inference request.
 
@@ -1128,10 +1134,15 @@ class PAInputBuilder(OpenVINOInputBuilder):
             named["input_ids"] = input_ids
         num_tokens = input_ids.shape[0]
         if self._token_type_ids_buf is not None:
-            named["token_type_ids"] = (
-                self._token_type_ids_buf[:num_tokens]
-                if num_tokens <= self._token_type_ids_buf.shape[0]
-                else np.zeros((num_tokens, 1), dtype=np.int64))
+            # PA keeps token_type_ids rank 2 as [tokens, 1]; the runner
+            # supplies the real per-token types when the step carries images.
+            if token_type_ids is not None:
+                named["token_type_ids"] = token_type_ids.reshape(-1, 1)
+            else:
+                named["token_type_ids"] = (
+                    self._token_type_ids_buf[:num_tokens]
+                    if num_tokens <= self._token_type_ids_buf.shape[0]
+                    else np.zeros((num_tokens, 1), dtype=np.int64))
         if self._feed_per_layer_inputs:
             # The PA graph keeps per_layer_inputs rank 4 with tokens on dim 0:
             # [num_tokens, 1, num_layers, hidden]. hidden is 0 on Gemma-4
@@ -1223,6 +1234,7 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
         mm_hashes: list[str | None] | None = None,
+        token_type_ids: np.ndarray | None = None,
     ) -> dict:
         model = self.model
         attn_metadata = get_forward_context().attn_metadata
@@ -1329,6 +1341,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
         image_grid_thw: list[torch.Tensor] | None = None,
         num_requests: int | None = None,
         mm_hashes: list[str | None] | None = None,
+        token_type_ids: np.ndarray | None = None,
     ) -> dict:
         model = self.model
         inputs_dict = self._inputs_dict

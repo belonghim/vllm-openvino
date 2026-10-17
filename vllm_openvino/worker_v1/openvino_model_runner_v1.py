@@ -95,6 +95,12 @@ class OpenVINOModelRunnerV1:
             self.scheduler_config.max_num_batched_tokens,
             dtype=np.int64,
         )
+        # 1 for image embedding positions, 0 for text (Gemma-4 marks image
+        # tokens that way to give them bidirectional attention).
+        self._token_type_buf = np.zeros(
+            self.scheduler_config.max_num_batched_tokens,
+            dtype=np.int64,
+        )
         self._max_context_len_buf = np.zeros((), dtype=np.int32)
         # Preallocated once and mutated in place per step (matches
         # HybridPAInputBuilder's _max_ctx_ov pattern) to avoid a fresh
@@ -601,6 +607,11 @@ class OpenVINOModelRunnerV1:
             all_image_grid_thw = []
             all_image_position_ids = []
             all_mm_hashes = []
+            step_tokens = sum(
+                scheduler_output.num_scheduled_tokens[req_id]
+                for req_id in req_ids)
+            step_token_types = self._token_type_buf[:step_tokens]
+            step_token_types.fill(0)
 
             for req_id, (batch_start, num_computed, num_tokens) in req_spans.items():
                 chunk_end = num_computed + num_tokens
@@ -636,6 +647,9 @@ class OpenVINOModelRunnerV1:
                             (batch_start + run_lo - num_computed,
                              batch_start + run_hi - num_computed,
                              patch_offset, image_idx))
+                        step_token_types[
+                            batch_start + run_lo - num_computed:
+                            batch_start + run_hi - num_computed] = 1
                     all_mm_hashes.append(mm_feature.identifier or None)
 
             if all_pixel_values:
@@ -650,6 +664,7 @@ class OpenVINOModelRunnerV1:
                 multi_modal_kwargs["image_position_ids"] = torch.tensor(
                     all_image_position_ids, dtype=torch.int64).to(self.device)
                 multi_modal_kwargs["mm_hashes"] = all_mm_hashes
+                multi_modal_kwargs["token_type_ids"] = step_token_types
 
         if max_query_len <= 0:
             raise RuntimeError("Invalid: all scheduled sequences have zero query length")
