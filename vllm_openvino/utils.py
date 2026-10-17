@@ -148,6 +148,35 @@ def get_process_rss_bytes() -> int:
     return 0
 
 
+def detect_memory_limit() -> int | None:
+    """Effective memory ceiling for this process.
+
+    Returns the cgroup hard limit when one is active (K8s limits.memory,
+    podman/docker --memory).  When no hard limit is configured (BestEffort
+    or Burstable K8s pods without explicit memory limits, bare metal),
+    returns current RSS + /proc/meminfo MemAvailable so the pool is still
+    bounded by what the host can provide right now.  Returns None only
+    when all /proc reads fail.
+    """
+    limit = detect_cgroup_memory_limit()
+    if limit is not None:
+        return limit
+    try:
+        mem_available_kb = 0
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    mem_available_kb = int(line.split()[1])
+                    break
+        if mem_available_kb > 0:
+            rss = get_process_rss_bytes()
+            if rss > 0:
+                return rss + mem_available_kb * 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def model_weights_bytes(model_path: str) -> int:
     model_dir = Path(model_path)
     if not model_dir.is_dir():
