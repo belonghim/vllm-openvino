@@ -1086,10 +1086,10 @@ class PAInputBuilder(OpenVINOInputBuilder):
         self._max_ctx_ov: "ov.Tensor | bool | None" = None
         self._max_ctx_buf: np.ndarray | None = None
         input_names = {inp.get_any_name() for inp in model.ov_compiled.inputs}
-        # PagedAttention takes token_type_ids as [B_token]; [1, B_token]
-        # broadcasts wrongly inside the op.
+        # PagedAttention takes token_type_ids as [B_token, 1] (the PA graph
+        # keeps it rank 2); [1, B_token] broadcasts wrongly inside the op.
         self._token_type_ids_buf = (
-            np.zeros(model.model_config.max_model_len, dtype=np.int64)
+            np.zeros((model.model_config.max_model_len, 1), dtype=np.int64)
             if "token_type_ids" in input_names else None)
         self._feed_per_layer_inputs = (
             model.use_per_layer_embeddings_model
@@ -1126,20 +1126,21 @@ class PAInputBuilder(OpenVINOInputBuilder):
                 image_grid_thw, mm_hashes)
         else:
             named["input_ids"] = input_ids
+        num_tokens = input_ids.shape[0]
         if self._token_type_ids_buf is not None:
-            num_tokens = input_ids.shape[0]
             named["token_type_ids"] = (
                 self._token_type_ids_buf[:num_tokens]
                 if num_tokens <= self._token_type_ids_buf.shape[0]
-                else np.zeros(num_tokens, dtype=np.int64))
+                else np.zeros((num_tokens, 1), dtype=np.int64))
         if self._feed_per_layer_inputs:
             # The PA graph keeps per_layer_inputs rank 4 with tokens on dim 0:
-            # [num_tokens, 1, num_layers, hidden].
+            # [num_tokens, 1, num_layers, hidden]. hidden is 0 on Gemma-4
+            # 26B-A4B, so the token count must be explicit in the reshape.
             model.per_layer_emb_request.infer(
                 [model._as_numpy_no_copy(input_ids).reshape(1, -1)])
             ple = model.per_layer_emb_request.get_output_tensor(0).data
             named["per_layer_inputs"] = ple.reshape(
-                -1, 1, ple.shape[2], ple.shape[3])
+                num_tokens, 1, ple.shape[2], ple.shape[3])
         if model._position_input_name is not None:
             named[model._position_input_name] = positions
         named["past_lens"] = attn_metadata.past_lens
@@ -1407,7 +1408,8 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                     model.per_layer_emb_request.infer([ple_input_ids])
                     ple_out = model.per_layer_emb_request.get_output_tensor(0)
                     inputs_dict[name] = ple_out.data.reshape(
-                        1, -1, ple_out.shape[2], ple_out.shape[3])
+                        1, ple_input_ids.shape[1],
+                        ple_out.shape[2], ple_out.shape[3])
                 else:
                     p_layers = shape[2] if shape[2] is not None else 1
                     p_emb = shape[3] if shape[3] is not None else 256

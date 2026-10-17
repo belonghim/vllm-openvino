@@ -80,11 +80,22 @@ path, concurrent and prefix-cache-hit requests matched single requests, and
 n-gram speculation produced the same output. 128-token decode (8 CPUs, u8 KV):
 concurrency 1 18.6 -> 19.5 tok/s, concurrency 8 18.7 -> 125.2 tok/s (6.7x);
 a repeated 2.3k-token prompt went from 7.5 s to 1.2 s through prefix caching.
+Gemma-4 26B-A4B (MoE, sliding window 1024, 30 KV pairs, `token_type_ids`
+input, 14.3 GB weights; 32 GiB container) gave the same text and image output
+as the stateful path; concurrency 1 9.8 -> 10.2 tok/s, concurrency 8
+9.8 -> 30.9 tok/s (3.2x). Its stateful path needs more than 32 GiB to start
+(the post-load RSS check leaves no KV blocks); 48 GiB was used for comparison.
+When concurrent requests split long prompts at different chunk boundaries,
+greedy output can change at near-tie tokens (seen on E2B with and without
+prefix caching, both answers correct).
+
 The PA graph keeps `per_layer_inputs` rank 4, so it is fed as
-`[tokens, 1, layers, 256]` (as in OpenVINO GenAI's `ModelRunner`);
-`token_type_ids`, when the IR has it, is `[tokens]` per the PagedAttention op.
-Feeding neither made the first infer fail in a sliding-window layer's residual
-add (`Eltwise shape infer ... dim index: 0 mismatch`).
+`[tokens, 1, layers, hidden]` (as in OpenVINO GenAI's `ModelRunner`); 26B-A4B
+has hidden 0, so reshapes name the token count instead of `-1`.
+`token_type_ids` stays rank 2 and is fed as `[tokens, 1]` per the
+PagedAttention op. Without `per_layer_inputs` the first infer failed in a
+sliding-window layer's residual add (`Eltwise shape infer ... dim index: 0
+mismatch`).
 
 Greedy output matched the stateful path on TinyLlama-1.1B and
 differed on Qwen-family models; u8 and bf16 caches produced
