@@ -869,25 +869,26 @@ class OpenVINOWorkerV1(WorkerBase):
         # we can measure actual RSS and tighten the KV cache budget if needed.
         if current_platform.is_openvino_cpu():
             from vllm_openvino.utils import (  # noqa: PLC0415
-                get_process_rss_bytes, detect_memory_limit,
-                format_memory_size)
+                get_process_rss_bytes, get_cgroup_memory_usage_bytes,
+                detect_memory_limit, format_memory_size)
             from vllm_openvino.platform import (  # noqa: PLC0415
                 KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES)
-            rss = get_process_rss_bytes()
+            cgroup_used = get_cgroup_memory_usage_bytes()
+            effective_used = cgroup_used if cgroup_used > 0 else get_process_rss_bytes()
             effective_limit = detect_memory_limit()
-            if rss > 0 and effective_limit is not None:
-                rss_available = effective_limit - rss - KV_CACHE_MEMORY_MARGIN_BYTES
+            if effective_used > 0 and effective_limit is not None:
+                available = effective_limit - effective_used - KV_CACHE_MEMORY_MARGIN_BYTES
                 kvcache_now = self.cache_config.openvino_kvcache_space_bytes
-                if kvcache_now > rss_available:
-                    fitted = max(KV_CACHE_MIN_BYTES, rss_available)
+                if kvcache_now > available:
+                    fitted = max(KV_CACHE_MIN_BYTES, available)
                     logger.warning(
-                        "[OV-WORKER] Post-load RSS %s, effective memory limit %s, "
+                        "[OV-WORKER] Post-load container memory %s (limit %s) "
                         "leaves only %s for KV cache (initially %s); reducing "
                         "pool to avoid OOM. Increase container memory limit or "
                         "set VLLM_OPENVINO_KVCACHE_SPACE.",
-                        format_memory_size(rss),
+                        format_memory_size(effective_used),
                         format_memory_size(effective_limit),
-                        format_memory_size(max(0, rss_available)),
+                        format_memory_size(max(0, available)),
                         format_memory_size(kvcache_now))
                     self.cache_config.openvino_kvcache_space_bytes = fitted
         conv_reservation = (self._conv_reservation_bytes()
@@ -934,11 +935,17 @@ class OpenVINOWorkerV1(WorkerBase):
                         time.perf_counter() - warmup_start)
             if current_platform.is_openvino_cpu():
                 from vllm_openvino.utils import (  # noqa: PLC0415
-                    get_process_rss_bytes, format_memory_size)
+                    get_process_rss_bytes, get_cgroup_memory_usage_bytes,
+                    format_memory_size)
                 rss_after = get_process_rss_bytes()
+                cgroup_after = get_cgroup_memory_usage_bytes()
                 if rss_after > 0:
-                    logger.info("[OV-WARMUP] RSS after warmup: %s",
-                                format_memory_size(rss_after))
+                    logger.info(
+                        "[OV-WARMUP] RSS after warmup: %s (EngineCore), "
+                        "%s (container total)",
+                        format_memory_size(rss_after),
+                        format_memory_size(cgroup_after)
+                        if cgroup_after > 0 else "unknown")
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def _warm_up_paged_attention(self) -> None:
