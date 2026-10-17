@@ -14,7 +14,6 @@ from vllm_openvino.utils import (canonical_vllm_cache_dtype,
                                  cpu_thread_limit,
                                  detect_memory_limit,
                                  format_memory_size,
-                                 has_sliding_window,
                                  model_weights_bytes)
 
 if TYPE_CHECKING:
@@ -151,7 +150,6 @@ def _is_stateful_pa_candidate(model_path: str) -> bool:
 
     Requires SDPA ops (transform is a no-op otherwise and would leave a
     multi-request scheduler on the single-request-only stateful path).
-    Sliding-window exclusion happens later in the loader via hf_config.
     """
     ir_path = _find_model_ir_path(model_path)
     if ir_path is None:
@@ -170,11 +168,10 @@ def _is_hybrid_pa_candidate(model_path: str) -> bool:
     """Hybrid Mamba/attention model eligible for the Hybrid-PA path.
 
     Deliberately narrower than "has ReadValue + SDPA": Gemma-4 also matches
-    that (KV cache via ReadValue) but has no ssm/conv state, and PA
-    transformation succeeds on it yet crashes at inference on its
-    sliding-window layers (docs/compatibility.md #23) — so we require
-    ssm/conv specifically inside variable_id, not a whole-file byte scan
-    (gemma-4's IR has 278 unrelated "conv" hits from `type="Convert"` ops).
+    that (KV cache via ReadValue) but has no ssm/conv state and belongs on the
+    plain PagedAttention path — so we require ssm/conv specifically inside
+    variable_id, not a whole-file byte scan (gemma-4's IR has 278 unrelated
+    "conv" hits from `type="Convert"` ops).
     """
     ir_path = _find_model_ir_path(model_path)
     if ir_path is None:
@@ -373,8 +370,7 @@ class OpenVinoPlatform(Platform):
             hybrid_pa = (envs.VLLM_OPENVINO_HYBRID_PA
                          and _is_hybrid_pa_candidate(model_config.model))
             stateful_pa = (not hybrid_pa and envs.VLLM_OPENVINO_STATEFUL_PA
-                           and _is_stateful_pa_candidate(model_config.model)
-                           and not has_sliding_window(model_config))
+                           and _is_stateful_pa_candidate(model_config.model))
             keeps_external_state = not stateful_pa
             if scheduler_config and scheduler_config.max_num_seqs != 1:
                 if hybrid_pa:

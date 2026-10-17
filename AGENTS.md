@@ -72,12 +72,12 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **KV 캐시 `.fill(0)` 복원 금지** — `_allocate_kv_cache()`에 `.fill(0)` 없는 것이 정상(의도된 최적화). 추가하면 OOM 유발. SSM/conv 캐시(`_allocate_state_cache()`)에는 `.fill(0)` 유지됨
 - **Pin memory 미지원** / **LoRA 미지원** / **TP·PP 미지원** — 멀티소켓은 OpenVINO가 자동으로 스레드를 배치하지만 이득이 작다: 고부하(8 streams)에서 코어 2배에 +9%, 저부하(2 streams)에서 +1%. 스레드 예산을 소켓에 분산하면 -12~-18% 손해
 - **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 import 시점에 raise하지 말 것. vLLM 플러그인 디스커버리 메커니즘 때문
-- **서빙 경로** — `ReadValue`가 없는 attention-only 모델은 PagedAttention을 사용한다. `ssm`/`conv` 상태가 있는 hybrid 모델(Qwen3.5, LFM2.5)은 Hybrid-PA를 기본 사용하며 `VLLM_OPENVINO_HYBRID_PA=0`으로 stateful 경로를 강제할 수 있다. 그 외 stateful 모델(Gemma-4)은 OpenVINO 내부 KV cache를 사용하고 `max_num_seqs=1`로 동작한다.
-- **Hybrid-PA 후보 판정** — 단순한 `ReadValue`+SDPA 조합이 아니라 IR `variable_id`의 `ssm`/`conv` 상태를 확인한다. Gemma-4의 sliding-window attention은 Hybrid-PA 대상이 아니다.
+- **서빙 경로** — `ReadValue`가 없는 attention-only 모델은 PagedAttention을 사용한다. `ssm`/`conv` 상태가 있는 hybrid 모델(Qwen3.5, LFM2.5)은 Hybrid-PA를 기본 사용하며 `VLLM_OPENVINO_HYBRID_PA=0`으로 stateful 경로를 강제할 수 있다. 그 외 SDPA가 있는 stateful 모델(Gemma-4 포함, sliding window 무관)은 PagedAttention으로 변환하며 `VLLM_OPENVINO_STATEFUL_PA=0`이면 OpenVINO 내부 KV cache와 `max_num_seqs=1`로 동작한다.
+- **Hybrid-PA 후보 판정** — 단순한 `ReadValue`+SDPA 조합이 아니라 IR `variable_id`의 `ssm`/`conv` 상태를 확인한다. Gemma-4는 transformer KV만 있으므로 Hybrid-PA가 아니라 일반 PA 대상이다.
+- **PA 입력 shape** — PA 변환 후에도 Gemma-4의 `per_layer_inputs`는 rank 4로 남으므로 `[tokens, 1, layers, 256]`으로 넣는다(OpenVINO GenAI `model_runner.hpp`와 동일). `token_type_ids`는 PA op 규약대로 `[tokens]`이다. 이 입력이 빠지면 sliding-window 레이어의 residual add에서 `Eltwise ... dim index: 0 mismatch`가 난다.
 - **CPU 스레드 자동감지** — `VLLM_OPENVINO_CPU_THREADS_NUM=0`이면 cgroup CPU quota를 고려해 OpenVINO 스레드 수를 제한한다. 명시적인 환경변수 설정이 우선한다. 멀티소켓 호스트에서는 프로세스를 소켓별 cpuset에 바인딩하고 스레드 수를 그 소켓의 코어 수로 맞추는 편이 효율적이다.
 - **Gather-before-matmul 변환** — PA-transformed 모델에만 적용한다. stateful 모델에는 적용하지 않는다. 샘플링 위치에서만 logits를 계산하므로 `prompt_logprobs`는 지원하지 않고, `OpenVinoPlatform.validate_request`가 HTTP 400으로 거부한다.
 - **2단계 실행** — `execute_model`은 forward와 `compute_logits`까지만 수행하고 `None`을 반환하며, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream MRV1 패턴). 구조화 출력이 이 경계에 의존하므로 두 단계를 합치지 않는다.
-- **Stateful-PA 제외 조건** — `has_sliding_window()`는 `layer_types`에 `sliding_attention`이 있거나 `sliding_window < max_model_len`일 때만 참이다. Gemma-4는 OpenVINO 2026.4.1에서도 PA 변환 후 첫 infer가 실패하므로 stateful 경로를 유지하고, `sliding_window=262144`인 Phi-3.5는 PA를 사용한다.
 - **SSM/conv cache** — stateful 경로는 OpenVINO가 내부 상태를 관리하므로 외부 SSM/conv cache를 할당하지 않는다. Hybrid-PA는 prefix caching이 켜지면(기본, spec decode 없음) 스케줄러 블록마다 같은 인덱스의 conv/SSM checkpoint를 두고(`la.cache_interval` = 스케줄러 블록 크기, OpenVINO KV 블록 32의 배수), 꺼지거나 spec decode가 있으면 스케줄러 블록과 별도의 물리 slot pool을 사용한다. 같은 step에서 채워지는 블록에 prefix hit한 요청은 runner가 infer를 wave로 나눠 checkpoint를 쓴 뒤에 읽는다.
 - **모델 포맷 필수** — HuggingFace 원본 모델은 직접 로딩하지 않으며 OpenVINO IR로 사전 변환해야 한다. 주요 파일명:
   - 텍스트 모델: `openvino_model.xml`

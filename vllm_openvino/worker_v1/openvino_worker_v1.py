@@ -34,7 +34,6 @@ from vllm_openvino.worker_v1.openvino_model_runner_v1 import (
 from vllm_openvino.kv_cache import OpenVINOCacheEngine, str_to_ov_type
 from vllm_openvino.utils import (
     canonical_vllm_cache_dtype,
-    has_sliding_window,
     determine_num_available_blocks,
     get_max_allocatable_memory_gpu,
     format_memory_size,
@@ -238,9 +237,7 @@ class OpenVINOWorkerV1(WorkerBase):
 
             if ssm_cache_config or conv_cache_config:
                 self._preloaded_model_type = HYBRID_MAMBA
-            elif (envs.VLLM_OPENVINO_STATEFUL_PA
-                    and has_sdpa
-                    and not has_sliding_window(self.model_config)):
+            elif envs.VLLM_OPENVINO_STATEFUL_PA and has_sdpa:
                 self._preloaded_model_type = ATTENTION_ONLY
             elif key_cache_config or value_cache_config or has_unknown_readvalue:
                 self._preloaded_model_type = STATEFUL

@@ -29,8 +29,7 @@ not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
 `"cpu" in version("vllm")`, so the probe still reports no active driver,
 `HAS_TRITON` stays false and MRV1 is selected. With the version string faked to
 `+cpu` (MRV2 selected by config), the plugin's own worker still served
-Qwen3-1.7B on the PagedAttention path. Hybrid-PA, stateful (Gemma-4),
-multimodal, n-gram speculation and structured output were not tested under
+Qwen3-1.7B on the PagedAttention path. Hybrid-PA, stateful, multimodal, n-gram speculation and structured output were not tested under
 that configuration.
 
 Tracked upstream:
@@ -58,7 +57,8 @@ The plugin selects a path from the model IR:
 |---|---|---|
 | No `ReadValue`, with SDPA | PagedAttention | External KV cache and concurrent batching |
 | `ReadValue` with `ssm`/`conv` variable IDs | Hybrid-PA | External attention/state cache and concurrent batching |
-| Other stateful models | Stateful | OpenVINO internal state and `max_num_seqs=1` |
+| Other `ReadValue` models with SDPA (incl. Gemma-4) | PagedAttention (`VLLM_OPENVINO_STATEFUL_PA=1`) | External KV cache and concurrent batching |
+| Stateful models without SDPA, or `VLLM_OPENVINO_STATEFUL_PA=0` | Stateful | OpenVINO internal state and `max_num_seqs=1` |
 
 Stateful plain-attention models (optimum-intel default exports, e.g.
 Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time
@@ -69,11 +69,24 @@ OpenVINO `KV_CACHE_PRECISION` compile property — `f32`/`i8` are rejected by
 CPU PagedAttention and fall back to the default with a warning). Validated
 on Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B and Phi-3.5-mini (int4
 IR): concurrency-8 aggregate throughput was 4.9-7.0x the stateful path,
-single-stream -7.8% to +4%. A `sliding_window` at or above `max_model_len`
-(Phi-3.5-mini: 262144) never takes effect and does not block the
-transformation. Models with a smaller window or per-layer
-`sliding_attention` (Gemma-4) and stateful models without SDPA ops stay on
-the stateful path. Greedy output matched the stateful path on TinyLlama-1.1B and
+single-stream -7.8% to +4%. Sliding-window models take the same path: the
+PagedAttention op applies the window itself. Stateful models without SDPA
+ops stay on the stateful path.
+
+Gemma-4 E2B (sliding window 512, 15 KV pairs after KV sharing, per-layer
+embeddings) was verified on the PA path with OpenVINO 2026.4.1: greedy output
+on 2.3k-token prompts and on image prompts was byte-identical to the stateful
+path, concurrent and prefix-cache-hit requests matched single requests, and
+n-gram speculation produced the same output. 128-token decode (8 CPUs, u8 KV):
+concurrency 1 18.6 -> 19.5 tok/s, concurrency 8 18.7 -> 125.2 tok/s (6.7x);
+a repeated 2.3k-token prompt went from 7.5 s to 1.2 s through prefix caching.
+The PA graph keeps `per_layer_inputs` rank 4, so it is fed as
+`[tokens, 1, layers, 256]` (as in OpenVINO GenAI's `ModelRunner`);
+`token_type_ids`, when the IR has it, is `[tokens]` per the PagedAttention op.
+Feeding neither made the first infer fail in a sliding-window layer's residual
+add (`Eltwise shape infer ... dim index: 0 mismatch`).
+
+Greedy output matched the stateful path on TinyLlama-1.1B and
 differed on Qwen-family models; u8 and bf16 caches produced
 byte-identical output, so the difference comes from the transformed
 attention computation, not cache precision. Set
@@ -264,23 +277,16 @@ high: with 2, spurious matches cost 7-11% on free-form output for Qwen3-1.7B.
 Output can diverge from non-spec runs at near-tie tokens because kernel
 numerics vary with query length.
 
-Stateful-path models (Gemma-4) are not supported. Rolling back rejected tokens
+Stateful-path models are not supported. Rolling back rejected tokens
 by trimming every KV state on the sequence axis (`get_state`/`set_state`) is
 exact, sliding-window layers included (Gemma-4 E2B, 700-token context,
 logits identical to the untrimmed run), but the trim copies all states at
 10-33 ms for 700-4000 tokens of context against a 53-130 ms decode step, and
 the stateful path serves one request at a time and is maintenance-only.
+Gemma-4 runs n-gram speculation on the PA path.
 
 ## Known Limitations
 
-- Gemma-4 sliding-window attention is supported only on the sequential
-  stateful path. Bypassing the `has_sliding_window` guard and forcing the
-  `STATEFUL_PA` transformation compiles successfully but crashes at first
-  infer with `[CPU] Add ... Eltwise shape infer input shapes dim index: 0
-  mismatch` inside a sliding-window layer's residual add (verified on
-  OpenVINO 2026.3.0, 2026.4.0 and 2026.4.1 — same error site
-  `node.cpp:794`/`eltwise.cpp:52`, no fix in any of the three releases).
-  Because Gemma-4 has transformer KV state, Hybrid-PA never applies either.
 - Stateful models do not support concurrent request execution.
 - LoRA, pin memory, and multi-socket execution are not supported.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation

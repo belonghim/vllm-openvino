@@ -110,9 +110,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # PagedAttention transformation for plain-attention stateful models
     # (ReadValue-based KV cache, e.g. optimum-intel default exports like
     # Qwen2.5-Coder-int4-ov). Enables concurrent request batching
-    # (max_num_seqs > 1). Sliding-window models and models without SDPA ops
-    # fall back to the sequential stateful path. Set to 0 to force the
-    # sequential stateful path.
+    # (max_num_seqs > 1). Models without SDPA ops fall back to the sequential
+    # stateful path. Set to 0 to force the sequential stateful path.
     "VLLM_OPENVINO_STATEFUL_PA":
     lambda: _env_bool("VLLM_OPENVINO_STATEFUL_PA", "1"),
 

@@ -27,7 +27,7 @@ from vllm.v1.sample.sampler import Sampler as SamplerV1
 
 import vllm_openvino.envs as envs
 from vllm_openvino.utils import (cpu_thread_limit, format_memory_size,
-                                 has_sliding_window, model_weights_bytes)
+                                 model_weights_bytes)
 
 logger = init_logger(__name__)
 
@@ -365,12 +365,7 @@ class OpenVINOCausalLM(nn.Module):
             self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
         if self.model_type == STATEFUL and envs.VLLM_OPENVINO_STATEFUL_PA:
-            if has_sliding_window(self.model_config):
-                logger.info(
-                    "[OV-LOADER] Sliding-window stateful model keeps the "
-                    "sequential stateful path (VLLM_OPENVINO_STATEFUL_PA "
-                    "does not apply).")
-            elif not _has_sdpa_ops(ov_model):
+            if not _has_sdpa_ops(ov_model):
                 logger.warning(
                     "[OV-LOADER] Stateful model without ScaledDotProduct"
                     "Attention ops keeps the sequential stateful path. "
@@ -495,7 +490,7 @@ class OpenVINOCausalLM(nn.Module):
             known_names = {"input_ids", "inputs_embeds", "max_context_len",
                            "past_lens", "subsequence_begins", "block_indices",
                            "block_indices_begins", "sampled_tokens_indices",
-                           "token_type_ids"}
+                           "token_type_ids", "per_layer_inputs"}
             known_prefixes = ("key_cache.", "value_cache.",
                                "conv_state_table.", "gated_delta_state_table.",
                                "la.")
@@ -1090,11 +1085,15 @@ class PAInputBuilder(OpenVINOInputBuilder):
         self.model = model
         self._max_ctx_ov: "ov.Tensor | bool | None" = None
         self._max_ctx_buf: np.ndarray | None = None
-        if model.use_text_embeddings_model:
-            self._token_type_ids_buf = np.zeros(
-                (1, model.model_config.max_model_len), dtype=np.int64)
-        else:
-            self._token_type_ids_buf = None
+        input_names = {inp.get_any_name() for inp in model.ov_compiled.inputs}
+        # PagedAttention takes token_type_ids as [B_token]; [1, B_token]
+        # broadcasts wrongly inside the op.
+        self._token_type_ids_buf = (
+            np.zeros(model.model_config.max_model_len, dtype=np.int64)
+            if "token_type_ids" in input_names else None)
+        self._feed_per_layer_inputs = (
+            model.use_per_layer_embeddings_model
+            and "per_layer_inputs" in input_names)
 
     def build_inputs(
         self,
@@ -1125,13 +1124,22 @@ class PAInputBuilder(OpenVINOInputBuilder):
             named["inputs_embeds"] = model._prepare_embeddings(
                 input_ids, pixel_values, image_position_ids, pixel_position_ids,
                 image_grid_thw, mm_hashes)
-            seq_len_ids = input_ids.shape[0]
-            named["token_type_ids"] = (
-                self._token_type_ids_buf[:, :seq_len_ids]
-                if seq_len_ids <= self._token_type_ids_buf.shape[1]
-                else np.zeros((1, seq_len_ids), dtype=np.int64))
         else:
             named["input_ids"] = input_ids
+        if self._token_type_ids_buf is not None:
+            num_tokens = input_ids.shape[0]
+            named["token_type_ids"] = (
+                self._token_type_ids_buf[:num_tokens]
+                if num_tokens <= self._token_type_ids_buf.shape[0]
+                else np.zeros(num_tokens, dtype=np.int64))
+        if self._feed_per_layer_inputs:
+            # The PA graph keeps per_layer_inputs rank 4 with tokens on dim 0:
+            # [num_tokens, 1, num_layers, hidden].
+            model.per_layer_emb_request.infer(
+                [model._as_numpy_no_copy(input_ids).reshape(1, -1)])
+            ple = model.per_layer_emb_request.get_output_tensor(0).data
+            named["per_layer_inputs"] = ple.reshape(
+                -1, 1, ple.shape[2], ple.shape[3])
         if model._position_input_name is not None:
             named[model._position_input_name] = positions
         named["past_lens"] = attn_metadata.past_lens
