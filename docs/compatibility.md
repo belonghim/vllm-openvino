@@ -81,10 +81,12 @@ n-gram speculation produced the same output. 128-token decode (8 CPUs, u8 KV):
 concurrency 1 18.6 -> 19.5 tok/s, concurrency 8 18.7 -> 125.2 tok/s (6.7x);
 a repeated 2.3k-token prompt went from 7.5 s to 1.2 s through prefix caching.
 Gemma-4 26B-A4B (MoE, sliding window 1024, 30 KV pairs, `token_type_ids`
-input, 14.3 GB weights; 32 GiB container) gave the same text and image output
-as the stateful path; concurrency 1 9.8 -> 10.2 tok/s, concurrency 8
-9.8 -> 30.9 tok/s (3.2x). Its stateful path needs more than 32 GiB to start
-(the post-load RSS check leaves no KV blocks); 48 GiB was used for comparison.
+input, 14.3 GB weights) gave the same text answer as the stateful path and the
+same extraction of a text-heavy image; concurrency 1 9.8 -> 10.2 tok/s,
+concurrency 8 9.8 -> 30.9 tok/s (3.2x). Both paths now start in a 32 GiB
+container (post-warmup anonymous RSS 16.9 GB PA / 17.4 GB stateful; see the
+memory-fitting bullet below), and the PA path also served text and images at a
+24 GiB limit (three concurrent image requests, HTTP 200).
 When concurrent requests split long prompts at different chunk boundaries,
 greedy output can change at near-tie tokens (seen on E2B with and without
 prefix caching, both answers correct).
@@ -93,7 +95,9 @@ The PA graph keeps `per_layer_inputs` rank 4, so it is fed as
 `[tokens, 1, layers, hidden]` (as in OpenVINO GenAI's `ModelRunner`); 26B-A4B
 has hidden 0, so reshapes name the token count instead of `-1`.
 `token_type_ids` stays rank 2 and is fed as `[tokens, 1]` per the
-PagedAttention op. Without `per_layer_inputs` the first infer failed in a
+PagedAttention op, carrying the step's real per-token types (1 on image
+embedding positions, 0 elsewhere) the way OpenVINO GenAI's `ModelRunner` feeds
+them, so image tokens attend to each other bidirectionally. Without `per_layer_inputs` the first infer failed in a
 sliding-window layer's residual add (`Eltwise shape infer ... dim index: 0
 mismatch`).
 
@@ -172,12 +176,18 @@ text because of prefill vs decode numerics.
   10 rounds while its size stayed fixed; cgroup total 1.6 -> 2.5 GB).
   Size containers for `baseline + VLLM_OPENVINO_KVCACHE_SPACE`, not for the
   pool alone.
-- On CPU, `openvino_kvcache_space_bytes` is fitted to the container's
-  cgroup memory limit when one is set: budget = limit - model weights
-  (`openvino_*.bin`) - 1.5 GiB runtime baseline - 512 MiB headroom. A pool
-  larger than the budget is reduced to it (never below 256 MiB) with a
-  warning; a pool above 90% of the budget logs a headroom warning. Both are
-  skipped when no cgroup memory limit is set.
+- On CPU, `openvino_kvcache_space_bytes` is fitted to the container's cgroup
+  memory limit in two stages when one is set. Before model load:
+  budget = limit - model weights (`openvino_*.bin`) - 1.5 GiB runtime baseline
+  - 1 GiB APIServer multimodal overhead (multimodal checkpoints only) - 1.2 GiB
+  headroom. After model load: the PA warmup runs first, then the budget is
+  recomputed from the EngineCore's anonymous RSS against the same limit, minus
+  the multimodal overhead and the 1.2 GiB headroom. Anonymous RSS is the right
+  baseline because the kernel reclaims the memory-mapped weights under pressure
+  (26B: VmRSS 30.6 GB of which 16.9 GB is anonymous). A pool larger than the
+  budget is reduced to it (never below 256 MiB) with a warning; a pool above 90%
+  of the pre-load budget logs a headroom warning. Skipped when no cgroup memory
+  limit is set.
 - vLLM's prefix caching (default on) retains freed blocks, so workloads with
   unique prompts keep touching new pool pages over time;
   `--no-enable-prefix-caching` keeps the resident set at the working set
@@ -197,10 +207,14 @@ text because of prefill vs decode numerics.
   multimodal checkpoint, `--limit-mm-per-prompt '{"image":0,"video":0}'` skips
   the multimodal warmup (startup 64 s to 50 s on Qwen3.5-0.8B-int4).
 - PA models run one prefill and one decode step on the reserved null block 0 at
-  startup (`compile_or_warm_up_model`) to absorb the CPU kernel JIT cost; the
-  first request dropped from 1.51 s to 0.79 s (Qwen3-1.7B-int4) and 0.87 s to
-  0.49 s (Qwen3.5-0.8B-int4) with no visible startup cost. Stateful models keep
-  their own warm-up in `load_model`.
+  startup to absorb the CPU kernel JIT cost; the first request dropped from
+  1.51 s to 0.79 s (Qwen3-1.7B-int4) and 0.87 s to 0.49 s (Qwen3.5-0.8B-int4)
+  with no visible startup cost. The warmup now runs inside
+  `determine_available_memory`, against a throwaway 1-block cache, *before* the
+  post-load memory measurement, so the CPU plugin's first-infer weight repack is
+  part of the measured baseline and no longer happens after the pool is sized;
+  `compile_or_warm_up_model` skips its own copy. Stateful models keep their own
+  warm-up in `load_model`.
 - SSM/conv state caches are zero-filled; attention KV caches are not.
 - The worker zero-fills scheduler-reported `new_block_ids_to_zero` blocks each
   step. Removing it changed nothing measurable (Qwen3-1.7B-int4, 8-CPU quota,
@@ -303,11 +317,12 @@ Gemma-4 runs n-gram speculation on the PA path.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation
   computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
   rejects such requests with HTTP 400. Output-token `logprobs` work.
-- Gemma-4 image prompts pass `token_type_ids` as zeros, so image tokens do not
-  attend to each other bidirectionally the way the HuggingFace and OpenVINO GenAI
-  pipelines arrange them (`ModelRunner` feeds the sequence's real token types).
-  Text prompts are unaffected; simple image questions answered correctly in both
-  PA and stateful paths, but complex image reasoning may differ from HF.
+- Gemma-4 image prompts on the stateful path pass `token_type_ids` as zeros, so
+  image tokens do not attend to each other bidirectionally there; the
+  PagedAttention path feeds the sequence's real token types. On a text-heavy
+  test image the two arrangements returned the same flag list and the same text
+  answer, and one-sentence descriptions that differ in wording (both plausible);
+  no quality delta beyond that was demonstrated.
 - MoE prefill is slow on CPUs without AMX: LFM2.5-8B-A1B ~108 tok/s,
   Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), with `GatherMatmulCompressed`
   taking 80-90% of the time. The OpenVINO CPU plugin batches routed rows per
