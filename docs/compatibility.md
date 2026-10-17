@@ -97,7 +97,12 @@ has hidden 0, so reshapes name the token count instead of `-1`.
 `token_type_ids` stays rank 2 and is fed as `[tokens, 1]` per the
 PagedAttention op, carrying the step's real per-token types (1 on image
 embedding positions, 0 elsewhere) the way OpenVINO GenAI's `ModelRunner` feeds
-them, so image tokens attend to each other bidirectionally. Without `per_layer_inputs` the first infer failed in a
+them. The PA kernel reads this input directly (input 25). A synthetic run of
+the PA op from this IR showed that tokens inside a contiguous type-1 run attend
+bidirectionally, text stays causal, and two runs separated by text are
+independent. Adjacent runs with no separating token merge into one block. The
+E2B IR has no `token_type_ids` input, so the feed is dropped there and its image
+tokens stay causal. Without `per_layer_inputs` the first infer failed in a
 sliding-window layer's residual add (`Eltwise shape infer ... dim index: 0
 mismatch`).
 
