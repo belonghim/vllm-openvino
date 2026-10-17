@@ -11,7 +11,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 import vllm_openvino.envs as envs
 from vllm_openvino.utils import (canonical_vllm_cache_dtype,
                                  cpu_thread_limit,
-                                 detect_cgroup_memory_limit,
+                                 detect_memory_limit,
                                  format_memory_size,
                                  has_sliding_window,
                                  model_weights_bytes)
@@ -52,7 +52,7 @@ def _cap_torch_threads() -> None:
 
 
 def _fit_kv_cache_to_memory_limit(kv_bytes: int, model_path: str) -> int:
-    limit = detect_cgroup_memory_limit()
+    limit = detect_memory_limit()
     if limit is None:
         return kv_bytes
     weights = model_weights_bytes(model_path)
@@ -61,7 +61,7 @@ def _fit_kv_cache_to_memory_limit(kv_bytes: int, model_path: str) -> int:
     if kv_bytes > budget:
         fitted = max(KV_CACHE_MIN_BYTES, budget)
         logger.warning(
-            "[OV-PLATFORM] KV cache space %s does not fit the container memory "
+            "[OV-PLATFORM] KV cache space %s does not fit the memory "
             "limit %s after reserving %s runtime baseline, %s model weights and "
             "%s headroom; sizing the pool to %s to avoid an OOM kill. Raise the "
             "container memory limit or lower VLLM_OPENVINO_KVCACHE_SPACE to keep "
@@ -75,7 +75,7 @@ def _fit_kv_cache_to_memory_limit(kv_bytes: int, model_path: str) -> int:
     if kv_bytes * 10 > budget * 9:
         logger.warning(
             "[OV-PLATFORM] KV cache space %s leaves under 10%% headroom under the "
-            "container memory limit %s (runtime baseline %s, model weights %s, "
+            "memory limit %s (runtime baseline %s, model weights %s, "
             "headroom %s); an OOM is possible once the pool is fully touched.",
             format_memory_size(kv_bytes), format_memory_size(limit),
             format_memory_size(CONTAINER_RUNTIME_BASELINE_BYTES),
@@ -205,7 +205,7 @@ GIB_BYTES = 1024 ** 3
 CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
 GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
 DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limited RAM
-KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES // 2  # runtime headroom under a cgroup limit
+KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES  # runtime headroom — covers OV working memory during inference
 KV_CACHE_MIN_BYTES = GIB_BYTES // 4  # below this a pool cannot serve usefully
 CONTAINER_RUNTIME_BASELINE_BYTES = 3 * GIB_BYTES // 2  # python/torch/vLLM resident before the pool
 
