@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -926,7 +927,11 @@ class OpenVINOWorkerV1(WorkerBase):
         # OpenVINO compiles in load_model(); callers ignore the return value.
         model = self.model_runner.get_model()
         if getattr(model, '_has_kv_cache_inputs', False):
+            warmup_start = time.perf_counter()
             self._warm_up_paged_attention()
+            self.model_runner._step_stats.reset()
+            logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
+                        time.perf_counter() - warmup_start)
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def _warm_up_paged_attention(self) -> None:

@@ -3,6 +3,7 @@
 # ruff: noqa: SIM117
 import logging
 import os
+import time
 from collections import OrderedDict
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -25,7 +26,8 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler as SamplerV1
 
 import vllm_openvino.envs as envs
-from vllm_openvino.utils import cpu_thread_limit, has_sliding_window
+from vllm_openvino.utils import (cpu_thread_limit, format_memory_size,
+                                 has_sliding_window, model_weights_bytes)
 
 logger = init_logger(__name__)
 
@@ -325,6 +327,8 @@ class OpenVINOCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(
             model_config.get_vocab_size(), logits_as_input=True)
         self.sampler = SamplerV1()
+        self.last_infer_s = 0.0
+        load_start = time.perf_counter()
 
         # Only support local pre-exported IR files
         model_dir = Path(model_config.model)
@@ -464,7 +468,9 @@ class OpenVINOCausalLM(nn.Module):
         main_hint: dict[str, Any] = dict(perf_hint)
         if paged_attention_kv_precision is not None:
             main_hint["KV_CACHE_PRECISION"] = paged_attention_kv_precision
+        compile_start = time.perf_counter()
         ov_compiled = ov_core.compile_model(ov_model, ov_device, main_hint)
+        compile_s = time.perf_counter() - compile_start
         self.ov_compiled = ov_compiled
         self.ov_request = ov_compiled.create_infer_request()
         self._flat_kv_caches_template: list[ov.Tensor] | None = None
@@ -572,6 +578,12 @@ class OpenVINOCausalLM(nn.Module):
             self.ov_per_layer_emb_compiled = ov_core.compile_model(
                 per_layer_emb_model, ov_device, perf_hint)
             self.per_layer_emb_request = self.ov_per_layer_emb_compiled.create_infer_request()
+
+        logger.info(
+            "[OV-LOADER] Model loading took %s of weights and %.2f s "
+            "(compile %.2f s on %s)",
+            format_memory_size(model_weights_bytes(str(model_dir))),
+            time.perf_counter() - load_start, compile_s, ov_device)
 
     def warmup(self) -> None:
         if self._has_kv_cache_inputs:
@@ -972,7 +984,9 @@ class OpenVINOCausalLM(nn.Module):
                     logger.debug("[OV-INPUT] [%d]: shape=%s, dtype=%s",
                                  i, getattr(v, 'shape', 'N/A'),
                                  getattr(v, 'dtype', 'N/A'))
+        infer_start = time.perf_counter()
         self.ov_request.infer(inputs)
+        self.last_infer_s = time.perf_counter() - infer_start
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
         return self._extract_logits(logits, num_requests)
 

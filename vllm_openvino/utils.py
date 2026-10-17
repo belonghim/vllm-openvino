@@ -1,10 +1,70 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import threading
+import time
 from pathlib import Path
 
+import vllm.envs as vllm_envs
 import vllm_openvino.envs as envs
 from vllm.logger import init_logger
 logger = init_logger(__name__)
+
+
+class StepStatsLogger:
+    """Per-step timing summary, logged every VLLM_LOG_STATS_INTERVAL while busy.
+
+    Runs in the EngineCore process, where the OpenVINO calls happen; the
+    API-server loggers.py line cannot see these timings. Idle windows log nothing.
+    """
+
+    def __init__(self) -> None:
+        self._interval = vllm_envs.VLLM_LOG_STATS_INTERVAL
+        self._thread: threading.Thread | None = None
+        self._window_start = time.monotonic()
+        self.reset()
+
+    def reset(self) -> None:
+        self._steps = 0
+        self._tokens = 0
+        self._max_step = 0.0
+        self._sum = {"prep": 0.0, "infer": 0.0, "other": 0.0, "sample": 0.0}
+        self._cur = 0.0
+
+    def add(self, **seconds: float) -> None:
+        for key, value in seconds.items():
+            self._sum[key] += value
+            self._cur += value
+
+    def end_step(self, num_tokens: int) -> None:
+        self._steps += 1
+        self._tokens += num_tokens
+        self._max_step = max(self._max_step, self._cur)
+        self._cur = 0.0
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._run, name="ov-step-stats", daemon=True)
+            self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            time.sleep(self._interval)
+            self._flush()
+
+    def _flush(self) -> None:
+        steps, tokens, max_step, sums = (
+            self._steps, self._tokens, self._max_step, self._sum)
+        now = time.monotonic()
+        elapsed, self._window_start = now - self._window_start, now
+        self.reset()
+        if not steps:
+            return
+        avg = {k: v / steps * 1000 for k, v in sums.items()}
+        logger.info(
+            "[OV-RUNNER] %.1fs: %d steps, %.1f scheduled tokens/s, step avg "
+            "%.1f ms (prep %.1f, infer %.1f, other forward %.1f, sample %.1f), "
+            "max %.1f ms",
+            elapsed, steps, tokens / elapsed, sum(avg.values()), avg["prep"],
+            avg["infer"], avg["other"], avg["sample"], max_step * 1000)
 
 
 def detect_cgroup_cpu_quota() -> int | None:

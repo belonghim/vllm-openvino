@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -21,6 +22,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm_openvino.model_executor.model_loader.openvino import get_model
+from vllm_openvino.utils import StepStatsLogger
 
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -138,6 +140,7 @@ class OpenVINOModelRunnerV1:
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
         self._new_req_ids: set[str] = set()
+        self._step_stats = StepStatsLogger()
 
         # Hybrid-PA prefix caching (set by configure_la_prefix_cache): a
         # scheduler block spans _kv_blocks_per_block OpenVINO KV blocks and
@@ -761,6 +764,7 @@ class OpenVINOModelRunnerV1:
         scheduler_output: SchedulerOutput,
         req_ids: list[str] | None = None,
     ) -> torch.Tensor:
+        prep_start = time.perf_counter()
         (
             input_tokens,
             input_positions,
@@ -768,6 +772,7 @@ class OpenVINOModelRunnerV1:
             sampling_metadata,
             multi_modal_kwargs,
         ) = self._prepare_inputs(scheduler_output, req_ids)
+        forward_start = time.perf_counter()
 
         actual_num_requests = (len(req_ids) if req_ids is not None
                                else len(self.input_batch.req_id_to_index))
@@ -785,7 +790,12 @@ class OpenVINOModelRunnerV1:
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             hidden_states = model_executable(**execute_model_kwargs)
 
-        return self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states, None)
+        infer_s = self.model.last_infer_s
+        self._step_stats.add(
+            prep=forward_start - prep_start, infer=infer_s,
+            other=time.perf_counter() - forward_start - infer_s)
+        return logits
 
     def _sample_with_drafts(
         self,
@@ -873,6 +883,7 @@ class OpenVINOModelRunnerV1:
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
+        sample_start = time.perf_counter()
         scheduler_output, logits = self._execute_state
         self._execute_state = None
 
@@ -932,6 +943,9 @@ class OpenVINOModelRunnerV1:
 
         if self.drafter is not None:
             self._propose_draft_token_ids(scheduler_output, sampled_tokens)
+
+        self._step_stats.add(sample=time.perf_counter() - sample_start)
+        self._step_stats.end_step(scheduler_output.total_num_scheduled_tokens)
 
         # Snapshot (not a live reference): with async scheduling, a later
         # step can mutate self.input_batch before the scheduler consumes
