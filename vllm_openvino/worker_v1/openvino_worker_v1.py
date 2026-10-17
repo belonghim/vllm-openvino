@@ -872,12 +872,12 @@ class OpenVINOWorkerV1(WorkerBase):
                 get_process_rss_bytes, get_cgroup_memory_usage_bytes,
                 detect_memory_limit, format_memory_size)
             from vllm_openvino.platform import (  # noqa: PLC0415
-                KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES)
+                KV_CACHE_WARMUP_HEADROOM_BYTES, KV_CACHE_MIN_BYTES)
             cgroup_used = get_cgroup_memory_usage_bytes()
             effective_used = cgroup_used if cgroup_used > 0 else get_process_rss_bytes()
             effective_limit = detect_memory_limit()
             if effective_used > 0 and effective_limit is not None:
-                available = effective_limit - effective_used - KV_CACHE_MEMORY_MARGIN_BYTES
+                available = effective_limit - effective_used - KV_CACHE_WARMUP_HEADROOM_BYTES
                 kvcache_now = self.cache_config.openvino_kvcache_space_bytes
                 if kvcache_now > available:
                     fitted = max(KV_CACHE_MIN_BYTES, available)

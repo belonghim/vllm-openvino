@@ -206,6 +206,7 @@ CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
 GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
 DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limited RAM
 KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES * 6 // 5
+KV_CACHE_WARMUP_HEADROOM_BYTES = GIB_BYTES * 3 // 4
 KV_CACHE_MIN_BYTES = GIB_BYTES // 4  # below this a pool cannot serve usefully
 CONTAINER_RUNTIME_BASELINE_BYTES = 3 * GIB_BYTES // 2  # python/torch/vLLM resident before the pool
 
