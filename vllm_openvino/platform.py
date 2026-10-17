@@ -12,8 +12,10 @@ from vllm.platforms.interface import Platform, PlatformEnum
 import vllm_openvino.envs as envs
 from vllm_openvino.utils import (canonical_vllm_cache_dtype,
                                  cpu_thread_limit,
+                                 detect_cgroup_memory_limit,
                                  detect_memory_limit,
                                  format_memory_size,
+                                 get_mem_available_bytes,
                                  model_weights_bytes)
 
 if TYPE_CHECKING:
@@ -58,27 +60,32 @@ def _has_vision_ir(model_path: str) -> bool:
     return any(model_dir.glob("openvino_vision_embeddings*.xml"))
 
 
+def apiserver_overhead_bytes(model_path: str) -> int:
+    if _has_vision_ir(model_path):
+        return VISION_APISERVER_OVERHEAD_BYTES
+    return APISERVER_OVERHEAD_BYTES
+
+
 def _fit_kv_cache_to_memory_limit(kv_bytes: int, model_path: str) -> int:
     limit = detect_memory_limit()
     if limit is None:
         return kv_bytes
     weights = model_weights_bytes(model_path)
-    mm_overhead = (MULTIMODAL_API_SERVER_OVERHEAD_BYTES
-                   if _has_vision_ir(model_path) else 0)
-    runtime_overhead = CONTAINER_RUNTIME_BASELINE_BYTES + mm_overhead
+    api_overhead = apiserver_overhead_bytes(model_path)
+    runtime_overhead = CONTAINER_RUNTIME_BASELINE_BYTES + api_overhead
     budget = (limit - weights - runtime_overhead
               - KV_CACHE_MEMORY_MARGIN_BYTES)
     if kv_bytes > budget:
         fitted = max(KV_CACHE_MIN_BYTES, budget)
         logger.warning(
             "[OV-PLATFORM] KV cache space %s does not fit the memory "
-            "limit %s after reserving %s runtime baseline, %s APIServer MM "
+            "limit %s after reserving %s runtime baseline, %s APIServer "
             "overhead, %s model weights and %s headroom; sizing the pool to "
             "%s to avoid an OOM kill. Raise the container memory limit or "
             "lower VLLM_OPENVINO_KVCACHE_SPACE to keep a larger pool.",
             format_memory_size(kv_bytes), format_memory_size(limit),
             format_memory_size(CONTAINER_RUNTIME_BASELINE_BYTES),
-            format_memory_size(mm_overhead),
+            format_memory_size(api_overhead),
             format_memory_size(weights),
             format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES),
             format_memory_size(fitted))
@@ -86,15 +93,26 @@ def _fit_kv_cache_to_memory_limit(kv_bytes: int, model_path: str) -> int:
     if kv_bytes * 10 > budget * 9:
         logger.warning(
             "[OV-PLATFORM] KV cache space %s leaves under 10%% headroom under "
-            "the memory limit %s (runtime baseline %s, APIServer MM overhead "
+            "the memory limit %s (runtime baseline %s, APIServer overhead "
             "%s, model weights %s, headroom %s); an OOM is possible once the "
             "pool is fully touched.",
             format_memory_size(kv_bytes), format_memory_size(limit),
             format_memory_size(CONTAINER_RUNTIME_BASELINE_BYTES),
-            format_memory_size(mm_overhead),
+            format_memory_size(api_overhead),
             format_memory_size(weights),
             format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES))
     return kv_bytes
+
+
+def auto_kv_cache_bytes(resident_bytes: int, model_path: str) -> int:
+    limit = detect_cgroup_memory_limit()
+    if limit is None:
+        # MemAvailable already excludes this process's anonymous memory, so the
+        # resident part is added back before it is subtracted again.
+        limit = resident_bytes + get_mem_available_bytes()
+    budget = (limit - resident_bytes - apiserver_overhead_bytes(model_path)
+              - KV_CACHE_MEMORY_MARGIN_BYTES)
+    return max(KV_CACHE_MIN_BYTES, budget)
 
 
 def _find_model_ir_path(model_path: str) -> "Path | None":
@@ -215,14 +233,13 @@ _register_cpu_sampler_ops()
 GIB_BYTES = 1024 ** 3
 CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
 GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
-DEFAULT_CPU_KV_CACHE_GB = 4  # Conservative default for AVX2 systems with limited RAM
-KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES * 6 // 5
+# Covers prefill and allocator transients that peak ~1 GiB above the steady state.
+KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES * 11 // 5
 KV_CACHE_MIN_BYTES = GIB_BYTES // 4  # below this a pool cannot serve usefully
 CONTAINER_RUNTIME_BASELINE_BYTES = 3 * GIB_BYTES // 2  # python/torch/vLLM resident before the pool
-# Empirical: APIServer vision encoder resident footprint. Calibrated against
-# Qwen3.5-0.8B-int4-ov (~0.92 GB observed); re-measure from the post-load
-# warmup log for other MM models.
-MULTIMODAL_API_SERVER_OVERHEAD_BYTES = GIB_BYTES
+# Measured APIServer anon RSS under load: ~0.85 GiB text, 2.1-2.7 GiB vision.
+APISERVER_OVERHEAD_BYTES = GIB_BYTES
+VISION_APISERVER_OVERHEAD_BYTES = GIB_BYTES * 11 // 4
 
 
 class OpenVinoPlatform(Platform):
@@ -458,12 +475,16 @@ class OpenVinoPlatform(Platform):
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
         if kv_cache_space >= 0:
             if kv_cache_space == 0 and OpenVinoPlatform.is_openvino_cpu():
-                cache_config.openvino_kvcache_space_bytes = (
-                    DEFAULT_CPU_KV_CACHE_GB * GIB_BYTES)  # type: ignore
-                logger.warning(
-                    "[OV-PLATFORM] Environment variable VLLM_OPENVINO_KVCACHE_SPACE "
-                    "(GB) for OpenVINO backend is not set, using %d by default.",
-                    DEFAULT_CPU_KV_CACHE_GB)
+                cache_config.openvino_kvcache_space_bytes = auto_kv_cache_bytes(  # type: ignore
+                    model_weights_bytes(model_config.model)
+                    + CONTAINER_RUNTIME_BASELINE_BYTES,
+                    model_config.model)
+                logger.info(
+                    "[OV-PLATFORM] VLLM_OPENVINO_KVCACHE_SPACE is not set; the "
+                    "KV pool is sized from the memory limit after model load "
+                    "(startup estimate %s).",
+                    format_memory_size(
+                        cache_config.openvino_kvcache_space_bytes))
             elif kv_cache_space == 0:
                 cache_config.openvino_kvcache_space_bytes = 0  # type: ignore
                 logger.info(
@@ -471,17 +492,15 @@ class OpenVinoPlatform(Platform):
                     "device. KV cache size will be determined automatically via "
                     "profiling run.")
             else:
-                cache_config.openvino_kvcache_space_bytes = int(
-                    kv_cache_space * GIB_BYTES)  # type: ignore
+                kv_cache_bytes = int(kv_cache_space * GIB_BYTES)
+                if OpenVinoPlatform.is_openvino_cpu():
+                    kv_cache_bytes = _fit_kv_cache_to_memory_limit(
+                        kv_cache_bytes, model_config.model)
+                cache_config.openvino_kvcache_space_bytes = kv_cache_bytes  # type: ignore
         else:
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE "
                 f"{kv_cache_space}, expect a non-negative number of GiB.")
-
-        if (cache_config.openvino_kvcache_space_bytes
-                and OpenVinoPlatform.is_openvino_cpu()):
-            cache_config.openvino_kvcache_space_bytes = _fit_kv_cache_to_memory_limit(
-                cache_config.openvino_kvcache_space_bytes, model_config.model)
 
         # Disable torch compilation — OpenVINO compiles its own models
         from vllm.config import CompilationMode

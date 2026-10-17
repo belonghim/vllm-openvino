@@ -193,6 +193,18 @@ def get_cgroup_memory_usage_bytes() -> int:
     return 0
 
 
+def get_mem_available_bytes() -> int:
+    """MemAvailable from /proc/meminfo, 0 if unreadable."""
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024  # kB → bytes
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def detect_memory_limit() -> int | None:
     """Effective memory ceiling for this process.
 
@@ -206,19 +218,10 @@ def detect_memory_limit() -> int | None:
     limit = detect_cgroup_memory_limit()
     if limit is not None:
         return limit
-    try:
-        mem_available_kb = 0
-        with open('/proc/meminfo') as f:
-            for line in f:
-                if line.startswith('MemAvailable:'):
-                    mem_available_kb = int(line.split()[1])
-                    break
-        if mem_available_kb > 0:
-            rss = get_process_rss_bytes()
-            if rss > 0:
-                return rss + mem_available_kb * 1024
-    except (OSError, ValueError):
-        pass
+    mem_available = get_mem_available_bytes()
+    rss = get_process_rss_bytes()
+    if mem_available > 0 and rss > 0:
+        return rss + mem_available
     return None
 
 

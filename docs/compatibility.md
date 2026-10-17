@@ -172,7 +172,8 @@ text because of prefill vs decode numerics.
   an explicit value takes precedence. The same quota caps the Torch/OMP
   thread pools at engine config time unless `OMP_NUM_THREADS` is set
   externally.
-- `VLLM_OPENVINO_KVCACHE_SPACE=0` selects the backend default (4 GiB on CPU).
+- `VLLM_OPENVINO_KVCACHE_SPACE=0` sizes the CPU pool automatically from the
+  memory ceiling (see the sizing rules below); GPU profiles the device.
 - KV cache allocation must not add zero-fill to `_allocate_kv_cache()`;
   OpenVINO initializes the cache and extra zero-fill can cause OOM.
 - The KV cache is one fixed-size mapping whose pages become resident only as
@@ -181,18 +182,20 @@ text because of prefill vs decode numerics.
   10 rounds while its size stayed fixed; cgroup total 1.6 -> 2.5 GB).
   Size containers for `baseline + VLLM_OPENVINO_KVCACHE_SPACE`, not for the
   pool alone.
-- On CPU, `openvino_kvcache_space_bytes` is fitted to the container's cgroup
-  memory limit in two stages when one is set. Before model load:
-  budget = limit - model weights (`openvino_*.bin`) - 1.5 GiB runtime baseline
-  - 1 GiB APIServer multimodal overhead (multimodal checkpoints only) - 1.2 GiB
-  headroom. After model load: the PA warmup runs first, then the budget is
-  recomputed from the EngineCore's anonymous RSS against the same limit, minus
-  the multimodal overhead and the 1.2 GiB headroom. Anonymous RSS is the right
-  baseline because the kernel reclaims the memory-mapped weights under pressure
-  (26B: VmRSS 30.6 GB of which 16.9 GB is anonymous). A pool larger than the
-  budget is reduced to it (never below 256 MiB) with a warning; a pool above 90%
-  of the pre-load budget logs a headroom warning. Skipped when no cgroup memory
-  limit is set.
+- On CPU the pool is sized from a memory ceiling: the cgroup memory limit when
+  one is set, otherwise host MemAvailable. Before model load (estimate):
+  ceiling - model weights (`openvino_*.bin`) - 1.5 GiB runtime baseline -
+  APIServer overhead - 2.2 GiB headroom. After model load: the PA warmup runs
+  first, then the pool is set to ceiling - EngineCore anonymous RSS -
+  APIServer overhead - 2.2 GiB headroom (never below 256 MiB). The APIServer
+  overhead is 1 GiB for text models and 2.75 GiB for checkpoints with a vision
+  encoder (measured APIServer anon RSS 2.1-2.7 GiB). Anonymous RSS is the right baseline because the kernel
+  reclaims the memory-mapped weights under pressure (26B: VmRSS 30.6 GB of which
+  16.9 GB is anonymous).
+- With `VLLM_OPENVINO_KVCACHE_SPACE=0` (default) the post-load budget sets the
+  pool in both directions. With an explicit value it only reduces the pool to
+  that budget, with a warning; a pool above 90% of the pre-load budget logs a
+  headroom warning.
 - vLLM's prefix caching (default on) retains freed blocks, so workloads with
   unique prompts keep touching new pool pages over time;
   `--no-enable-prefix-caching` keeps the resident set at the working set

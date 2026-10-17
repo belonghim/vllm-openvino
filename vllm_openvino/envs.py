@@ -62,7 +62,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
-    # in GiB (fractions allowed), default is 0 (auto: 4 GB on CPU)
+    # in GiB (fractions allowed), default is 0 (auto: sized from the memory limit on CPU)
     "VLLM_OPENVINO_KVCACHE_SPACE":
     lambda: _env_float("VLLM_OPENVINO_KVCACHE_SPACE", "0"),
 

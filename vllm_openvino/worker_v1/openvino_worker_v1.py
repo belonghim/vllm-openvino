@@ -865,7 +865,7 @@ class OpenVINOWorkerV1(WorkerBase):
         # estimate model RAM, which understates compiled-model overhead (IR
         # graph parsing, PA/Gather-before-matmul transformation ops, OV
         # compilation artifacts). Now that the model is compiled and in memory
-        # we can measure actual RSS and tighten the KV cache budget if needed.
+        # we can measure actual RSS and size the KV cache budget from it.
         # Two ordering facts matter for the measurement: the warmup runs first
         # because the CPU plugin repacks weights into anonymous memory on the
         # first infer, and only the anonymous part is compared against the
@@ -878,30 +878,38 @@ class OpenVINOWorkerV1(WorkerBase):
                 detect_memory_limit, format_memory_size)
             from vllm_openvino.platform import (  # noqa: PLC0415
                 KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES,
-                MULTIMODAL_API_SERVER_OVERHEAD_BYTES, _has_vision_ir)
+                apiserver_overhead_bytes, auto_kv_cache_bytes)
             self._warm_up_before_sizing()
             rss = get_process_anon_rss_bytes() or get_process_rss_bytes()
             effective_limit = detect_memory_limit()
-            if rss > 0 and effective_limit is not None:
-                mm_overhead = (MULTIMODAL_API_SERVER_OVERHEAD_BYTES
-                               if _has_vision_ir(self.model_config.model) else 0)
+            if rss > 0:
                 logger.info(
                     "[OV-WORKER] Post-load anon RSS %s, VmRSS %s",
                     format_memory_size(rss),
                     format_memory_size(get_process_rss_bytes()))
-                available = (effective_limit - rss - mm_overhead
+            if rss > 0 and envs.VLLM_OPENVINO_KVCACHE_SPACE == 0:
+                kvcache_before = self.cache_config.openvino_kvcache_space_bytes
+                kvcache_after = auto_kv_cache_bytes(rss, self.model_config.model)
+                self.cache_config.openvino_kvcache_space_bytes = kvcache_after
+                logger.info(
+                    "[OV-WORKER] Auto-sized KV pool %s -> %s",
+                    format_memory_size(kvcache_before),
+                    format_memory_size(kvcache_after))
+            elif rss > 0 and effective_limit is not None:
+                api_overhead = apiserver_overhead_bytes(self.model_config.model)
+                available = (effective_limit - rss - api_overhead
                              - KV_CACHE_MEMORY_MARGIN_BYTES)
                 kvcache_now = self.cache_config.openvino_kvcache_space_bytes
                 if kvcache_now > available:
                     fitted = max(KV_CACHE_MIN_BYTES, available)
                     logger.warning(
-                        "[OV-WORKER] Post-load anon RSS %s + %s APIServer MM "
+                        "[OV-WORKER] Post-load anon RSS %s + %s APIServer "
                         "overhead (limit %s) "
                         "leaves only %s for KV cache (initially %s); reducing "
                         "pool to avoid OOM. Increase container memory limit or "
                         "set VLLM_OPENVINO_KVCACHE_SPACE.",
                         format_memory_size(rss),
-                        format_memory_size(mm_overhead),
+                        format_memory_size(api_overhead),
                         format_memory_size(effective_limit),
                         format_memory_size(max(0, available)),
                         format_memory_size(kvcache_now))
@@ -951,29 +959,27 @@ class OpenVINOWorkerV1(WorkerBase):
                             time.perf_counter() - warmup_start)
             if current_platform.is_openvino_cpu():
                 from vllm_openvino.utils import (  # noqa: PLC0415
-                    get_process_rss_bytes, get_cgroup_memory_usage_bytes,
+                    get_process_anon_rss_bytes, get_cgroup_memory_usage_bytes,
                     format_memory_size)
                 from vllm_openvino.platform import (  # noqa: PLC0415
-                    MULTIMODAL_API_SERVER_OVERHEAD_BYTES, _has_vision_ir)
-                rss_after = get_process_rss_bytes()
+                    apiserver_overhead_bytes)
+                rss_after = get_process_anon_rss_bytes()
                 cgroup_after = get_cgroup_memory_usage_bytes()
                 if rss_after > 0:
                     logger.info(
-                        "[OV-WARMUP] RSS after warmup: %s (EngineCore), "
-                        "%s (container total)",
+                        "[OV-WARMUP] Anon RSS after warmup: %s (EngineCore), "
+                        "%s (container anon)",
                         format_memory_size(rss_after),
                         format_memory_size(cgroup_after)
                         if cgroup_after > 0 else "unknown")
-                if (rss_after > 0 and cgroup_after > rss_after
-                        and _has_vision_ir(self.model_config.model)):
+                if rss_after > 0 and cgroup_after > rss_after:
                     observed = cgroup_after - rss_after
-                    budgeted = MULTIMODAL_API_SERVER_OVERHEAD_BYTES
                     logger.info(
-                        "[OV-WARMUP] APIServer MM footprint: observed %s, "
-                        "budgeted %s. Tune MULTIMODAL_API_SERVER_OVERHEAD_BYTES "
-                        "in platform.py if the delta is large.",
+                        "[OV-WARMUP] APIServer footprint: observed %s, "
+                        "budgeted %s.",
                         format_memory_size(observed),
-                        format_memory_size(budgeted))
+                        format_memory_size(
+                            apiserver_overhead_bytes(self.model_config.model)))
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def _warm_up_before_sizing(self) -> None:
