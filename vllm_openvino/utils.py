@@ -148,6 +148,23 @@ def get_process_rss_bytes() -> int:
     return 0
 
 
+def get_process_anon_rss_bytes() -> int:
+    """Read the anonymous (non-reclaimable) part of this process's RSS.
+
+    VmRSS also counts the memory-mapped model weights, which the kernel
+    reclaims under pressure and re-faults from disk; sizing a buffer against
+    VmRSS would treat those pages as committed. RssAnon excludes them.
+    """
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('RssAnon:'):
+                    return int(line.split()[1]) * 1024  # kB → bytes
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def get_cgroup_memory_usage_bytes() -> int:
     """Returns anonymous (non-reclaimable) memory used by this cgroup.
 

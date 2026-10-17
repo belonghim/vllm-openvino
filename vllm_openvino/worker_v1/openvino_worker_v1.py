@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import math
 import re
 import time
@@ -134,6 +135,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self._preloaded_ov_model = None
         self._la_state_bytes = 0
         self._kv_blocks_per_block = 1
+        self._warmed_up = False
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
         # hybrid-model state tensors even before load_model() is called.
@@ -864,24 +866,42 @@ class OpenVINOWorkerV1(WorkerBase):
         # graph parsing, PA/Gather-before-matmul transformation ops, OV
         # compilation artifacts). Now that the model is compiled and in memory
         # we can measure actual RSS and tighten the KV cache budget if needed.
+        # Two ordering facts matter for the measurement: the warmup runs first
+        # because the CPU plugin repacks weights into anonymous memory on the
+        # first infer, and only the anonymous part is compared against the
+        # limit because the kernel reclaims the memory-mapped weights under
+        # pressure (on the 26B VmRSS reads 30.6 GB of which 16.9 GB is
+        # anonymous).
         if current_platform.is_openvino_cpu():
             from vllm_openvino.utils import (  # noqa: PLC0415
-                get_process_rss_bytes, detect_memory_limit, format_memory_size)
+                get_process_rss_bytes, get_process_anon_rss_bytes,
+                detect_memory_limit, format_memory_size)
             from vllm_openvino.platform import (  # noqa: PLC0415
-                KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES)
-            rss = get_process_rss_bytes()
+                KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES,
+                MULTIMODAL_API_SERVER_OVERHEAD_BYTES, _has_vision_ir)
+            self._warm_up_before_sizing()
+            rss = get_process_anon_rss_bytes() or get_process_rss_bytes()
             effective_limit = detect_memory_limit()
             if rss > 0 and effective_limit is not None:
-                available = effective_limit - rss - KV_CACHE_MEMORY_MARGIN_BYTES
+                mm_overhead = (MULTIMODAL_API_SERVER_OVERHEAD_BYTES
+                               if _has_vision_ir(self.model_config.model) else 0)
+                logger.info(
+                    "[OV-WORKER] Post-load anon RSS %s, VmRSS %s",
+                    format_memory_size(rss),
+                    format_memory_size(get_process_rss_bytes()))
+                available = (effective_limit - rss - mm_overhead
+                             - KV_CACHE_MEMORY_MARGIN_BYTES)
                 kvcache_now = self.cache_config.openvino_kvcache_space_bytes
                 if kvcache_now > available:
                     fitted = max(KV_CACHE_MIN_BYTES, available)
                     logger.warning(
-                        "[OV-WORKER] Post-load RSS %s (limit %s) "
+                        "[OV-WORKER] Post-load anon RSS %s + %s APIServer MM "
+                        "overhead (limit %s) "
                         "leaves only %s for KV cache (initially %s); reducing "
                         "pool to avoid OOM. Increase container memory limit or "
                         "set VLLM_OPENVINO_KVCACHE_SPACE.",
                         format_memory_size(rss),
+                        format_memory_size(mm_overhead),
                         format_memory_size(effective_limit),
                         format_memory_size(max(0, available)),
                         format_memory_size(kvcache_now))
@@ -923,11 +943,12 @@ class OpenVINOWorkerV1(WorkerBase):
         # OpenVINO compiles in load_model(); callers ignore the return value.
         model = self.model_runner.get_model()
         if getattr(model, '_has_kv_cache_inputs', False):
-            warmup_start = time.perf_counter()
-            self._warm_up_paged_attention()
-            self.model_runner._step_stats.reset()
-            logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
-                        time.perf_counter() - warmup_start)
+            if not self._warmed_up:
+                warmup_start = time.perf_counter()
+                self._warm_up_paged_attention()
+                self.model_runner._step_stats.reset()
+                logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
+                            time.perf_counter() - warmup_start)
             if current_platform.is_openvino_cpu():
                 from vllm_openvino.utils import (  # noqa: PLC0415
                     get_process_rss_bytes, get_cgroup_memory_usage_bytes,
@@ -954,6 +975,62 @@ class OpenVINOWorkerV1(WorkerBase):
                         format_memory_size(observed),
                         format_memory_size(budgeted))
         return CompilationTimes(language_model=0.0, encoder=0.0)
+
+    def _warm_up_before_sizing(self) -> None:
+        """Run the PA warmup against a throwaway 1-block cache.
+
+        Called before the post-load memory measurement so the measured baseline
+        includes the CPU plugin's first-infer weight repack. Sets ``_warmed_up``
+        so ``compile_or_warm_up_model`` does not repeat the warmup; on devices
+        where this never runs (GPU), that is where the warmup happens.
+        """
+        model = self.model_runner.get_model()
+        if not getattr(model, '_has_kv_cache_inputs', False):
+            return
+        tmp_cache_config = copy.copy(self.cache_config)
+        tmp_cache_config.num_gpu_blocks = 1
+        num_state = 1 if self._la_state_bytes else num_state_slots(self.vllm_config)
+        engine = OpenVINOCacheEngine(
+            tmp_cache_config,
+            self.key_cache_config,
+            self.value_cache_config,
+            self.model_config,
+            self.parallel_config,
+            self.device_config,
+            self.ov_core,
+            envs.VLLM_OPENVINO_DEVICE,
+            self.ssm_cache_config,
+            self.conv_cache_config,
+            self.ssm_cache_dtypes,
+            self.conv_cache_dtypes,
+            num_state,
+            kv_blocks_per_block=self._kv_blocks_per_block,
+            zero_state=not self._la_state_bytes,
+        )
+        runner = self.model_runner
+        prev_kv, prev_ssm, prev_conv = (
+            runner.kv_caches, runner.ssm_caches, runner.conv_caches)
+        prev_block_size = runner.block_size
+        prev_free_slots = runner._conv_slot_free
+        runner.kv_caches = engine.kv_cache
+        runner.ssm_caches = engine.ssm_cache
+        runner.conv_caches = engine.conv_cache
+        runner.block_size = engine.block_size
+        if not self._la_state_bytes:
+            runner._conv_slot_free = [0]
+        try:
+            warmup_start = time.perf_counter()
+            self._warm_up_paged_attention()
+            runner._step_stats.reset()
+            logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
+                        time.perf_counter() - warmup_start)
+        finally:
+            runner.kv_caches, runner.ssm_caches, runner.conv_caches = (
+                prev_kv, prev_ssm, prev_conv)
+            runner.block_size = prev_block_size
+            runner._conv_slot_free = prev_free_slots
+            self._warmed_up = True
+            del engine  # release the throwaway cache before the measurement
 
     def _warm_up_paged_attention(self) -> None:
         """Run one prefill and one decode step on the reserved null block so the
