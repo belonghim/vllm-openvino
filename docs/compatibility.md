@@ -218,7 +218,7 @@ text because of prefill vs decode numerics.
   `--limit-mm-per-prompt '{"image":0,"video":0}'` skips the multimodal warmup
   (startup 64 s to 50 s on Qwen3.5-0.8B-int4), does not compile the vision
   encoder, and budgets the text APIServer overhead. gemma-4-E2B at 16 GiB:
-  post-load anon RSS 3.84 -> 2.71 GB, pool 7.21 -> about 9.6 GB; image requests
+  post-load anon RSS 3.84 -> 2.71 GB, pool 7.21 -> 9.59 GB (1.23 GB APIServer observed, 1.5 GiB budgeted); image requests
   get HTTP 400 from vLLM.
 - PA models run one prefill and one decode step on the reserved null block 0 at
   startup to absorb the CPU kernel JIT cost; the first request dropped from
