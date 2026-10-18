@@ -372,9 +372,12 @@ class OpenVINOWorkerV1(WorkerBase):
             self.cache_config.block_size, multiplier)
         logger.info(
             "[OV-WORKER] Hybrid-PA prefix caching: checkpoint every %d tokens "
-            "(%d KV blocks of %d), checkpoint=%d bytes, KV block=%d bytes",
+            "(%d KV blocks of %d), checkpoint=%d bytes, KV block=%d bytes, "
+            "state dtypes=%s",
             self.cache_config.block_size, multiplier, ov_block_size,
-            self._la_state_bytes, kv_block_bytes)
+            self._la_state_bytes, kv_block_bytes,
+            sorted(set(self.ssm_cache_dtypes) | set(self.conv_cache_dtypes)),
+        )
 
     def _kv_cache_dtype(self) -> str:
         return _resolve_cache_dtype(
@@ -943,7 +946,58 @@ class OpenVINOWorkerV1(WorkerBase):
             num_device_blocks, num_swap_blocks,
         )
         self.num_swap_blocks = num_swap_blocks
+        self._warn_if_pool_cannot_serve_one_request(num_device_blocks,
+                                                    cache_block_size)
         return num_device_blocks * cache_block_size
+
+    def _warn_if_pool_cannot_serve_one_request(
+            self, num_device_blocks: int, cache_block_size: int) -> None:
+        """Explain an undersized pool before vLLM rejects the engine.
+
+        vLLM raises its own ValueError when the pool cannot hold one
+        ``max_model_len`` request, but its message suggests raising
+        ``gpu_memory_utilization``, which the OpenVINO backend ignores. Log the
+        levers that actually change this pool's size instead.
+        """
+        if self._is_model_stateful():
+            return
+        blocks_per_request = math.ceil(
+            self.model_config.max_model_len / self.cache_config.block_size)
+        if num_device_blocks >= blocks_per_request:
+            return
+        from vllm_openvino.utils import format_memory_size  # noqa: PLC0415
+        from vllm_openvino.platform import (  # noqa: PLC0415
+            APISERVER_OVERHEAD_BYTES, KV_CACHE_MEMORY_MARGIN_BYTES,
+            apiserver_overhead_bytes)
+        api_overhead = apiserver_overhead_bytes(self.model_config)
+        remedies = []
+        if self._la_state_bytes and self._kv_blocks_per_block > 1:
+            remedies.append(
+                "set VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER=0 to coarsen "
+                "the conv/SSM checkpoints (currently one %s checkpoint every "
+                "%d tokens)"
+                % (format_memory_size(self._la_state_bytes),
+                   self.cache_config.block_size))
+        if api_overhead > APISERVER_OVERHEAD_BYTES:
+            remedies.append(
+                "serve text only with --language-model-only or "
+                "--limit-mm-per-prompt '{\"image\":0,\"video\":0}' to drop the "
+                "vision APIServer budget (image requests then fail with HTTP 400)")
+        remedies.append(
+            "lower --max-model-len, raise the container memory limit, or set "
+            "VLLM_OPENVINO_KVCACHE_SPACE explicitly")
+        logger.warning(
+            "[OV-WORKER] KV pool holds %d blocks of %s (%s) but one request at "
+            "--max-model-len %d needs %d blocks (%s); vLLM will refuse to "
+            "start. The memory limit leaves nothing above the runtime "
+            "baseline, the %s APIServer budget and the %s headroom. Try: %s.",
+            num_device_blocks, format_memory_size(cache_block_size),
+            format_memory_size(num_device_blocks * cache_block_size),
+            self.model_config.max_model_len, blocks_per_request,
+            format_memory_size(blocks_per_request * cache_block_size),
+            format_memory_size(api_overhead),
+            format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES),
+            "; ".join(remedies))
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate OpenVINO KV cache with the specified kv_cache_config."""

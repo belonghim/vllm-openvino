@@ -138,6 +138,14 @@ storage depends on prefix caching:
   and 90k for Qwen3.5 (280k with the automatic 1504-token interval). With
   multiplier 1 (32 tokens, the plain PA block) LFM2.5 holds 466k tokens and
   hits like a pure-attention model; Qwen3.5 would hold about 13k.
+- Checkpoint bytes follow the CPU plugin's state precision: bf16 on CPUs with
+  AVX-512-BF16, f32 otherwise (or an explicit
+  `VLLM_OPENVINO_INFERENCE_PRECISION`). The same IR and flags therefore give a
+  10.3 MB (bf16) or 20.6 MB (f32) checkpoint on Qwen3.5-0.8B and a block page
+  of 12.1 or 22.4 MB. A memory limit that fits the bf16 pool can leave the f32
+  pool at the 256 MiB floor, which holds 11 blocks where one
+  `--max-model-len 4096` request needs 16; the worker logs the applicable
+  remedies before vLLM's own ValueError.
 - vLLM caches a block when it allocates it, so a request can hit a block that
   another request fills in the same step. The runner then splits the batch
   into waves (writer first) so the checkpoint read follows its write. Without
