@@ -85,8 +85,12 @@ input, 14.3 GB weights) gave the same text answer as the stateful path and the
 same extraction of a text-heavy image; concurrency 1 9.8 -> 10.2 tok/s,
 concurrency 8 9.8 -> 30.9 tok/s (3.2x). Both paths now start in a 32 GiB
 container (post-warmup anonymous RSS 16.9 GB PA / 17.4 GB stateful; see the
-memory-fitting bullet below), and the PA path also served text and images at a
-24 GiB limit (three concurrent image requests, HTTP 200).
+memory-fitting bullet below). With the automatic pool the PA path is
+OOM-killed once the pool is fully resident: at 24 GiB under three concurrent
+image requests or four concurrent ~3k-token prompts, at 32 GiB after four
+concurrent ~3k-token prompts cycled about 140k tokens through an 85k-token
+pool. The post-warmup measurement does not count the buffers that grow under
+real prefill load.
 When concurrent requests split long prompts at different chunk boundaries,
 greedy output can change at near-tie tokens (seen on E2B with and without
 prefix caching, both answers correct).
