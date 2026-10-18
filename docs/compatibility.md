@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- vLLM `0.32.0rc0`
+- vLLM `0.32.0`
 - OpenVINO `>= 2026.4.1`
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
@@ -14,7 +14,7 @@ the OpenVINO execution path.
 
 ## Upstream vLLM Compatibility
 
-The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.32.0rc0
+The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.32.0
 selects MRV2 only when `HAS_TRITON` is true. With the PyPI `vllm` wheel it is
 false on CPU hosts even if Triton is installed, because vLLM requires exactly
 one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
@@ -22,7 +22,7 @@ one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
 ([#58140](https://github.com/vllm-project/vllm/pull/58140)) and would select
 MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set `VLLM_USE_V2_MODEL_RUNNER=0` in
 those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
-removal for 0.32; 0.32.0rc0 still ships it.
+removal for 0.32; 0.32.0 still ships it.
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
 not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
@@ -276,7 +276,7 @@ embeddings go to the `is_embed` runs only. The LM takes `[3, n]` canvas M-RoPE
 positions computed by vLLM's `MiniCPMV4_7ForConditionalGeneration`
 (`get_mrope_input_positions`); decode positions are `index + rope_delta`.
 
-Requires vLLM >= 0.32.0rc0 (contains vllm-project/vllm #58674 and #56372) and
+Requires vLLM >= 0.32.0 (contains vllm-project/vllm #58674 and #56372) and
 Transformers >= 5.18.0; vLLM 0.31.0 and Transformers 5.17.0 lack them. Verified
 on the 0.32.0rc0 image: single and multi-slice images, concurrent requests and
 chunked prefill describe the image correctly.
