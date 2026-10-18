@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils.torch_utils import set_random_seed
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
@@ -953,7 +954,7 @@ class OpenVINOWorkerV1(WorkerBase):
         if getattr(model, '_has_kv_cache_inputs', False):
             if not self._warmed_up:
                 warmup_start = time.perf_counter()
-                self._warm_up_paged_attention()
+                self._warm_up_paged_attention([0] * 17, [])
                 self.model_runner._step_stats.reset()
                 logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
                             time.perf_counter() - warmup_start)
@@ -993,9 +994,25 @@ class OpenVINOWorkerV1(WorkerBase):
         model = self.model_runner.get_model()
         if not getattr(model, '_has_kv_cache_inputs', False):
             return
+        prompt_len = min(self.scheduler_config.max_num_batched_tokens,
+                         self.model_config.max_model_len - 2)
+        warmup_prompts = [([0] * (prompt_len + 1), [])]
+        if (self.model_config.is_multimodal_model
+                and self.model_config.get_multimodal_config()
+                .get_limit_per_prompt("image") > 0):
+            image_prompt = self._image_warmup_prompt()
+            if len(image_prompt[0]) <= prompt_len + 1:
+                warmup_prompts.append(image_prompt)
+            else:
+                logger.info("[OV-WARMUP] Skipping image warmup: dummy image "
+                            "prompt has %d tokens, above the %d-token step",
+                            len(image_prompt[0]), prompt_len + 1)
         tmp_cache_config = copy.copy(self.cache_config)
-        tmp_cache_config.num_gpu_blocks = 1
-        num_state = 1 if self._la_state_bytes else num_state_slots(self.vllm_config)
+        max_warmup_tokens = max(len(ids) for ids, _ in warmup_prompts)
+        tmp_cache_config.num_gpu_blocks = math.ceil(
+            max_warmup_tokens / self.cache_config.block_size) + 1
+        num_state = (tmp_cache_config.num_gpu_blocks if self._la_state_bytes
+                     else num_state_slots(self.vllm_config))
         engine = OpenVINOCacheEngine(
             tmp_cache_config,
             self.key_cache_config,
@@ -1026,7 +1043,8 @@ class OpenVINOWorkerV1(WorkerBase):
             runner._conv_slot_free = [0]
         try:
             warmup_start = time.perf_counter()
-            self._warm_up_paged_attention()
+            for prompt_token_ids, mm_features in warmup_prompts:
+                self._warm_up_paged_attention(prompt_token_ids, mm_features)
             runner._step_stats.reset()
             logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
                         time.perf_counter() - warmup_start)
@@ -1038,27 +1056,48 @@ class OpenVINOWorkerV1(WorkerBase):
             self._warmed_up = True
             del engine  # release the throwaway cache before the measurement
 
-    def _warm_up_paged_attention(self) -> None:
-        """Run one prefill and one decode step on the reserved null block so the
-        first real request does not pay the CPU kernel JIT cost."""
+    def _image_warmup_prompt(self) -> tuple[list[int], list[MultiModalFeatureSpec]]:
+        processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
+        dummy = processor.get_dummy_mm_inputs(
+            {"image": 1}, scheduler_config=self.scheduler_config)
+        # Empty identifier -> mm_hash=None in the runner, so the dummy skips the vision cache.
+        features = [
+            MultiModalFeatureSpec(
+                data=item,
+                modality="image",
+                identifier="",
+                mm_position=position,
+            )
+            for item, position in zip(
+                dummy["mm_kwargs"]["image"], dummy["mm_placeholders"]["image"])
+        ]
+        return list(dummy["prompt_token_ids"]), features
+
+    def _warm_up_paged_attention(
+        self, prompt_token_ids: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> None:
+        """Run one prefill and one decode step to warm kernels before measurement."""
         from vllm.v1.core.sched.output import CachedRequestData
         runner = self.model_runner
-        prompt_len = 16
+        total_len = len(prompt_token_ids)
         params = SamplingParams(temperature=0.0, max_tokens=2)
-        block_ids = tuple([0] for _ in range(runner.num_cache_groups))
+        num_warmup_blocks = math.ceil(total_len / runner.block_size)
+        block_ids = tuple(list(range(num_warmup_blocks))
+                          for _ in range(runner.num_cache_groups))
 
-        def step(req_id, num_computed, finished):
+        def step(req_id, num_computed, finished, features):
             new_req = NewRequestData(
                 req_id=req_id,
-                prompt_token_ids=[0] * (prompt_len + 1),
-                mm_features=[],
+                prompt_token_ids=prompt_token_ids,
+                mm_features=features,
                 sampling_params=params,
                 pooling_params=None,
                 block_ids=block_ids,
                 num_computed_tokens=num_computed,
                 lora_request=None,
             )
-            num_tokens = prompt_len + 1 - num_computed if num_computed else prompt_len
+            num_tokens = total_len - 1 if num_computed == 0 else 1
             return SchedulerOutput(
                 scheduled_new_reqs=[new_req],
                 scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -1072,10 +1111,10 @@ class OpenVINOWorkerV1(WorkerBase):
             )
 
         try:
-            runner.execute_model(step("__warmup_prefill__", 0, set()))
+            runner.execute_model(step("__warmup_prefill__", 0, set(), mm_features))
             runner.sample_tokens(None)
-            runner.execute_model(step("__warmup_decode__", prompt_len,
-                                      {"__warmup_prefill__"}))
+            runner.execute_model(step("__warmup_decode__", total_len - 1,
+                                      {"__warmup_prefill__"}, []))
             runner.sample_tokens(None)
         finally:
             runner._update_states(SchedulerOutput(

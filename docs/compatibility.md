@@ -83,14 +83,11 @@ a repeated 2.3k-token prompt went from 7.5 s to 1.2 s through prefix caching.
 Gemma-4 26B-A4B (MoE, sliding window 1024, 30 KV pairs, `token_type_ids`
 input, 14.3 GB weights) gave the same text answer as the stateful path and the
 same extraction of a text-heavy image; concurrency 1 9.8 -> 10.2 tok/s,
-concurrency 8 9.8 -> 30.9 tok/s (3.2x). Both paths now start in a 32 GiB
-container (post-warmup anonymous RSS 16.9 GB PA / 17.4 GB stateful; see the
-memory-fitting bullet below). With the automatic pool the PA path is
-OOM-killed once the pool is fully resident: at 24 GiB under three concurrent
-image requests or four concurrent ~3k-token prompts, at 32 GiB after four
-concurrent ~3k-token prompts cycled about 140k tokens through an 85k-token
-pool. The post-warmup measurement does not count the buffers that grow under
-real prefill load.
+concurrency 8 9.8 -> 30.9 tok/s (3.2x). With the automatic pool the PA path
+needs a 32 GiB container: post-warmup anonymous RSS is 19.8 GB, the pool
+7.25 GB, and three concurrent images followed by about 141k tokens of unique
+~2.5k-token prompts four at a time passed with no OOM. At 24 GiB the pool
+falls to the 256 MiB floor and startup fails for `max-model-len 4096`.
 When concurrent requests split long prompts at different chunk boundaries,
 greedy output can change at near-tie tokens (seen on E2B with and without
 prefix caching, both answers correct).
@@ -194,8 +191,8 @@ text because of prefill vs decode numerics.
   APIServer overhead - 2.2 GiB headroom (never below 256 MiB). The APIServer
   overhead is 1 GiB for text models and 2.75 GiB for checkpoints with a vision
   encoder (measured APIServer anon RSS 2.1-2.7 GiB). Anonymous RSS is the right baseline because the kernel
-  reclaims the memory-mapped weights under pressure (26B: VmRSS 30.6 GB of which
-  16.9 GB is anonymous).
+  reclaims the memory-mapped weights under pressure (26B: VmRSS 33.5 GB of which
+  19.8 GB is anonymous).
 - With `VLLM_OPENVINO_KVCACHE_SPACE=0` (default) the post-load budget sets the
   pool in both directions. With an explicit value it only reduces the pool to
   that budget, with a warning; a pool above 90% of the pre-load budget logs a
@@ -221,11 +218,19 @@ text because of prefill vs decode numerics.
 - PA models run one prefill and one decode step on the reserved null block 0 at
   startup to absorb the CPU kernel JIT cost; the first request dropped from
   1.51 s to 0.79 s (Qwen3-1.7B-int4) and 0.87 s to 0.49 s (Qwen3.5-0.8B-int4)
-  with no visible startup cost. The warmup now runs inside
-  `determine_available_memory`, against a throwaway 1-block cache, *before* the
-  post-load memory measurement, so the CPU plugin's first-infer weight repack is
-  part of the measured baseline and no longer happens after the pool is sized;
-  `compile_or_warm_up_model` skips its own copy. Stateful models keep their own
+  with no visible startup cost. On CPU the warmup runs inside
+  `determine_available_memory`, against a throwaway cache, *before* the
+  post-load memory measurement, so the CPU plugin's first-infer weight repack
+  and prefill buffers are part of the measured baseline;
+  `compile_or_warm_up_model` skips its own copy. The warmup prefill is
+  `max_num_batched_tokens` long, and multimodal models also prefill one
+  maximum-size dummy image from vLLM's dummy-input processor (skipped when the
+  image limit is 0 or the dummy prompt exceeds one step, e.g. Qwen3.5's
+  16k-token dummy image). With a 16-token warmup the 26B baseline was 16.9 GB
+  and the pool OOM-killed under full residency; with the full-step text and
+  image warmup it is 19.8 GB and the same loads pass. The startup cost is
+  26 s on the 26B and 11 s on E2B. Hybrid-PA prefix caching needs one
+  conv/SSM checkpoint per warmup block in the throwaway cache. Stateful models keep their own
   warm-up in `load_model`.
 - SSM/conv state caches are zero-filled; attention KV caches are not.
 - The worker zero-fills scheduler-reported `new_block_ids_to_zero` blocks each
