@@ -14,42 +14,45 @@
 
 1. **upstream 패턴 추종** — vLLM 구현 패턴을 정확히 따른다. upstream과 다른 아키텍처는 버전 업그레이드 시 호환성을 깨뜨린다.
 2. **플러그인 경계 준수** — vLLM core를 수정하거나, core의 동작을 가정하지 않는다. vLLM이 제공하는 플러그인 인터페이스만 사용한다.
-3. **규모에 맞는 최소주의** — 현재 규모를 초과하는 복잡도와 추상화를 추가하지 않는다.
+3. **규모에 맞는 최소주의** — 현재 규모를 초과하는 복잡도와 추상화, 별도 테스트 인프라를 추가하지 않는다.
 4. **현재 문제만 해결** — 실제 사용자 수요가 없거나 vLLM 아키텍처 제약으로 구현 불가능한 기능은 추가하지 않는다.
 
 **원칙 충돌 시 우선순위**: upstream 호환성 > 플러그인 경계 > 최소주의
+
+Stateful 경로는 유지보수 대상으로만 유지하고, hybrid 모델의 확장은 Hybrid-PA 경로에서 한다.
 
 ### 문서 유지 원칙
 
 - 개정 이력과 불필요한 작업 메타데이터는 남기지 않는다.
 - 잘못된 정보는 삭제한다. 현재 판단에 필요한 상태, 제약, 검증 결과만 간결하게 기록한다.
+- 측정값과 구현 세부는 `docs/compatibility.md`와 README에 둔다. 이 파일에는 규칙과 그 이유만 둔다.
 - 시작시 git pull 하고, 완료시 git push 까지 진행한다.
 
 ## 주요 파일
 
 | 파일 | 역할 |
 |------|------|
-| `platform.py` | OpenVinoPlatform — vLLM Platform 인터페이스 |
+| `platform.py` | OpenVinoPlatform — vLLM Platform 인터페이스, 설정 검증, 시작 전 KV 풀 추정 |
 | `envs.py` | 환경변수 정의 (VLLM_OPENVINO_*) |
-| `kv_cache.py` | OpenVINOCacheEngine — KV 캐시 관리 |
+| `utils.py` | cgroup CPU/메모리 감지, RSS 측정, 가중치 크기, `image_input_enabled` |
+| `kv_cache.py` | OpenVINOCacheEngine — KV/SSM/conv 캐시 할당 |
 | `attention/backends/openvino.py` | OpenVINO Attention 백엔드 |
-| `model_executor/model_loader/openvino.py` | 모델 로딩 + PagedAttention 변환 |
-| `worker_v1/openvino_worker_v1.py` | 워커 — KV 캐시 할당, 프로파일링 |
-| `worker_v1/openvino_model_runner_v1.py` | ModelRunner — 입력 준비 + 추론 실행 |
+| `model_executor/model_loader/openvino.py` | 모델 로딩, PagedAttention·gather-before-matmul 변환, 비전 IR |
+| `worker_v1/openvino_worker_v1.py` | 워커 — warmup, 로드 후 KV 풀 산정, 캐시 할당 |
+| `worker_v1/openvino_model_runner_v1.py` | ModelRunner — 입력 준비, 추론, 샘플링 |
+| `sampler_patch.py` | CPU용 샘플러 fast path (`VLLM_OPENVINO_FAST_SAMPLER`) |
 
 ## 검증
 
 - 코드를 수정하면 먼저 `python3 -m py_compile`을 실행한다.
-- 런타임 변경은 빌드 없이 podman 소스 마운트로 검증한다.
-- 단일·연속·동시 요청을 실제 API로 확인한다.
+- 런타임 변경은 빌드 없이 podman 소스 마운트로 검증한다. `pyproject.toml`이나 `Containerfile`을 바꾸면 `podman build`까지 돌린다.
+- 단일·연속·동시 요청을 실제 API로 확인한다. 요청은 `localhost`가 아니라 `127.0.0.1`로 보낸다(IPv6로 풀리면 연결이 끊긴다).
 - 성능 비교는 `--cpus=8 --memory=16g`로 CPU 수와 메모리를 고정한다.
 - 상세 절차는 `docs/podman-testing.md`를 따른다.
 
 ```bash
-# 문법 오류 사전 차단 (반드시 먼저 실행)
 python3 -m py_compile <file>
 
-# podman 소스 마운트 테스트 (CPU 8개, 메모리 16GiB로 제한)
 podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
   -v ~/prj/vllm-openvino/vllm_openvino:/opt/app-root/vllm_openvino:Z \
   -v ~/hf:/models:Z \
@@ -57,33 +60,19 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
   --port=8080 --model <model_dir> --max-model-len 4096
 ```
 
-## 범위 제한
+## 깨지기 쉬운 규칙
 
-- vLLM core를 수정하지 않는다.
-- 현재 요구가 없는 기능, 별도 테스트 인프라, 추상화 레이어를 추가하지 않는다.
-- Stateful 경로는 유지보수 대상으로 유지하고, hybrid 모델의 확장은 Hybrid-PA 경로로 분리한다.
+상세 설명과 측정값은 `docs/compatibility.md` 참조.
 
-## 기술적 특이사항 (코드 수정 시 참고)
-
-> 전체 목록과 상세 설명은 `docs/compatibility.md` 참조.
-
-- **`TORCH_COMPILE_DISABLE=1` 필수** — torch.compile/Inductor가 OpenVINO와 비호환
-- **bf16 → float32 변환** — `_as_numpy_no_copy()`에서 torch bfloat16을 numpy float32로 캐스팅. OpenVINO는 bf16 numpy 미지원
-- **KV 캐시 `.fill(0)` 복원 금지** — `_allocate_kv_cache()`에 `.fill(0)` 없는 것이 정상(의도된 최적화). 추가하면 OOM 유발. SSM/conv 캐시(`_allocate_state_cache()`)에는 `.fill(0)` 유지됨
-- **Pin memory 미지원** / **LoRA 미지원** / **TP·PP 미지원** — 멀티소켓은 OpenVINO가 자동으로 스레드를 배치하지만 이득이 작다: 고부하(8 streams)에서 코어 2배에 +9%, 저부하(2 streams)에서 +1%. 스레드 예산을 소켓에 분산하면 -12~-18% 손해
-- **OpenVINO import 실패 처리** — `platform.py`에서 `import openvino` 실패 시 import 시점에 raise하지 말 것. vLLM 플러그인 디스커버리 메커니즘 때문
-- **서빙 경로** — `ReadValue`가 없는 attention-only 모델은 PagedAttention을 사용한다. `ssm`/`conv` 상태가 있는 hybrid 모델(Qwen3.5, LFM2.5)은 Hybrid-PA를 기본 사용하며 `VLLM_OPENVINO_HYBRID_PA=0`으로 stateful 경로를 강제할 수 있다. 그 외 SDPA가 있는 stateful 모델(Gemma-4 포함, sliding window 무관)은 PagedAttention으로 변환하며 `VLLM_OPENVINO_STATEFUL_PA=0`이면 OpenVINO 내부 KV cache와 `max_num_seqs=1`로 동작한다.
-- **Hybrid-PA 후보 판정** — 단순한 `ReadValue`+SDPA 조합이 아니라 IR `variable_id`의 `ssm`/`conv` 상태를 확인한다. Gemma-4는 transformer KV만 있으므로 Hybrid-PA가 아니라 일반 PA 대상이다.
-- **PA 입력 shape** — PA 변환 후에도 Gemma-4의 `per_layer_inputs`는 rank 4로 남으므로 `[tokens, 1, layers, hidden]`으로 넣는다(OpenVINO GenAI `model_runner.hpp`와 동일). 26B-A4B는 hidden이 0이라 reshape에 토큰 수를 명시해야 한다. `token_type_ids`도 rank 2로 남으므로 `[tokens, 1]`이며, runner가 이미지 임베딩 위치에 실제 type(1)을 계산해 넘긴다(Stateful 경로는 0 유지). 이 입력이 빠지면 sliding-window 레이어의 residual add에서 `Eltwise ... dim index: 0 mismatch`가 난다.
-- **메모리 산정** — CPU에서 KV 풀은 두 단계로 cgroup 한도에 맞춘다: 로드 전 `.bin` 크기 기준, 로드 후 EngineCore **anon RSS** 기준. VmRSS는 mmap된 가중치 페이지(reclaimable)를 포함하므로 쓰지 않는다(26B: VmRSS 33.5 GB 중 anon 19.8 GB). 로드 후 측정은 PA warmup(임시 캐시, `max_num_batched_tokens` 길이 prefill + 멀티모달이면 최대 크기 더미 이미지 1건)을 먼저 돌려 weight repack과 prefill 버퍼를 포함시킨 뒤 수행한다. 더미 이미지가 한 step보다 길거나 image limit이 0이면 이미지 warmup은 건너뛴다. Hybrid-PA prefix caching의 임시 캐시는 블록마다 checkpoint가 필요하므로 state 슬롯 수를 블록 수와 맞춘다.
-- **CPU 스레드 자동감지** — `VLLM_OPENVINO_CPU_THREADS_NUM=0`이면 cgroup CPU quota를 고려해 OpenVINO 스레드 수를 제한한다. 명시적인 환경변수 설정이 우선한다. 멀티소켓 호스트에서는 프로세스를 소켓별 cpuset에 바인딩하고 스레드 수를 그 소켓의 코어 수로 맞추는 편이 효율적이다.
-- **Gather-before-matmul 변환** — PA-transformed 모델에만 적용한다. stateful 모델에는 적용하지 않는다. 샘플링 위치에서만 logits를 계산하므로 `prompt_logprobs`는 지원하지 않고, `OpenVinoPlatform.validate_request`가 HTTP 400으로 거부한다.
-- **2단계 실행** — `execute_model`은 forward와 `compute_logits`까지만 수행하고 `None`을 반환하며, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream MRV1 패턴). 구조화 출력이 이 경계에 의존하므로 두 단계를 합치지 않는다.
-- **SSM/conv cache** — stateful 경로는 OpenVINO가 내부 상태를 관리하므로 외부 SSM/conv cache를 할당하지 않는다. Hybrid-PA는 prefix caching이 켜지면(기본, spec decode 없음) 스케줄러 블록마다 같은 인덱스의 conv/SSM checkpoint를 두고(`la.cache_interval` = 스케줄러 블록 크기, OpenVINO KV 블록 32의 배수), 꺼지거나 spec decode가 있으면 스케줄러 블록과 별도의 물리 slot pool을 사용한다. 같은 step에서 채워지는 블록에 prefix hit한 요청은 runner가 infer를 wave로 나눠 checkpoint를 쓴 뒤에 읽는다.
-- **모델 포맷 필수** — HuggingFace 원본 모델은 직접 로딩하지 않으며 OpenVINO IR로 사전 변환해야 한다. 주요 파일명:
-  - 텍스트 모델: `openvino_model.xml`
-  - 멀티모달 언어 모델: `openvino_language_model.xml`
-  - 텍스트 임베딩: `openvino_text_embeddings_model.xml`
-  - 비전 인코더: `openvino_vision_embeddings_model.xml` (입력: **2D** `[num_patches, features]`, 배치 dim 없음 — 필요 시 squeeze)
-  - 비전 merger (일부 모델): `openvino_vision_embeddings_merger_model.xml` (어텐션 기반, **dict로 3개 입력 필수**: `hidden_states`, `attention_mask`, `rotary_pos_emb` — 1개만 넘기면 ScaledDotProductAttention shape 불일치로 실패)
-- **mm_item 키 차이** — Qwen3.5는 `pixel_values` + `image_grid_thw`, Gemma-4는 `pixel_values`, MiniCPM-V 4.7은 `pixel_values` + `tgt_sizes`(`image_grid_thw` 슬롯으로 전달)를 사용한다. MiniCPM-V 4.7은 crop 단위 vision 인코딩과 canvas M-RoPE `[3, n]` 위치를 쓰며, 필요한 vLLM 모델 코드는 0.32.0rc0부터 포함된다.
+- **`TORCH_COMPILE_DISABLE=1` 필수** — torch.compile/Inductor는 OpenVINO와 비호환.
+- **`import openvino` 실패를 import 시점에 raise하지 않는다** — vLLM 플러그인 디스커버리가 다른 플랫폼을 검사하다 깨진다.
+- **`_allocate_kv_cache()`에 `.fill(0)`을 넣지 않는다** — OpenVINO가 초기화하며, 추가하면 OOM. SSM/conv 캐시(`_allocate_state_cache()`)의 zero-fill은 유지한다.
+- **bf16은 numpy 변환 전에 float32로** (`_as_numpy_no_copy()`) — OpenVINO는 bf16 numpy를 받지 않는다.
+- **`execute_model`과 `sample_tokens`를 합치지 않는다** — `execute_model`은 logits까지만 계산하고, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream MRV1 패턴). 구조화 출력이 이 경계에 의존한다.
+- **PA 전용 변환·입력은 stateful 모델에 주지 않는다** — `paged_attention_transformation()`, gather-before-matmul, PA 입력. gather 때문에 `prompt_logprobs`는 미지원이며 `validate_request`가 400으로 거부한다.
+- **서빙 경로는 IR로 판정한다** — `ReadValue`의 `variable_id`에 `ssm`/`conv`가 있으면 Hybrid-PA, 그 외 SDPA 모델은 PA(Gemma-4 포함), SDPA가 없으면 stateful. 단순한 `ReadValue`+SDPA 조합으로 판정하지 않는다.
+- **KV 풀은 VmRSS가 아니라 EngineCore anon RSS로 산정한다** — VmRSS에는 회수 가능한 mmap 가중치가 들어 있다. 측정 전 warmup이 실제 최대 prefill(+더미 이미지)을 돌려야 baseline이 맞다. warmup을 줄이면 풀이 커져 가득 찼을 때 OOM이 난다.
+- **Gemma-4 PA 입력은 rank를 유지해 넣는다** — `per_layer_inputs` `[tokens, 1, layers, hidden]`, `token_type_ids` `[tokens, 1]`. 빠지면 sliding-window 레이어에서 `Eltwise ... dim index: 0 mismatch`.
+- **비전 merger에는 `hidden_states`, `attention_mask`, `rotary_pos_emb` 세 입력을 모두 넘긴다** — 하나만 넘기면 SDPA shape 불일치.
+- **HuggingFace 원본은 로딩하지 않는다** — OpenVINO IR만 지원한다. IR 파일명과 모델별 mm 입력 키는 `docs/compatibility.md`의 Model Files 참조.
+- **미지원**: Pin memory, LoRA, TP·PP. 멀티소켓은 이득이 작으니 한 소켓 cpuset에 바인딩한다(README CPU Tuning).
