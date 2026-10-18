@@ -225,6 +225,11 @@ def detect_memory_limit() -> int | None:
     return None
 
 
+def image_input_enabled(model_config) -> bool:
+    mm_config = model_config.multimodal_config
+    return mm_config is not None and mm_config.get_limit_per_prompt("image") > 0
+
+
 def model_weights_bytes(model_path: str) -> int:
     model_dir = Path(model_path)
     if not model_dir.is_dir():

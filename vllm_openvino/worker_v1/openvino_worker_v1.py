@@ -39,6 +39,7 @@ from vllm_openvino.utils import (
     determine_num_available_blocks,
     get_max_allocatable_memory_gpu,
     format_memory_size,
+    image_input_enabled,
     ov_cache_dtype,
 )
 from vllm_openvino.model_executor.model_loader.openvino import (
@@ -890,14 +891,14 @@ class OpenVINOWorkerV1(WorkerBase):
                     format_memory_size(get_process_rss_bytes()))
             if rss > 0 and envs.VLLM_OPENVINO_KVCACHE_SPACE == 0:
                 kvcache_before = self.cache_config.openvino_kvcache_space_bytes
-                kvcache_after = auto_kv_cache_bytes(rss, self.model_config.model)
+                kvcache_after = auto_kv_cache_bytes(rss, self.model_config)
                 self.cache_config.openvino_kvcache_space_bytes = kvcache_after
                 logger.info(
                     "[OV-WORKER] Auto-sized KV pool %s -> %s",
                     format_memory_size(kvcache_before),
                     format_memory_size(kvcache_after))
             elif rss > 0 and effective_limit is not None:
-                api_overhead = apiserver_overhead_bytes(self.model_config.model)
+                api_overhead = apiserver_overhead_bytes(self.model_config)
                 available = (effective_limit - rss - api_overhead
                              - KV_CACHE_MEMORY_MARGIN_BYTES)
                 kvcache_now = self.cache_config.openvino_kvcache_space_bytes
@@ -980,7 +981,7 @@ class OpenVINOWorkerV1(WorkerBase):
                         "budgeted %s.",
                         format_memory_size(observed),
                         format_memory_size(
-                            apiserver_overhead_bytes(self.model_config.model)))
+                            apiserver_overhead_bytes(self.model_config)))
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def _warm_up_before_sizing(self) -> None:
@@ -997,9 +998,7 @@ class OpenVINOWorkerV1(WorkerBase):
         prompt_len = min(self.scheduler_config.max_num_batched_tokens,
                          self.model_config.max_model_len - 2)
         warmup_prompts = [([0] * (prompt_len + 1), [])]
-        if (self.model_config.is_multimodal_model
-                and self.model_config.get_multimodal_config()
-                .get_limit_per_prompt("image") > 0):
+        if image_input_enabled(self.model_config):
             image_prompt = self._image_warmup_prompt()
             if len(image_prompt[0]) <= prompt_len + 1:
                 warmup_prompts.append(image_prompt)

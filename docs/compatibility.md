@@ -189,8 +189,9 @@ text because of prefill vs decode numerics.
   APIServer overhead - 2.2 GiB headroom. After model load: the PA warmup runs
   first, then the pool is set to ceiling - EngineCore anonymous RSS -
   APIServer overhead - 2.2 GiB headroom (never below 256 MiB). The APIServer
-  overhead is 1 GiB for text models and 2.75 GiB for checkpoints with a vision
-  encoder (measured APIServer anon RSS 2.1-2.7 GiB). Anonymous RSS is the right baseline because the kernel
+  overhead is 1.5 GiB for text models and 2.75 GiB for checkpoints with a vision
+  encoder (measured APIServer anon RSS 0.55-0.87 GiB text, 1.23-1.26 GiB
+  Gemma-4 with images disabled, 2.1-2.7 GiB vision). Anonymous RSS is the right baseline because the kernel
   reclaims the memory-mapped weights under pressure (26B: VmRSS 33.5 GB of which
   19.8 GB is anonymous).
 - With `VLLM_OPENVINO_KVCACHE_SPACE=0` (default) the post-load budget sets the
@@ -213,8 +214,12 @@ text because of prefill vs decode numerics.
   `(batch_start, batch_end, patch_offset, image_index)` rows (one per contiguous
   `is_embed` run of the placeholder), so concurrent requests, differently sized images, multi-image prompts and
   images split by chunked prefill are handled. For text-only serving of a
-  multimodal checkpoint, `--limit-mm-per-prompt '{"image":0,"video":0}'` skips
-  the multimodal warmup (startup 64 s to 50 s on Qwen3.5-0.8B-int4).
+  multimodal checkpoint, `--language-model-only` or
+  `--limit-mm-per-prompt '{"image":0,"video":0}'` skips the multimodal warmup
+  (startup 64 s to 50 s on Qwen3.5-0.8B-int4), does not compile the vision
+  encoder, and budgets the text APIServer overhead. gemma-4-E2B at 16 GiB:
+  post-load anon RSS 3.84 -> 2.71 GB, pool 7.21 -> about 9.6 GB; image requests
+  get HTTP 400 from vLLM.
 - PA models run one prefill and one decode step on the reserved null block 0 at
   startup to absorb the CPU kernel JIT cost; the first request dropped from
   1.51 s to 0.79 s (Qwen3-1.7B-int4) and 0.87 s to 0.49 s (Qwen3.5-0.8B-int4)

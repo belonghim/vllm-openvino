@@ -27,7 +27,7 @@ from vllm.v1.sample.sampler import Sampler as SamplerV1
 
 import vllm_openvino.envs as envs
 from vllm_openvino.utils import (cpu_thread_limit, format_memory_size,
-                                 model_weights_bytes)
+                                 image_input_enabled, model_weights_bytes)
 
 logger = init_logger(__name__)
 
@@ -351,7 +351,7 @@ class OpenVINOCausalLM(nn.Module):
             if text_emb_path.exists():
                 self.use_text_embeddings_model = True
             vision_emb_path = model_dir / "openvino_vision_embeddings_model.xml"
-            if vision_emb_path.exists():
+            if vision_emb_path.exists() and image_input_enabled(model_config):
                 self.use_vision_embeddings_model = True
             self._vision_warning_logged = False
         else:
