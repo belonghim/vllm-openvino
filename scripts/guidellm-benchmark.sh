@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_DIR="$SCRIPT_DIR/guidellm-results"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
-API_URL="http://localhost:8080"
+API_URL="http://127.0.0.1:8080"
 CONTAINER_NAME="vllm-guidellm"
 IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"

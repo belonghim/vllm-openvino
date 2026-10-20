@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_DIR="$SCRIPT_DIR/guidellm-results"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
-API_URL="http://localhost:8082"
+API_URL="http://127.0.0.1:8082"
 CONTAINER_NAME="vllm-gemma-sweep"
 IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_DIR="$HOME/hf/OpenVINO/gemma-4-E2B-it-int4-ov"

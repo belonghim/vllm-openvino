@@ -45,7 +45,7 @@ Tracked upstream:
 Open questions on #57684 (whether the MRV1 removal target holds, and whether a
 replacement-runner path exists for plugins) are unanswered.
 
-Since 0.32.0rc0 the vLLM `Sampler` calls `torch.ops._C.greedy_argmax` whenever the
+Since vLLM 0.32 the `Sampler` calls `torch.ops._C.greedy_argmax` whenever the
 platform reports CPU, and the PyPI-style wheel has no CPU kernels. `platform.py`
 registers an argmax implementation for that op when it is missing.
 
@@ -286,8 +286,8 @@ positions computed by vLLM's `MiniCPMV4_7ForConditionalGeneration`
 
 Requires vLLM >= 0.32.0 (contains vllm-project/vllm #58674 and #56372) and
 Transformers >= 5.18.0; vLLM 0.31.0 and Transformers 5.17.0 lack them. Verified
-on the 0.32.0rc0 image: single and multi-slice images, concurrent requests and
-chunked prefill describe the image correctly.
+on the 0.32.0 image: single and multi-slice images and concurrent image requests
+describe the image correctly; chunked prefill was last checked on 0.32.0rc0.
 
 ## N-gram Speculative Decoding
 

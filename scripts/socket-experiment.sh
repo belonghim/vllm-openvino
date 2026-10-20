@@ -27,7 +27,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 mkdir -p "$RESULTS_DIR"
 
 HOST_PORT="${HOST_PORT:-8085}"
-API_URL="http://localhost:${HOST_PORT}"
+API_URL="http://127.0.0.1:${HOST_PORT}"
 CONTAINER_NAME="vllm-socket-exp"
 IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_DIR="$HOME/hf/OpenVINO/$MODEL"

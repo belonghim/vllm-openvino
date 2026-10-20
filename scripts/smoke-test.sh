@@ -16,10 +16,10 @@ RESULTS_FILE="$SCRIPT_DIR/smoke-test-results.json"
 BASELINE_FILE="$SCRIPT_DIR/smoke-test-baseline.json"
 REGRESSION_THRESHOLD_PCT=10
 
-API_URL="http://localhost:8080"
+API_URL="http://127.0.0.1:8080"
 CONTAINER_NAME="vllm-smoke"
 IMAGE="quay.io/joopark/vllm-openvino"
-MODEL_BASE="/home/user/hf/OpenVINO"
+MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
 MODELS=(
   "Qwen2.5-Coder-3B-Instruct-int4-ov"

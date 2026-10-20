@@ -10,6 +10,9 @@ the supported vLLM version changes.
 3. Check worker, model runner, scheduler output, attention metadata, and
    KV-cache interface signatures.
 4. Check platform registration and worker selection.
+5. Check that vLLM still ships MRV1 (the V1-style model runner this plugin
+   uses) and whether `Platform.supports_v2_model_runner` has merged; see
+   "Upstream vLLM Compatibility" in `compatibility.md`.
 
 High-risk interfaces include:
 
@@ -39,6 +42,16 @@ Verify every overridden or consumed symbol in:
 Pay particular attention to `WorkerBase`, `ModelRunnerOutput`,
 `SchedulerOutput`, `InputBatch`, `AttentionMetadata`, `KVCacheSpec`,
 `MambaSpec`, `bind_kv_cache`, and `CompilationTimes`.
+
+## Version Pins
+
+Update every place that names a version:
+
+- `pyproject.toml`: `version`, `vllm`, `transformers`, `openvino`
+- `Containerfile`: the vLLM wheel URL, `torch`, `torchvision`, `openvino`,
+  `transformers`, and the CPU plugin sha256
+- `AGENTS.md` and `CONTRIBUTING.md`: vLLM and OpenVINO versions
+- `docs/compatibility.md`: Requirements and the version-specific notes
 
 ## OpenVINO Upgrades
 
