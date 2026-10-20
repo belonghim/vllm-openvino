@@ -12,7 +12,14 @@ the supported vLLM version changes.
 4. Check platform registration and worker selection.
 5. Check that vLLM still ships MRV1 (the V1-style model runner this plugin
    uses) and whether `Platform.supports_v2_model_runner` has merged; see
-   "Upstream vLLM Compatibility" in `compatibility.md`.
+   "Upstream vLLM Compatibility" in `compatibility.md`. The plugin consumes
+   `InputBatch`, `CachedRequestState`, `bind_kv_cache` and other `vllm.v1.*`
+   symbols without running the built-in runner; check them against the new
+   wheel before bumping:
+
+   ```bash
+   podman run --rm -v "$PWD:/w:Z" -w /w --entrypoint python <new-image> scripts/check-vllm-imports.py
+   ```
 
 High-risk interfaces include:
 
