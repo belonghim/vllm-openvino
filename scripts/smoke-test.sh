@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # smoke-test.sh — Performance regression smoke test
-# Runs PA(Qwen) + Stateful(gemma-4) with 5 fixed questions, tracks tok/s.
+# Runs two PagedAttention models (Qwen2.5-Coder, Gemma-4) with 5 fixed questions, tracks tok/s.
 # Compares against ./scripts/smoke-test-baseline.json if present.
 
 set -uo pipefail
@@ -22,8 +22,8 @@ IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
 MODELS=(
-  "Qwen2.5-Coder-3B-Instruct-int4-ov"
-  "gemma-4-E4B-it-int4-ov"
+  "Qwen2.5-Coder-0.5B-Instruct-int4-ov"
+  "gemma-4-E2B-it-int4-ov"
 )
 
 QUESTIONS=(
@@ -56,7 +56,7 @@ run_model_perf() {
 
   podman run --replace -d --name "$CONTAINER_NAME" \
     -p 8080:8080 --cpus=8 --memory=16g \
-    -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino" \
+    -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino:Z" \
     -v "$model_dir:/models:Z" \
     -e VLLM_OPENVINO_DEVICE=CPU \
     -e TORCH_COMPILE_DISABLE=1 \
