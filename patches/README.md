@@ -5,7 +5,7 @@ with `libopenvino_intel_cpu_plugin.so` from this directory (see `Containerfile`)
 
 - Problem: `GatherMatmulDnnlExecutor::execute` uses GEMM for M > 1 only on
   bf16+AMX, so MoE prefill elsewhere runs one GEMV per routed row.
-  Upstream: openvinotoolkit/openvino#38517; PR openvinotoolkit/openvino#38822 (open).
+  Upstream: openvinotoolkit/openvino#38517; PR openvinotoolkit/openvino#39086 (open).
 - Patch: `openvino-gathermatmul-grouped-gemm.patch` (2 files, +67/-10). Without
   AMX each expert with at least 4 routed rows runs one GEMM over those rows; experts
   with fewer stay on GEMV (2-token forwards were ~10% slower otherwise). The AMX
@@ -42,20 +42,22 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
 - Serving needs that fallback. vLLM flattens all scheduled tokens, so a decode step with
   N concurrent requests is M = N. At N <= 16, nearly every active expert gets fewer than
   4 rows; at N <= 64 for Qwen3.6, whose 256 experts spread the rows thinner.
-- openvinotoolkit/openvino#38830 sizes the GEMM per expert in the AMX bf16 branch only.
-  It is open, with maxnick's change request awaiting re-review.
-- If #38830 merges alone, non-AMX CPUs (all AMD, Intel client, pre-Sapphire Rapids
-  Xeon) and f32 sources stay on per-row GEMV, so this patch is still needed there.
-- Proposed on #38822 (2026-10-16, awaiting replies from maxnick and the #38830
-  author): close #38822 and, after #38830 merges, open a follow-up that drops the
-  AMX-only condition and keeps the GEMV fallback for few-row experts, or fold the
-  fallback into #38830.
+- openvinotoolkit/openvino#38830 (GEMM sized per expert, AMX bf16 branch only) merged
+  into master on 2026-10-21 (1ac0ccb7, milestone 2026.5). It is not in 2026.4.1.
+- Non-AMX CPUs (all AMD, Intel client, pre-Sapphire Rapids Xeon) and f32 sources still
+  run per-row GEMV on master, so this patch is still needed there.
+- openvinotoolkit/openvino#39086 (open, replaces #38822, now closed) takes the
+  per-expert GEMM branch for every f32 and bf16 source and keeps GEMV for experts with
+  fewer than 4 routed rows (+28/-11, same two files plus a test comment). On master
+  31489b9c: `ov_cpu_func_tests` MoE/GroupedMatMul filter 329 passed, 240 with
+  `OV_CPU_MAX_ISA=AVX2`. Zen 4, 8 CPUs, LFM2.5-8B-A1B: prefill at 1024 tokens 421 tok/s
+  (bf16), 165 tok/s (AVX2 f32); 2-token chunk 54 ms (stock 49). The 4-row threshold is
+  untested on AMX; the #38830 author was asked to try it on Xeon 6972P.
 
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
-- If the release takes the per-expert GEMM on non-AMX CPUs (#38822 or the follow-up
-  above), or #37444 replaces it, delete the `COPY` line from `Containerfile` and this
-  directory. #38830 alone is not enough.
+- If the release contains #39086, or #37444 replaces the path, delete the `COPY` line
+  from `Containerfile` and this directory. #38830 alone is not enough.
 - Otherwise rebuild the plugin from the new tag with the patch, replace the `.so`
-  and the sha256 above, and re-measure. If #38830 is in the tag, the patch conflicts
-  in `execute()`: drop the AMX-only condition instead and add the 4-row GEMV fallback
-  (branch `n-all830thr` in `~/build/ov-master`).
+  and the sha256 above, and re-measure. 2026.5 contains #38830, so the patch conflicts
+  in `execute()`: apply #39086 instead (`~/build/gathermatmul-followup.patch`, branch
+  `follow-up-gemm-all` in `~/build/ov-master`).
