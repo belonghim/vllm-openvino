@@ -22,7 +22,12 @@ one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
 ([#58140](https://github.com/vllm-project/vllm/pull/58140)) and would select
 MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set `VLLM_USE_V2_MODEL_RUNNER=0` in
 those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
-removal for 0.32; 0.32.0 still ships it.
+removal for 0.32, but 0.32.0 and main still ship it. vLLM's own CPU runner
+(`CPUModelRunner`) still subclasses the MRV1 `GPUModelRunner`, so MRV1 removal
+waits on CPU MRV2 without Triton
+([#55847](https://github.com/vllm-project/vllm/pull/55847),
+[#60924](https://github.com/vllm-project/vllm/pull/60924)). When
+`gpu_input_batch` goes away, follow what the CPU runner moves to.
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
 not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
@@ -40,10 +45,15 @@ Tracked upstream:
 - [vllm-project/vllm#58703](https://github.com/vllm-project/vllm/pull/58703) —
   adds `Platform.supports_v2_model_runner`; the plugin overrides it to `False`
   to opt out of the Triton probe (harmless no-op on vLLM builds without the
-  hook).
+  hook). Parked: the reviewer prefers to wait for the MRV1 removal plan.
+- [vllm-project/vllm#62576](https://github.com/vllm-project/vllm/pull/62576)
+  (open) moves the MRV2 Triton check from config validation to
+  `gpu_worker.Worker`. It keeps the MRV1 fallback for every platform except
+  the unspecified one, and the plugin's worker does not derive from
+  `gpu_worker.Worker`, so it does not affect the plugin.
 
-Open questions on #57684 (whether the MRV1 removal target holds, and whether a
-replacement-runner path exists for plugins) are unanswered.
+Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
+path exists for plugins) are unanswered after two follow-ups.
 
 Since vLLM 0.32 the `Sampler` calls `torch.ops._C.greedy_argmax` whenever the
 platform reports CPU, and the PyPI-style wheel has no CPU kernels. `platform.py`
