@@ -59,6 +59,10 @@ str_to_torch_type: dict[str, torch.dtype] = {
 }
 
 USED_MEMORY_THRESHOLD = 1.1  # 10% overhead for unaccounted memory
+# Largest dummy image prompt the warmup encodes regardless of the step size.
+# Bigger maximum-size dummies (Qwen3.5: 16k tokens) need a quadratic merger
+# mask far beyond realistic images and are skipped.
+IMAGE_WARMUP_MAX_TOKENS = 2048
 
 
 def _resolve_cache_dtype(dtype: str | None) -> str:
@@ -493,6 +497,7 @@ class OpenVINOWorkerV1(WorkerBase):
         if scheduler_output.total_num_scheduled_tokens == 0:
             if hasattr(self.model_runner, 'release_finished_conv_slots'):
                 self.model_runner.release_finished_conv_slots(scheduler_output)
+            self.model_runner.free_encoder_cache(scheduler_output)
             return ModelRunnerOutput(
                 req_ids=[],
                 req_id_to_index={},
@@ -1054,14 +1059,19 @@ class OpenVINOWorkerV1(WorkerBase):
         warmup_prompts = [([0] * (prompt_len + 1), [])]
         if image_input_enabled(self.model_config):
             image_prompt = self._image_warmup_prompt()
-            if len(image_prompt[0]) <= prompt_len + 1:
+            # The encoder runs on the whole image; the LM prefills only the
+            # first step of a longer prompt, as chunked prefill would.
+            max_image_prompt = min(max(prompt_len + 1, IMAGE_WARMUP_MAX_TOKENS),
+                                   self.model_config.max_model_len - 1)
+            if len(image_prompt[0]) <= max_image_prompt:
                 warmup_prompts.append(image_prompt)
             else:
                 logger.info("[OV-WARMUP] Skipping image warmup: dummy image "
-                            "prompt has %d tokens, above the %d-token step",
-                            len(image_prompt[0]), prompt_len + 1)
+                            "prompt has %d tokens, above %d",
+                            len(image_prompt[0]), max_image_prompt)
         tmp_cache_config = copy.copy(self.cache_config)
-        max_warmup_tokens = max(len(ids) for ids, _ in warmup_prompts)
+        max_warmup_tokens = max(min(len(ids), prompt_len + 1)
+                                for ids, _ in warmup_prompts)
         tmp_cache_config.num_gpu_blocks = math.ceil(
             max_warmup_tokens / self.cache_config.block_size) + 1
         num_state = (tmp_cache_config.num_gpu_blocks if self._la_state_bytes
@@ -1097,7 +1107,8 @@ class OpenVINOWorkerV1(WorkerBase):
         try:
             warmup_start = time.perf_counter()
             for prompt_token_ids, mm_features in warmup_prompts:
-                self._warm_up_paged_attention(prompt_token_ids, mm_features)
+                self._warm_up_paged_attention(
+                    prompt_token_ids, mm_features, prompt_len)
             runner._step_stats.reset()
             logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
                         time.perf_counter() - warmup_start)
@@ -1113,33 +1124,37 @@ class OpenVINOWorkerV1(WorkerBase):
         processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
         dummy = processor.get_dummy_mm_inputs(
             {"image": 1}, scheduler_config=self.scheduler_config)
-        # Empty identifier -> mm_hash=None in the runner, so the dummy skips the vision cache.
         features = [
             MultiModalFeatureSpec(
                 data=item,
                 modality="image",
-                identifier="",
+                identifier=f"__warmup_image_{i}__",
                 mm_position=position,
             )
-            for item, position in zip(
-                dummy["mm_kwargs"]["image"], dummy["mm_placeholders"]["image"])
+            for i, (item, position) in enumerate(zip(
+                dummy["mm_kwargs"]["image"], dummy["mm_placeholders"]["image"]))
         ]
         return list(dummy["prompt_token_ids"]), features
 
     def _warm_up_paged_attention(
         self, prompt_token_ids: list[int],
         mm_features: list[MultiModalFeatureSpec],
+        max_prefill_tokens: int | None = None,
     ) -> None:
-        """Run one prefill and one decode step to warm kernels before measurement."""
+        """Run one prefill step, and a decode step when the prefill covers the
+        whole prompt, to warm kernels before measurement."""
         from vllm.v1.core.sched.output import CachedRequestData
         runner = self.model_runner
         total_len = len(prompt_token_ids)
+        num_prefill = total_len - 1
+        if max_prefill_tokens is not None:
+            num_prefill = min(num_prefill, max_prefill_tokens)
         params = SamplingParams(temperature=0.0, max_tokens=2)
-        num_warmup_blocks = math.ceil(total_len / runner.block_size)
+        num_warmup_blocks = math.ceil((num_prefill + 1) / runner.block_size)
         block_ids = tuple(list(range(num_warmup_blocks))
                           for _ in range(runner.num_cache_groups))
 
-        def step(req_id, num_computed, finished, features):
+        def step(req_id, num_computed, num_tokens, finished, features):
             new_req = NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=prompt_token_ids,
@@ -1150,25 +1165,27 @@ class OpenVINOWorkerV1(WorkerBase):
                 num_computed_tokens=num_computed,
                 lora_request=None,
             )
-            num_tokens = total_len - 1 if num_computed == 0 else 1
             return SchedulerOutput(
                 scheduled_new_reqs=[new_req],
                 scheduled_cached_reqs=CachedRequestData.make_empty(),
                 num_scheduled_tokens={req_id: num_tokens},
                 total_num_scheduled_tokens=num_tokens,
                 scheduled_spec_decode_tokens={},
-                scheduled_encoder_inputs={},
+                scheduled_encoder_inputs=(
+                    {req_id: list(range(len(features)))} if features else {}),
                 num_common_prefix_blocks=[0],
                 finished_req_ids=finished,
                 free_encoder_mm_hashes=[],
             )
 
         try:
-            runner.execute_model(step("__warmup_prefill__", 0, set(), mm_features))
+            runner.execute_model(step("__warmup_prefill__", 0, num_prefill,
+                                      set(), mm_features))
             runner.sample_tokens(None)
-            runner.execute_model(step("__warmup_decode__", total_len - 1,
-                                      {"__warmup_prefill__"}, []))
-            runner.sample_tokens(None)
+            if num_prefill == total_len - 1:
+                runner.execute_model(step("__warmup_decode__", total_len - 1, 1,
+                                          {"__warmup_prefill__"}, []))
+                runner.sample_tokens(None)
         finally:
             runner._update_states(SchedulerOutput(
                 scheduled_new_reqs=[],
@@ -1179,7 +1196,7 @@ class OpenVINOWorkerV1(WorkerBase):
                 scheduled_encoder_inputs={},
                 num_common_prefix_blocks=[0],
                 finished_req_ids={"__warmup_prefill__", "__warmup_decode__"},
-                free_encoder_mm_hashes=[],
+                free_encoder_mm_hashes=[f.identifier for f in mm_features],
             ))
 
     def update_max_model_len(self, max_model_len: int) -> None:

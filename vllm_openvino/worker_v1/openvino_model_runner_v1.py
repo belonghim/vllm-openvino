@@ -145,6 +145,10 @@ class OpenVINOModelRunnerV1:
 
         # Track requests that have multimodal features.
         self._mm_req_ids: set[str] = set()
+        # Merged vision embeddings keyed by mm_hash. The scheduler decides
+        # what is encoded (scheduled_encoder_inputs) and when it is dropped
+        # (free_encoder_mm_hashes), as in upstream's GPU model runner.
+        self.encoder_cache: dict[str, np.ndarray] = {}
         self._new_req_ids: set[str] = set()
         self._step_stats = StepStatsLogger()
 
@@ -337,8 +341,38 @@ class OpenVINOModelRunnerV1:
     def get_model(self) -> nn.Module:
         return self.model
 
+    def free_encoder_cache(self, scheduler_output: SchedulerOutput) -> None:
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash, None)
+
+    def _execute_mm_encoder(self, scheduler_output: SchedulerOutput) -> None:
+        if not self.model.use_vision_embeddings_model:
+            return
+        for req_id, input_ids in scheduler_output.scheduled_encoder_inputs.items():
+            mm_features = self.requests[req_id].mm_features
+            for input_id in input_ids:
+                mm_feature = mm_features[input_id]
+                mm_item = mm_feature.data
+                if "pixel_values" in mm_item:
+                    pixels = mm_item["pixel_values"].data
+                else:
+                    pixels = next(elem.data for elem in mm_item.values()
+                                  if hasattr(elem.data, 'shape'))
+                pixel_position_ids = (mm_item["pixel_position_ids"].data
+                                      if "pixel_position_ids" in mm_item else None)
+                if "image_grid_thw" in mm_item:
+                    image_grid_thw = mm_item["image_grid_thw"].data
+                elif "tgt_sizes" in mm_item:
+                    image_grid_thw = mm_item["tgt_sizes"].data
+                else:
+                    image_grid_thw = None
+                self.encoder_cache[mm_feature.identifier] = self.model.encode_image(
+                    pixels, pixel_position_ids, image_grid_thw)
+
     def _update_states(self, scheduler_output: SchedulerOutput) -> None:
         """Update cached request states from scheduler output."""
+        self.free_encoder_cache(scheduler_output)
+
         # Remove finished requests
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -602,11 +636,8 @@ class OpenVINOModelRunnerV1:
 
         multi_modal_kwargs = {}
         if req_spans:
-            all_pixel_values = []
-            all_pixel_position_ids = []
-            all_image_grid_thw = []
+            mm_embeds = []
             all_image_position_ids = []
-            all_mm_hashes = []
             step_tokens = sum(
                 scheduler_output.num_scheduled_tokens[req_id]
                 for req_id in req_ids)
@@ -619,29 +650,14 @@ class OpenVINOModelRunnerV1:
                     pos = mm_feature.mm_position
                     lo = max(pos.offset, num_computed)
                     hi = min(pos.offset + pos.length, chunk_end)
-                    mm_item = mm_feature.data
-                    if lo >= hi or mm_item is None:
+                    embeds = self.encoder_cache.get(mm_feature.identifier)
+                    if lo >= hi or embeds is None:
                         continue
                     runs = self._embed_runs(pos, lo, hi)
                     if not runs:
                         continue
-                    if "pixel_values" in mm_item:
-                        pixels = mm_item["pixel_values"].data
-                    else:
-                        pixels = next(
-                            (elem.data for elem in mm_item.values()
-                             if hasattr(elem.data, 'shape')), None)
-                    if pixels is None:
-                        continue
-                    all_pixel_values.append(pixels)
-                    if "pixel_position_ids" in mm_item:
-                        all_pixel_position_ids.append(
-                            mm_item["pixel_position_ids"].data)
-                    if "image_grid_thw" in mm_item:
-                        all_image_grid_thw.append(mm_item["image_grid_thw"].data)
-                    elif "tgt_sizes" in mm_item:
-                        all_image_grid_thw.append(mm_item["tgt_sizes"].data)
-                    image_idx = len(all_pixel_values) - 1
+                    mm_embeds.append(embeds)
+                    image_idx = len(mm_embeds) - 1
                     for run_lo, run_hi, patch_offset in runs:
                         all_image_position_ids.append(
                             (batch_start + run_lo - num_computed,
@@ -650,20 +666,11 @@ class OpenVINOModelRunnerV1:
                         step_token_types[
                             batch_start + run_lo - num_computed:
                             batch_start + run_hi - num_computed] = 1
-                    all_mm_hashes.append(mm_feature.identifier or None)
 
-            if all_pixel_values:
-                multi_modal_kwargs["pixel_values"] = [
-                    t.to(self.device) for t in all_pixel_values]
-                if all_pixel_position_ids:
-                    multi_modal_kwargs["pixel_position_ids"] = [
-                        t.to(self.device) for t in all_pixel_position_ids]
-                if all_image_grid_thw:
-                    multi_modal_kwargs["image_grid_thw"] = [
-                        t.to(self.device) for t in all_image_grid_thw]
+            if mm_embeds:
+                multi_modal_kwargs["mm_embeds"] = mm_embeds
                 multi_modal_kwargs["image_position_ids"] = torch.tensor(
-                    all_image_position_ids, dtype=torch.int64).to(self.device)
-                multi_modal_kwargs["mm_hashes"] = all_mm_hashes
+                    all_image_position_ids, dtype=torch.int64)
                 multi_modal_kwargs["token_type_ids"] = step_token_types
 
         if max_query_len <= 0:
@@ -756,6 +763,11 @@ class OpenVINOModelRunnerV1:
                 self.model.recreate_infer_request()
 
         self._new_req_ids.clear()
+
+        if scheduler_output.scheduled_encoder_inputs:
+            encoder_start = time.perf_counter()
+            self._execute_mm_encoder(scheduler_output)
+            self._step_stats.add(other=time.perf_counter() - encoder_start)
 
         waves = (self._la_dependency_waves(scheduler_output)
                  if self._la_interval and self.requests else None)

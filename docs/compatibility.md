@@ -227,8 +227,11 @@ text because of prefill vs decode numerics.
   without restoring that state (repeated long prompts gave different, wrong
   answers). Pure-attention PA models and Hybrid-PA models without
   speculative decoding keep it enabled.
-- Multimodal requests are encoded per image (own grid, merger attention and
-  cache entry) and scattered by explicit
+- Multimodal requests are encoded per image (own grid and merger attention)
+  when vLLM's scheduler lists the image in `scheduled_encoder_inputs`; the
+  merged embeddings stay in the runner's encoder cache until the scheduler
+  frees them (`free_encoder_mm_hashes`), so an image split across steps is
+  encoded once. Embeddings are scattered by explicit
   `(batch_start, batch_end, patch_offset, image_index)` rows (one per contiguous
   `is_embed` run of the placeholder), so concurrent requests, differently sized images, multi-image prompts and
   images split by chunked prefill are handled. For text-only serving of a
@@ -246,10 +249,14 @@ text because of prefill vs decode numerics.
   post-load memory measurement, so the CPU plugin's first-infer weight repack
   and prefill buffers are part of the measured baseline;
   `compile_or_warm_up_model` skips its own copy. The warmup prefill is
-  `max_num_batched_tokens` long, and multimodal models also prefill one
-  maximum-size dummy image from vLLM's dummy-input processor (skipped when the
-  image limit is 0 or the dummy prompt exceeds one step, e.g. Qwen3.5's
-  16k-token dummy image). With a 16-token warmup the 26B baseline was 16.9 GB
+  `max_num_batched_tokens` long, and multimodal models also encode one
+  maximum-size dummy image from vLLM's dummy-input processor and prefill the
+  first step of its prompt (skipped when the image limit is 0 or the dummy
+  prompt exceeds both 2048 tokens and one step, e.g. Qwen3.5's 16k-token dummy
+  image). At `--max-num-batched-tokens 256`, leaving out the image would put
+  the baseline 0.52 GB low on gemma-4-E2B (259-token prompt) and 0.58 GB low
+  on MiniCPM-V 4.7 (679 tokens), and the pool that much too large. With a
+  16-token warmup the 26B baseline was 16.9 GB
   and the pool OOM-killed under full residency; with the full-step text and
   image warmup it is 19.8 GB and the same loads pass. The startup cost is
   26 s on the 26B and 11 s on E2B. Hybrid-PA prefix caching needs one
