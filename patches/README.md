@@ -51,8 +51,14 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   fewer than 4 routed rows (+28/-11, same two files plus a test comment). On master
   31489b9c: `ov_cpu_func_tests` MoE/GroupedMatMul filter 329 passed, 240 with
   `OV_CPU_MAX_ISA=AVX2`. Zen 4, 8 CPUs, LFM2.5-8B-A1B: prefill at 1024 tokens 421 tok/s
-  (bf16), 165 tok/s (AVX2 f32); 2-token chunk 54 ms (stock 49). The 4-row threshold is
-  untested on AMX; the #38830 author was asked to try it on Xeon 6972P.
+  (bf16), 165 tok/s (AVX2 f32), 286 tok/s (AVX-512 f32, stock 110); 2-token chunk 54 ms
+  (stock 49). The 4-row threshold is untested on AMX; the #38830 author was asked to try
+  it on Xeon 6972P.
+- maxnick is running performance validation on more hardware. On AMX the PR replaces
+  #38830's 16-row GEMM with GEMV for experts with fewer than 4 rows, which may be slower
+  there, so I offered to keep the fallback off on bf16 AMX. That variant is ready
+  (`~/build/gathermatmul-followup-amx.patch`, branch `follow-up-gemm-all-amx`, same
+  test results); push it only if maxnick agrees.
 
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
 - If the release contains #39086, or #37444 replaces the path, delete the `COPY` line
