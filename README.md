@@ -165,6 +165,8 @@ Caveat: on this plugin, `NUM_STREAMS=AUTO` under `THROUGHPUT` fragments threads 
 
 Splitting a fixed thread budget across sockets costs 12–18% because the threads on the far socket read the weights over the interconnect, and doubling the thread count across both sockets buys at most ~9% and only under load. `MPOL_INTERLEAVE` across both nodes (`numactl --interleave=all` or the equivalent `set_mempolicy` syscall) does not close the gap — 29.7 vs 30.0 tok/s on the same 24-thread dual-socket run — so the bottleneck is memory bandwidth, not weight locality. Keep inference threads inside one socket by binding the process to that socket's CPU set and setting `VLLM_OPENVINO_CPU_THREADS_NUM` to its core count.
 
+Running several engines instead (`--data-parallel-size` with one engine per socket or per L3/CCD group) is not expected to help either: on one socket every engine shares the same memory bandwidth, and each engine holds its own copy of the weights and its own KV pool. This is inferred from the numbers above, not measured.
+
 Example (latency-optimized for AVX2, 2-socket Xeon):
 
 ```bash
