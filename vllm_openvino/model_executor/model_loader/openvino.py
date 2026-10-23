@@ -575,7 +575,6 @@ class OpenVINOCausalLM(nn.Module):
     def warmup(self) -> None:
         if self._has_kv_cache_inputs:
             return
-        warmup_failed = False
         try:
             dummy_ids = np.zeros((1, 1), dtype=np.int64)
             if hasattr(self, 'text_emb_request') and self.text_emb_request is not None:
@@ -644,8 +643,10 @@ class OpenVINOCausalLM(nn.Module):
             self.recreate_infer_request()
             logger.info("[OV-WARMUP] Stateful model warmup completed")
         except Exception as e:
-            warmup_failed = True
-            logger.warning("[OV-WARMUP] Warmup failed: %s", e)
+            logger.warning(
+                "[OV-WARMUP] Stateful warmup failed (%s); the first request "
+                "runs the first infer, so the post-load memory measurement "
+                "may miss the CPU plugin's weight repack.", e)
             try:
                 self.recreate_infer_request()
             except Exception as recreate_error:
@@ -653,8 +654,6 @@ class OpenVINOCausalLM(nn.Module):
                     "[OV-WARMUP] recreate_infer_request failed after warmup failure: %s",
                     recreate_error,
                 )
-        if warmup_failed:
-            logger.warning("[OV-WARMUP] Warmup encountered recoverable failure")
 
     def _get_flat_kv_caches_template(
         self,

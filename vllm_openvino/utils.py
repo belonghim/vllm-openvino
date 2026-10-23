@@ -136,16 +136,24 @@ def detect_cgroup_memory_limit() -> int | None:
     return None
 
 
+def _read_field(path: str, prefix: str, scale: int = 1, warn: bool = True) -> int:
+    """Value of the first ``prefix`` line in ``path`` times ``scale``; 0 if unreadable."""
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith(prefix):
+                    return int(line.split()[1]) * scale
+    except (OSError, ValueError, IndexError):
+        pass
+    if warn:
+        logger.warning_once("[OV-UTILS] Could not read %r from %s.",
+                            prefix.rstrip(": "), path)
+    return 0
+
+
 def get_process_rss_bytes() -> int:
     """Read current process RSS from /proc/self/status (Linux)."""
-    try:
-        with open('/proc/self/status') as f:
-            for line in f:
-                if line.startswith('VmRSS:'):
-                    return int(line.split()[1]) * 1024  # kB → bytes
-    except (OSError, ValueError):
-        pass
-    return 0
+    return _read_field('/proc/self/status', 'VmRSS:', 1024)
 
 
 def get_process_anon_rss_bytes() -> int:
@@ -155,14 +163,7 @@ def get_process_anon_rss_bytes() -> int:
     reclaims under pressure and re-faults from disk; sizing a buffer against
     VmRSS would treat those pages as committed. RssAnon excludes them.
     """
-    try:
-        with open('/proc/self/status') as f:
-            for line in f:
-                if line.startswith('RssAnon:'):
-                    return int(line.split()[1]) * 1024  # kB → bytes
-    except (OSError, ValueError):
-        pass
-    return 0
+    return _read_field('/proc/self/status', 'RssAnon:', 1024)
 
 
 def get_cgroup_memory_usage_bytes() -> int:
@@ -172,37 +173,14 @@ def get_cgroup_memory_usage_bytes() -> int:
     memory.current includes reclaimable file-backed page cache which can
     inflate to the container limit even when committed memory is much less.
     """
-    try:
-        with open('/sys/fs/cgroup/memory.stat') as f:
-            for line in f:
-                if line.startswith('anon '):
-                    value = int(line.split()[1])
-                    if value > 0:
-                        return value
-    except (OSError, ValueError):
-        pass
-    try:
-        with open('/sys/fs/cgroup/memory/memory.stat') as f:
-            for line in f:
-                if line.startswith('rss '):
-                    value = int(line.split()[1])
-                    if value > 0:
-                        return value
-    except (OSError, ValueError):
-        pass
-    return 0
+    return (_read_field('/sys/fs/cgroup/memory.stat', 'anon ', warn=False)
+            or _read_field('/sys/fs/cgroup/memory/memory.stat', 'rss ',
+                           warn=False))
 
 
 def get_mem_available_bytes() -> int:
     """MemAvailable from /proc/meminfo, 0 if unreadable."""
-    try:
-        with open('/proc/meminfo') as f:
-            for line in f:
-                if line.startswith('MemAvailable:'):
-                    return int(line.split()[1]) * 1024  # kB → bytes
-    except (OSError, ValueError):
-        pass
-    return 0
+    return _read_field('/proc/meminfo', 'MemAvailable:', 1024)
 
 
 def detect_memory_limit() -> int | None:

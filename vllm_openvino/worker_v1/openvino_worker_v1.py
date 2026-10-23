@@ -890,6 +890,15 @@ class OpenVINOWorkerV1(WorkerBase):
                     "[OV-WORKER] Post-load anon RSS %s, VmRSS %s",
                     format_memory_size(rss),
                     format_memory_size(get_process_rss_bytes()))
+            else:
+                logger.warning(
+                    "[OV-WORKER] Could not measure process memory after model "
+                    "load; keeping the startup KV pool estimate (%s), which "
+                    "does not include the CPU plugin's weight repack. Set "
+                    "VLLM_OPENVINO_KVCACHE_SPACE explicitly if the container "
+                    "is close to its memory limit.",
+                    format_memory_size(
+                        self.cache_config.openvino_kvcache_space_bytes))
             if rss > 0 and envs.VLLM_OPENVINO_KVCACHE_SPACE == 0:
                 kvcache_before = self.cache_config.openvino_kvcache_space_bytes
                 kvcache_after = auto_kv_cache_bytes(rss, self.model_config)
