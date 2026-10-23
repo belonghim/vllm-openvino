@@ -142,6 +142,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self._la_state_bytes = 0
         self._kv_blocks_per_block = 1
         self._warmed_up = False
+        self.cache_dtype: str | None = None
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
         # hybrid-model state tensors even before load_model() is called.
@@ -385,7 +386,7 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def _kv_cache_dtype(self) -> str:
         return _resolve_cache_dtype(
-            getattr(self, 'cache_dtype', None)
+            self.cache_dtype
             or getattr(self.cache_config, 'openvino_kv_dtype', None))
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -433,9 +434,7 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def _init_cache_engine(self) -> None:
         ov_device = envs.VLLM_OPENVINO_DEVICE
-        detected_dtype = _resolve_cache_dtype(
-            getattr(self, 'cache_dtype', None)
-            or getattr(self.cache_config, 'openvino_kv_dtype', None))
+        detected_dtype = self._kv_cache_dtype()
         # IR-detected precision wins; cache_dtype stays a vLLM CacheDType
         # literal (validated during KV cache layout resolution).
         self.cache_config.openvino_kv_dtype = detected_dtype
@@ -561,9 +560,7 @@ class OpenVINOWorkerV1(WorkerBase):
         ssm_cache_config = [] if is_hybrid_pa else self.ssm_cache_config
         conv_cache_config = [] if is_hybrid_pa else self.conv_cache_config
         return OpenVINOCacheEngine.get_cache_block_size(
-            _resolve_cache_dtype(
-                getattr(self, 'cache_dtype', None)
-                or getattr(self.cache_config, 'openvino_kv_dtype', None)),
+            self._kv_cache_dtype(),
             self.key_cache_config,
             self.value_cache_config,
             ssm_cache_config,
@@ -753,9 +750,7 @@ class OpenVINOWorkerV1(WorkerBase):
         # "dynamic"/unresolved cache_config.cache_dtype, or block sizing
         # here diverges from actual cache allocation and corrupts memory
         # under concurrency.
-        cache_type = _resolve_cache_dtype(
-            getattr(self, 'cache_dtype', None)
-            or getattr(self.cache_config, 'openvino_kv_dtype', None))
+        cache_type = self._kv_cache_dtype()
         if cache_type not in str_to_torch_type:
             raise ValueError(f"Unexpected cache type {cache_type!r}")
         kv_cache_spec = {}
@@ -858,9 +853,7 @@ class OpenVINOWorkerV1(WorkerBase):
     def determine_available_memory(self) -> int:
         """Determines how much memory is needed for KV-cache
         """
-        cache_dtype = _resolve_cache_dtype(
-            getattr(self, 'cache_dtype', None)
-            or getattr(self.cache_config, 'openvino_kv_dtype', None))
+        cache_dtype = self._kv_cache_dtype()
         self.cache_config.openvino_kv_dtype = cache_dtype
         self.cache_config.cache_dtype = canonical_vllm_cache_dtype(cache_dtype)
         cache_block_size = self.get_cache_block_size_bytes()
@@ -1220,9 +1213,7 @@ class OpenVINOWorkerV1(WorkerBase):
             return 0
         num_conv_slots = num_state_slots(self.vllm_config)
         per_slot_bytes = OpenVINOCacheEngine.get_cache_block_size(
-            _resolve_cache_dtype(
-                getattr(self, 'cache_dtype', None)
-                or getattr(self.cache_config, 'openvino_kv_dtype', None)),
+            self._kv_cache_dtype(),
             [], [],
             self.ssm_cache_config, self.conv_cache_config)
         return per_slot_bytes * num_conv_slots
