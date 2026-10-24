@@ -217,8 +217,10 @@ class OpenVINOCacheEngine:
             total_elements += _dim_len(key_cache_shape[1]) * _dim_len(key_cache_shape[2], 2) * _dim_len(key_cache_shape[3])
             total_elements += _dim_len(value_cache_shape[1]) * _dim_len(value_cache_shape[2], 2) * _dim_len(value_cache_shape[3])
 
-        # SSM/conv state is always fp32 in OV IR; scale into KV-dtype units.
         kv_type_size = str_to_ov_type[normalized].size
+        total_bytes = kv_type_size * total_elements
+
+        # SSM/conv state is always fp32 in OV IR.
         for state_cache in (ssm_cache_config, conv_cache_config):
             if not state_cache:
                 continue
@@ -226,9 +228,9 @@ class OpenVINOCacheEngine:
                 elements = 1
                 for dim_idx, dim in enumerate(state_shape[1:], start=1):
                     elements *= _dim_len(dim, dim_idx)
-                total_elements += elements * (FP32_BYTES / kv_type_size)
+                total_bytes += elements * FP32_BYTES
 
-        return kv_type_size * total_elements
+        return total_bytes
 
     # --- KVCache Interface Methods ---
 
