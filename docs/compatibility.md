@@ -357,6 +357,37 @@ logits identical to the untrimmed run), but the trim copies all states at
 the stateful path serves one request at a time and is maintenance-only.
 Gemma-4 runs n-gram speculation on the PA path.
 
+## Performance Profile
+
+Measured on Ryzen 9 7900 (no AMX), 8-CPU quota, OpenVINO 2026.4.1, greedy
+decode. Where the time goes, so tuning effort is not spent in the wrong place:
+
+- **Runner overhead is negligible.** Qwen2.5-Coder-0.5B-int4: client inter-token
+  latency 13.7 ms (1 request) / 19.8 ms (8) vs step time 13.9 / 20.1 ms; `infer`
+  is ~95% of the step, input preparation 0.1 ms, sampling 0.5-1.1 ms. The same IR
+  run as a plain stateful model in OpenVINO decodes in 13.3 ms (LATENCY) /
+  14.5 ms (THROUGHPUT), so the PagedAttention transformation costs nothing.
+  `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` made no difference in the server.
+- **KV precision: the `u8` default is the fastest.** Qwen3-1.7B-int4 decode at
+  1.2k / 4.5k / 8.7k / 17.5k context tokens: `u8` 36 / 43 / 51 / 70 ms,
+  `f16` 37 / 47 / 59 / 89 ms, `bf16` 37 / 48 / 61 / 88 ms; prefill speed is the
+  same for all three. Greedy outputs diverge after 40-480 characters for every
+  pair, including `f16` vs `bf16`, so no `u8`-specific degradation showed, but
+  no accuracy metric was run.
+- **Long-context prefill slows down.** Qwen3-1.7B-int4 `u8`: 845 / 732 / 607 /
+  403 tok/s at the same four context lengths, consistent with attention
+  becoming about half of the time at 17k tokens. The OpenVINO node profile
+  (`PERF_COUNT`) did not sum to the step time, so it was not used for shares.
+- **MoE decode is expert matmul.** `GatherMatmulCompressed` is ~62%
+  (LFM2.5-8B-A1B) to ~78% (Gemma-4 26B-A4B) of the node time and attention
+  2-4%. Decode is 34 ms/token on LFM2.5-8B-A1B and ~90 ms/token on Gemma-4
+  26B-A4B. This is OpenVINO CPU kernel time, not plugin code.
+- **Prefill speed:** Qwen3-1.7B-int4 ~840 tok/s at 1k tokens; LFM2.5-8B-A1B
+  ~516 tok/s at 2.3k (patched plugin); Gemma-4 26B-A4B ~170-250 tok/s at 2.4k
+  (first requests are slower while mmapped weights fault in).
+- **Prefix caching works on the PA path:** an 8.6k-token prompt took 14.4 s
+  the first time and 0.19 s when repeated.
+
 ## Known Limitations
 
 - Stateful models do not support concurrent request execution.
