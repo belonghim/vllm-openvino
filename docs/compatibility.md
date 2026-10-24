@@ -429,11 +429,30 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   `DYNAMIC_QUANTIZATION_GROUP_SIZE=128` (not exposed by the plugin; tested by
   patching a scratch copy of the loader): matmul 2.7-2.8 TFLOP/s and server
   prefill 888 -> 1148 tok/s at 1k tokens and 752 -> 935 at 4k (+29% / +24%),
-  decode unchanged (28.6-29.3 tok/s). The cost is accuracy: against
-  no dynamic quantization (`0`; prefill 625 / 560 tok/s), 24 first-token
-  distributions had mean KL 0.022 nats at 32 and 0.053 at 128 (top-1
-  agreement 23/24 for both), so it is a speed/accuracy trade and was not made
-  the default.
+  decode unchanged (28.6-29.3 tok/s). Accuracy was compared with a
+  larger sample (56 first-token distributions of 300 / 1k / 3k / 6k-token
+  prompts per model, top-20 KL against no dynamic quantization, `0`):
+
+  | | prefill 1k / 4k (tok/s) | mean KL (nats) | top-1 agreement |
+  |---|---|---|---|
+  | Qwen3-1.7B, 0 | 627 / 560 | - | - |
+  | Qwen3-1.7B, 32 (default) | 877 / 755 | 0.032 | 55/56 |
+  | Qwen3-1.7B, 64 | 1031 / 863 | 0.031 | 55/56 |
+  | Qwen3-1.7B, 128 | 1155 / 940 | 0.040 | 56/56 |
+  | Qwen2.5-Coder-0.5B, 0 | 2241 / 1918 | - | - |
+  | Qwen2.5-Coder-0.5B, 32 | 3124 / 2450 | 0.033 | 54/56 |
+  | Qwen2.5-Coder-0.5B, 64 | 3610 / 2767 | 0.051 | 55/56 |
+  | Qwen2.5-Coder-0.5B, 128 | 3857 / 2911 | 0.042 | 53/56 |
+
+  Larger groups buy +17-18% (64) and +23-32% (128) prefill, but the default
+  already deviates from unquantized activations by ~0.03 nats and the extra
+  deviation of 64/128 (0.00-0.02) is within the noise of this sample (it is
+  not monotonic on Qwen2.5-Coder; 48-token greedy output matched the
+  unquantized run on only 1-3 of 8 prompts for every setting, including the
+  default). An earlier 24-prompt run suggested 2.4x the KL at 128; the larger
+  sample does not support that. KL grows with prompt length for all settings
+  (Qwen3: 0.01-0.03 at 300 tokens, 0.09-0.11 at 6k). The default was kept
+  because the cost, though small, could not be ruled out.
 - **Concurrency scaling (decode-heavy, 8 CPUs).** N simultaneous requests,
   ~15-token prompts, 256 output tokens each, `ignore_eos`; aggregate output
   tok/s (default `max_num_seqs` 128):
