@@ -426,8 +426,9 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   weights and 2.1-2.2 with int4 weights at the default
   `DYNAMIC_QUANTIZATION_GROUP_SIZE` 32 (256 tokens: 2.7), so prefill has no
   headroom left at the default beyond kernel work. The one lever found is
-  `DYNAMIC_QUANTIZATION_GROUP_SIZE=128` (not exposed by the plugin; tested by
-  patching a scratch copy of the loader): matmul 2.7-2.8 TFLOP/s and server
+  `DYNAMIC_QUANTIZATION_GROUP_SIZE=128` (exposed as
+  `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE`, unset by default; measured
+  with a scratch patch before the variable existed): matmul 2.7-2.8 TFLOP/s and server
   prefill 888 -> 1148 tok/s at 1k tokens and 752 -> 935 at 4k (+29% / +24%),
   decode unchanged (28.6-29.3 tok/s). Accuracy was compared with a
   larger sample (56 first-token distributions of 300 / 1k / 3k / 6k-token
@@ -452,7 +453,7 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   default). An earlier 24-prompt run suggested 2.4x the KL at 128; the larger
   sample does not support that. KL grows with prompt length for all settings
   (Qwen3: 0.01-0.03 at 300 tokens, 0.09-0.11 at 6k). The default was kept
-  because the cost, though small, could not be ruled out.
+  because the cost, though small, could not be ruled out; the variable is opt-in.
 - **Concurrency scaling (decode-heavy, 8 CPUs).** N simultaneous requests,
   ~15-token prompts, 256 output tokens each, `ignore_eos`; aggregate output
   tok/s (default `max_num_seqs` 128):

@@ -424,6 +424,10 @@ class OpenVINOCausalLM(nn.Module):
             if enable_pinning is not None:
                 cpu_hint[hints.enable_cpu_pinning()] = enable_pinning
 
+            dq_group_size = envs.VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE
+            if dq_group_size is not None:
+                cpu_hint["DYNAMIC_QUANTIZATION_GROUP_SIZE"] = dq_group_size
+
             core_type = envs.VLLM_OPENVINO_SCHEDULING_CORE_TYPE
             if core_type:
                 core_type_enum = getattr(hints.SchedulingCoreType, core_type, None)

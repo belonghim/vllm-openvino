@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_ENABLE_HYPER_THREADING: bool | None = None
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
+    VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE: int | None = None
     VLLM_OPENVINO_STATEFUL_PA: bool = True
     VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER: int = 8
     VLLM_OPENVINO_CACHE_DIR: str | None = None
@@ -44,6 +45,20 @@ def _env_float(name: str, default: str) -> float:
         return float(val)
     except ValueError:
         raise ValueError(f"Invalid value for {name}={val!r}: expected a number.")
+
+
+def _env_optional_uint(name: str) -> int | None:
+    val = os.getenv(name, "").strip()
+    if not val:
+        return None
+    try:
+        out = int(val)
+    except ValueError:
+        out = -1
+    if out < 0:
+        raise ValueError(
+            f"Invalid value for {name}={val!r}: expected a non-negative integer.")
+    return out
 
 
 def _env_int(name: str, default: str) -> int:
@@ -105,6 +120,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # pinned to specific CPU cores to avoid migration penalties.
     "VLLM_OPENVINO_ENABLE_CPU_PINNING":
     lambda: _env_tristate("VLLM_OPENVINO_ENABLE_CPU_PINNING"),
+
+    # CPU-only: group size of the dynamic int8 quantization of activations in
+    # compressed-weight matmuls. Unset = OpenVINO default (32); 0 disables it.
+    # Larger groups raise prefill speed (compute bound) at a small, hard to
+    # measure accuracy cost; decode (bandwidth bound) is unaffected.
+    "VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE":
+    lambda: _env_optional_uint("VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE"),
 
     # PagedAttention transformation for plain-attention stateful models
     # (ReadValue-based KV cache, e.g. optimum-intel default exports like
