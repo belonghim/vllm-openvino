@@ -386,9 +386,14 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   experts scaled by top-k / experts, everything else read in full, tied
   `lm_head` included) over the step time: LFM2.5-8B-A1B 1.0 GB in 34 ms
   (29.5 GB/s), Gemma-4 26B-A4B 2.4 GB in 90 ms (26.9 GB/s), Qwen3-1.7B-int4
-  1.18 GB in 36 ms (~32 GB/s). Decode on this 8-CPU setup is memory-bandwidth
-  bound at ~27-32 GB/s for dense and MoE alike, so only reading fewer bytes
-  (smaller weights, fewer active experts) makes it faster.
+  1.18 GB in 36 ms (~32 GB/s). Decode is memory-bandwidth bound at ~27-32 GB/s
+  for dense and MoE alike, so only reading fewer bytes (smaller weights, fewer
+  active experts) makes it faster. Evidence: a read-only AVX2 sum over 2 GB
+  reaches 43 GB/s on 1 thread and 45-48 GB/s on 2-24 threads on this machine,
+  and plain OpenVINO stateful decode of Qwen3-1.7B-int4 is flat from 4 to 24
+  threads (33.5 / 33.8 / 34.2 / 34.5 / 34.5 ms at 4 / 8 / 12 / 16 / 24), about
+  35 GB/s or ~75% of that ceiling. Decode needs only ~4 CPUs; extra CPUs help
+  prefill and batched decode, not single-stream decode.
 - **Prefill speed:** Qwen3-1.7B-int4 ~840 tok/s at 1k tokens; LFM2.5-8B-A1B
   ~516 tok/s at 2.3k (patched plugin); Gemma-4 26B-A4B ~170-250 tok/s at 2.4k
   (first requests are slower while mmapped weights fault in).
