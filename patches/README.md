@@ -60,6 +60,11 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   there, so I offered to keep the fallback off on bf16 AMX. That variant is ready
   (`~/build/gathermatmul-followup-amx.patch`, branch `follow-up-gemm-all-amx`, same
   test results); push it only if maxnick agrees.
+- Thread scaling, Zen 4 (12C/24T, host shared with VMs), LFM2.5-8B-A1B, stock -> #39086,
+  prefill at 1024 tokens: bf16 107 -> 431 / 123 -> 465 / 123 -> 456 tok/s and f32
+  109 -> 272 / 111 -> 308 / 127 -> 308 tok/s at 8 / 12 / 24 threads. Chunks of 2-4 tokens
+  stay within run-to-run spread at every thread count (f32 L=4 about 6% slower at 8
+  threads in three runs); L >= 8 is faster. No sign that more threads move the threshold.
 
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
 - If the release contains #39086, or #37444 replaces the path, delete the `COPY` line
