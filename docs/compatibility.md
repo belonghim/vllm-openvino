@@ -381,7 +381,13 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
 - **MoE decode is expert matmul.** `GatherMatmulCompressed` is ~62%
   (LFM2.5-8B-A1B) to ~78% (Gemma-4 26B-A4B) of the node time and attention
   2-4%. Decode is 34 ms/token on LFM2.5-8B-A1B and ~90 ms/token on Gemma-4
-  26B-A4B. This is OpenVINO CPU kernel time, not plugin code.
+  26B-A4B. This is OpenVINO CPU kernel time, not plugin code, and it is not
+  slow for what it reads: LFM2.5-8B-A1B reads about 0.8 GB of int4 weights per
+  token (4 of 32 experts in 22 layers, attention/conv/dense layers, `lm_head`),
+  an effective ~24 GB/s, the same as the dense models (Qwen3-1.7B-int4
+  ~1.1 GB per token in 36 ms, ~30 GB/s). Decode on this 8-CPU setup is
+  memory-bandwidth bound, so only reading fewer bytes (smaller weights, fewer
+  active experts) makes it faster.
 - **Prefill speed:** Qwen3-1.7B-int4 ~840 tok/s at 1k tokens; LFM2.5-8B-A1B
   ~516 tok/s at 2.3k (patched plugin); Gemma-4 26B-A4B ~170-250 tok/s at 2.4k
   (first requests are slower while mmapped weights fault in).
