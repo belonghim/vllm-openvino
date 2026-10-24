@@ -118,8 +118,8 @@ The KV cache precision can be reduced to significantly lower memory usage:
 
 | Precision | Memory | Notes |
 |-----------|--------|-------|
-| `u8` | Lowest | 8-bit unsigned integer; smallest footprint, default for the PagedAttention-transformed stateful path |
-| `f16` / `bf16` | Medium | Good balance; `bf16` needs AVX-512-BF16 on CPU (see the warning below) |
+| `u8` | Lowest | 8-bit unsigned integer; smallest footprint and fastest decode. It is the OpenVINO CPU plugin's own default on x86_64/ARM64 (this plugin passes no precision when the variable is unset), so every PagedAttention-based path (PagedAttention, Gemma-4, Hybrid-PA) gets it |
+| `f16` / `bf16` | Medium | Good balance; `bf16` needs AVX-512-BF16 on CPU (see the warning below). On CPUs whose runtime precision is already `bf16`, the plugin ignores `f16` and stores `bf16` (the engine log shows `cache_dtype=bf16`); `f16` is honored on AVX2/f16-only CPUs |
 | `i8` / `f32` | — | Rejected by CPU PagedAttention on the PagedAttention and Hybrid-PA paths; falls back to the default with a warning |
 
 Set via environment variable:

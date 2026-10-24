@@ -73,9 +73,16 @@ The plugin selects a path from the model IR:
 Stateful plain-attention models (optimum-intel default exports, e.g.
 Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time
 by default (`VLLM_OPENVINO_STATEFUL_PA=1`): `max_num_seqs` keeps its default
-128 and the KV cache moves to the external paged cache (u8 default;
-`VLLM_OPENVINO_KV_CACHE_PRECISION` selects `u8`/`f16`/`bf16` through the
-OpenVINO `KV_CACHE_PRECISION` compile property — `f32`/`i8` are rejected by
+128 and the KV cache moves to the external paged cache (u8 default, which
+is the OpenVINO CPU plugin's own default on x86_64/ARM64 - the variable is
+unset by default and the loader then passes no `KV_CACHE_PRECISION`;
+verified on Qwen3-1.7B, Gemma-4-E2B, LFM2.5-350M (Hybrid-PA) and
+Qwen3.5-0.8B (hybrid), all `cache_type=u8`. `VLLM_OPENVINO_KV_CACHE_PRECISION`
+selects `u8`/`f16`/`bf16` through the
+OpenVINO `KV_CACHE_PRECISION` compile property; on a CPU whose runtime
+precision is bf16 the plugin replaces `f16` with `bf16` (`scaled_attn.cpp`
+`side_cache_precision`: f16 is kept only if rtPrecision is not bf16), seen
+as `key_cache.0` port type and worker `cache_dtype` both `bf16` — `f32`/`i8` are rejected by
 CPU PagedAttention and fall back to the default with a warning). Validated
 on Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B and Phi-3.5-mini (int4
 IR): concurrency-8 aggregate throughput was 4.9-7.0x the stateful path,
@@ -371,9 +378,10 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
 - **KV precision: the `u8` default is the fastest.** Qwen3-1.7B-int4 decode at
   1.2k / 4.5k / 8.7k / 17.5k context tokens: `u8` 36 / 43 / 51 / 70 ms,
   `f16` 37 / 47 / 59 / 89 ms, `bf16` 37 / 48 / 61 / 88 ms; prefill speed is the
-  same for all three. Greedy outputs diverge after 40-480 characters for every
-  pair, including `f16` vs `bf16`, so no `u8`-specific degradation showed, but
-  no accuracy metric was run.
+  same for all three. The `f16` and `bf16` rows are the same configuration on
+  this CPU (the plugin stores `bf16` for an `f16` request), so their small
+  differences are run-to-run noise. Greedy outputs diverge after 40-480
+  characters between `u8` and the 2-byte cache, but no accuracy metric was run.
 - **Long-context prefill slows down.** Qwen3-1.7B-int4 `u8`: 845 / 732 / 607 /
   403 tok/s at the same four context lengths, consistent with attention
   becoming about half of the time at 17k tokens. The OpenVINO node profile
