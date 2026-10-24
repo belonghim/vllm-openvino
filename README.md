@@ -95,6 +95,15 @@ multimodal ones). Export a HuggingFace checkpoint with
 
 For CPU deployments, especially AVX2-only systems, tuning OpenVINO CPU threading/stream properties can improve sustained tokens/sec.
 
+### What to Expect
+
+Measured on Ryzen 9 7900 (no AMX, 8-CPU quota, int4 IR); details in `docs/compatibility.md` ("Performance Profile").
+
+- **Decode is memory-bandwidth bound.** Single-stream decode runs at about 27-32 GB/s of a measured 45-48 GB/s read ceiling, on dense and MoE models alike, and the vLLM runner adds almost nothing on top. A single user needs only about 4 CPUs (Qwen3-1.7B: same speed as 8 CPUs up to 4 concurrent requests).
+- **Batch serving is compute bound.** Dense models scale almost linearly to 8-16 concurrent requests and gain little past 32; MoE models scale worse because a larger batch reads more expert weights per step. Give batch serving more CPUs (4 CPUs flatten at 318 tok/s where 8 reach 532 on Qwen3-1.7B).
+- **Prefill is compute bound** at about 2.5 TFLOP/s, which is the matmul ceiling of this CPU class, and slows down as context grows (845 to 403 tok/s from 1.2k to 17.5k tokens, Qwen3-1.7B).
+- **Keep the KV cache default.** `u8` is the fastest and its next-token distributions stayed within 0.007-0.016 nats of `bf16`.
+
 ### Memory Footprint
 
 The KV cache is reserved as one fixed-size mapping and pages become resident only as blocks are used, so RSS climbs toward `baseline + VLLM_OPENVINO_KVCACHE_SPACE` and then plateaus; size the container for that sum. vLLM's prefix caching (on by default) retains freed blocks, so unique-prompt workloads keep touching new pool pages — add `--no-enable-prefix-caching` to hold the resident set at the working set.
@@ -149,7 +158,7 @@ For older AVX2 systems, fp16 or int8 models are often a better latency/throughpu
 
 `PERFORMANCE_MODE` defaults to `THROUGHPUT` because vLLM is used for serving. Measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY (and +28% single-stream on the stateful path), at a higher first-token latency (25 ms → 34 ms). Set `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` for interactive first-token response instead.
 
-Other CPU compile properties were measured on Qwen3-1.7B-int4-ov (8-CPU quota, Ryzen 9 7900, OpenVINO 2026.4.1; concurrency 1/8, 128 tokens) and left at OpenVINO's defaults, which are already the best or equal within ~5% noise: `INFERENCE_PRECISION` (default is already bf16 here; `bf16`/`f32` change nothing), `ENABLE_CPU_PINNING` (default already on), and `DYNAMIC_QUANTIZATION_GROUP_SIZE` (default 32; 64/128 equal, disabling it or per-token costs 15%). Forcing `ENABLE_HYPER_THREADING=false` cost 13% at concurrency 8. `KEY/VALUE_CACHE_GROUP_SIZE=64` did not help.
+Other CPU compile properties were measured on Qwen3-1.7B-int4-ov (8-CPU quota, Ryzen 9 7900, OpenVINO 2026.4.1; concurrency 1/8, 128 tokens) and left at OpenVINO's defaults, which are already the best or equal within ~5% noise: `INFERENCE_PRECISION` (default is already bf16 here; `bf16`/`f32` change nothing), `ENABLE_CPU_PINNING` (default already on), and `DYNAMIC_QUANTIZATION_GROUP_SIZE` (default 32; decode is equal at 64/128, disabling it or per-token costs 15%; prefill is 24-29% faster at 128 but its next-token KL against unquantized activations is 2.4x that of 32, see `docs/compatibility.md`). Forcing `ENABLE_HYPER_THREADING=false` cost 13% at concurrency 8. `KEY/VALUE_CACHE_GROUP_SIZE=64` did not help.
 
 Caveat: on this plugin, `NUM_STREAMS=AUTO` under `THROUGHPUT` fragments threads across streams that vLLM V1 never runs concurrently — the runner holds a single `create_infer_request` and issues a single blocking `infer` per step. Setting `NUM_STREAMS=1` explicitly measured a 3.56× throughput gain on Qwen3-1.7B-int4-ov at concurrency 8 (8.53 → 30.38 tok/s), which is why the default is `1`. The same holds on hybrid-mamba models via the Hybrid-PA path: at concurrency 8 with `VLLM_OPENVINO_CPU_THREADS_NUM=24`, `NUM_STREAMS=1` vs `AUTO` measured 59.40 → 142.71 tok/s (2.40×) on LFM2.5-350M-int8-ov and 25.39 → 67.83 tok/s (2.67×) on Qwen3.5-0.8B-int4-ov (text-only) — vLLM V1 is serial regardless of model architecture, so stream fragmentation hurts dense and hybrid alike.
 

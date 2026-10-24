@@ -419,6 +419,21 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   (first requests are slower while mmapped weights fault in).
 - **Prefix caching works on the PA path:** an 8.6k-token prompt took 14.4 s
   the first time and 0.19 s when repeated.
+- **Prefill is at the matmul ceiling.** Qwen3-1.7B has 1.41 B non-embedding
+  parameters (2.8 GFLOP/token), so 888 tok/s at 1k tokens is ~2.5 TFLOP/s. A
+  standalone OpenVINO matmul with Qwen3 MLP shapes (1024 x 2048 x 6144, 8-CPU
+  quota, `bf16` inference precision) reached 1.8-1.9 TFLOP/s with `bf16`
+  weights and 2.1-2.2 with int4 weights at the default
+  `DYNAMIC_QUANTIZATION_GROUP_SIZE` 32 (256 tokens: 2.7), so prefill has no
+  headroom left at the default beyond kernel work. The one lever found is
+  `DYNAMIC_QUANTIZATION_GROUP_SIZE=128` (not exposed by the plugin; tested by
+  patching a scratch copy of the loader): matmul 2.7-2.8 TFLOP/s and server
+  prefill 888 -> 1148 tok/s at 1k tokens and 752 -> 935 at 4k (+29% / +24%),
+  decode unchanged (28.6-29.3 tok/s). The cost is accuracy: against
+  no dynamic quantization (`0`; prefill 625 / 560 tok/s), 24 first-token
+  distributions had mean KL 0.022 nats at 32 and 0.053 at 128 (top-1
+  agreement 23/24 for both), so it is a speed/accuracy trade and was not made
+  the default.
 - **Concurrency scaling (decode-heavy, 8 CPUs).** N simultaneous requests,
   ~15-token prompts, 256 output tokens each, `ignore_eos`; aggregate output
   tok/s (default `max_num_seqs` 128):
