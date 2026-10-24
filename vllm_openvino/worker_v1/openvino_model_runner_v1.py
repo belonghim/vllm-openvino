@@ -336,7 +336,7 @@ class OpenVINOModelRunnerV1:
                 and not getattr(self.model, '_has_kv_cache_inputs', True)):
             raise ValueError(
                 "ngram speculative decoding requires a PagedAttention or "
-                "Hybrid-PA model; this model fell back to the stateful path.")
+                "Hybrid-PA model; this model runs on the stateful path.")
 
     def get_model(self) -> nn.Module:
         return self.model
