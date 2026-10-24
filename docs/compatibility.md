@@ -419,6 +419,25 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   (first requests are slower while mmapped weights fault in).
 - **Prefix caching works on the PA path:** an 8.6k-token prompt took 14.4 s
   the first time and 0.19 s when repeated.
+- **Concurrency scaling (decode-heavy, 8 CPUs).** N simultaneous requests,
+  ~15-token prompts, 256 output tokens each, `ignore_eos`; aggregate output
+  tok/s (default `max_num_seqs` 128):
+
+  | N | 1 | 4 | 16 | 32 | 64 | 128 |
+  |---|---|---|---|---|---|---|
+  | Qwen3-1.7B-int4 | 29 | 101 | 327 | 469 | 508 | 532 |
+  | Qwen2.5-Coder-0.5B-int4 | 86 | 236 | 757 | 1125 | 1228 | 1340 |
+  | LFM2.5-8B-A1B-int4 (MoE) | 32 | 59 | 121 | 157 | 228 | 296 |
+
+  Dense models scale almost linearly to N=8-16 (weights are read once per
+  step), reach ~85-90% of their ceiling at N=32 and gain only 5-15% more
+  from N=32 to 128 while per-request speed halves each doubling, so N=16-32
+  is the useful range. The MoE model scales poorly because different tokens
+  select different experts, so a larger batch reads more expert weights per
+  step; it is still gaining at N=128. With 4 CPUs Qwen3-1.7B matches 8 CPUs
+  up to N=4 (29 / 99 tok/s) but flattens at 318 tok/s against 532 once the
+  batch is large enough to become compute-bound (N=16: 253 vs 327). Use 4
+  CPUs for a single-user or few-user deployment and more for batch serving.
 
 ## Known Limitations
 
