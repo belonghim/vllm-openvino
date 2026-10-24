@@ -13,15 +13,16 @@ with `libopenvino_intel_cpu_plugin.so` from this directory (see `Containerfile`)
 - Binary: CPU plugin only, built from tag `2026.4.1` (e213a147) with the patch
   applied. A stock build with the same procedure is not byte-identical to the wheel's
   plugin, but gives identical NLL on real text.
-  The `.so` is gitignored, so copy it here before `podman build`.
+  The `.so` is gitignored. `build-cpu-plugin.sh` clones the tag, applies the patch,
+  builds the plugin in a UBI 10 container, and copies it here only if the sha256
+  matches (a fresh clone reproduces it byte for byte).
 
 | File | sha256 |
 |---|---|
 | patched (`libopenvino_intel_cpu_plugin.so`) | `bd4b1036c173a900944b5f6e0dd99b656c194a49f6dbdada8f2b381bc6361c38` |
 | stock 2026.4.1 wheel | `6599e3dd300d047b5ed72f8e48101c5f312c25321f35f57f803641ff8372900b` |
 
-Both binaries, the OpenVINO source tree, and the build scripts are kept in `~/build`
-(`cpu_plugin_final.so`, `cpu_plugin_stock_rebuilt.so`, `README.md`, `scripts/`).
+The benchmark scripts and the upstream follow-up branches are kept in `~/build`.
 
 Measured on Zen 4, 8 CPUs, stock -> patched:
 - LFM2.5-8B-A1B-int4: prefill 106 -> 425 tok/s at 1024 tokens; through vLLM,
@@ -63,7 +64,7 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
 - If the release contains #39086, or #37444 replaces the path, delete the `COPY` line
   from `Containerfile` and this directory. #38830 alone is not enough.
-- Otherwise rebuild the plugin from the new tag with the patch, replace the `.so`
-  and the sha256 above, and re-measure. 2026.5 contains #38830, so the patch conflicts
+- Otherwise update `OV_TAG` and the patch in `build-cpu-plugin.sh`, rebuild, re-measure,
+  and update the sha256 there, above, and in `Containerfile`. 2026.5 contains #38830, so the patch conflicts
   in `execute()`: apply #39086 instead (`~/build/gathermatmul-followup.patch`, branch
   `follow-up-gemm-all` in `~/build/ov-master`).

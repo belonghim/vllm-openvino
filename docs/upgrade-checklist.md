@@ -74,3 +74,6 @@ to drop or rebuild it.
 4. For runtime changes, verify single, sequential, and concurrent requests.
 5. Compare logs for import errors, signature errors, cache allocation errors,
    and unexpected path selection.
+6. Run `scripts/smoke-test.sh`. It starts each serving path (PagedAttention,
+   Hybrid-PA, stateful) and checks sequential throughput against the baseline
+   and a concurrent burst.

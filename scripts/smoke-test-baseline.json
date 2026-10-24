@@ -11,5 +11,15 @@
     "total_ms": 60053,
     "total_tokens": 1127,
     "avg_tps": 18.77
+  },
+  "LFM2.5-350M-int8-ov": {
+    "total_ms": 12861,
+    "total_tokens": 735,
+    "avg_tps": 57.15
+  },
+  "Qwen2.5-Coder-0.5B-Instruct-int4-ov (VLLM_OPENVINO_STATEFUL_PA=0)": {
+    "total_ms": 18813,
+    "total_tokens": 953,
+    "avg_tps": 50.66
   }
 }

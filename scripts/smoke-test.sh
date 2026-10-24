@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # smoke-test.sh — Performance regression smoke test
-# Runs two PagedAttention models (Qwen2.5-Coder, Gemma-4) with 5 fixed questions, tracks tok/s.
+# Runs every serving path (PagedAttention, Hybrid-PA, stateful) with 5 fixed questions and
+# a concurrent burst, tracks tok/s.
 # Compares against ./scripts/smoke-test-baseline.json if present.
 
 set -uo pipefail
@@ -21,10 +22,14 @@ CONTAINER_NAME="vllm-smoke"
 IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
+# "<model dir> [ENV=VALUE]"
 MODELS=(
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov"
   "gemma-4-E2B-it-int4-ov"
+  "LFM2.5-350M-int8-ov"
+  "Qwen2.5-Coder-0.5B-Instruct-int4-ov VLLM_OPENVINO_STATEFUL_PA=0"
 )
+CONCURRENT_REQUESTS=4
 
 QUESTIONS=(
   "Write a Python function that checks if a string is a palindrome."
@@ -42,7 +47,9 @@ cleanup_container() {
 }
 
 run_model_perf() {
-  local model_name="$1"
+  local model_name model_env
+  read -r model_name model_env <<< "$1"
+  local label="$model_name${model_env:+ ($model_env)}"
   local model_dir="$MODEL_BASE/$model_name"
 
   if [[ ! -d "$model_dir" ]]; then
@@ -51,7 +58,7 @@ run_model_perf() {
   fi
 
   echo ""
-  echo "=== $model_name ==="
+  echo "=== $label ==="
   cleanup_container
 
   podman run --replace -d --name "$CONTAINER_NAME" \
@@ -60,6 +67,7 @@ run_model_perf() {
     -v "$model_dir:/models:Z" \
     -e VLLM_OPENVINO_DEVICE=CPU \
     -e TORCH_COMPILE_DISABLE=1 \
+    ${model_env:+-e "$model_env"} \
     "$IMAGE" \
     --port=8080 --model /models --max-model-len 4096 >/dev/null
 
@@ -125,13 +133,26 @@ print(text[:160] + ('...' if len(text) > 160 else ''))
     [[ -n "$content" ]] && echo "       $content"
   done
 
+  local codes
+  codes=$(for _ in $(seq 1 "$CONCURRENT_REQUESTS"); do
+    curl -s -o /dev/null -w "%{http_code}\n" "$API_URL/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -d '{"model":"/models","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}' &
+  done; wait)
+  if [[ $(grep -c '^200$' <<< "$codes") -ne $CONCURRENT_REQUESTS ]]; then
+    echo "  FAIL: concurrent requests returned" $codes
+    cleanup_container
+    return 1
+  fi
+  echo "  Concurrent x$CONCURRENT_REQUESTS: OK"
+
   local avg_tps
   avg_tps=$(python3 -c "print(f'{$total_tokens / ($total_ms/1000.0):.2f}')" 2>/dev/null || echo "0.00")
   echo "  Avg: ${avg_tps} tok/s (total ${total_ms}ms, ${total_tokens} tokens)"
 
   cleanup_container
 
-  python3 - "$model_name" "$total_ms" "$total_tokens" "$avg_tps" <<'PYEOF'
+  python3 - "$label" "$total_ms" "$total_tokens" "$avg_tps" <<'PYEOF'
 import json, os, sys
 model_name, total_ms, total_tokens, avg_tps = sys.argv[1:5]
 results_file = os.environ["RESULTS_FILE"]
@@ -156,7 +177,7 @@ PYEOF
 
 main() {
   echo "=== vllm-openvino Performance Smoke Test ==="
-  echo "Models: ${MODELS[*]}"
+  printf 'Models:'; printf ' [%s]' "${MODELS[@]}"; echo
   echo "Questions: ${#QUESTIONS[@]} | max_tokens=$MAX_TOKENS"
 
   GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
