@@ -124,7 +124,7 @@ attention computation, not cache precision. Set
 `VLLM_OPENVINO_STATEFUL_PA=0` to force the stateful path.
 
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
-Qwen3.5 and LFM2.5. Set `VLLM_OPENVINO_HYBRID_PA=0` to force the stateful path.
+Qwen3.5 and LFM2.5. Hybrid models without SDPA ops keep the stateful path.
 Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV
 cache, not SSM/conv state.
 

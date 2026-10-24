@@ -127,12 +127,10 @@ def apply_selective_paged_attention_transformation(
 ) -> None:
     """Apply PA transformation selectively based on model type.
 
-    For HYBRID_MAMBA models: PA transformation is skipped by default (unvalidated on
-    older OpenVINO versions). When VLLM_OPENVINO_HYBRID_PA is enabled, it's attempted —
-    verified on OpenVINO 2026.3.0 to succeed for both conv-only hybrids (LFM2.5) and
-    ssm+conv hybrids (Qwen3.5, GatedDeltaNet state). The transform emits a linear-attention
+    For HYBRID_MAMBA models with SDPA ops: the transform emits a linear-attention
     paged-state mechanism (la.*/conv_state_table.*, and la.*/gated_delta_state_table.* for
-    true SSM state) alongside real PagedAttention for the attention layers.
+    true SSM state) alongside real PagedAttention for the attention layers. Without SDPA
+    ops they keep the stateful path.
     For ATTENTION_ONLY models: apply PA transformation only if SDPA ops exist.
     For STATEFUL models: skip PA transformation; model manages KV cache via ReadValue/Assign.
     """
@@ -158,7 +156,7 @@ def apply_selective_paged_attention_transformation(
         )
         return
 
-    if envs.VLLM_OPENVINO_HYBRID_PA and _has_sdpa_ops(model):
+    if _has_sdpa_ops(model):
         # platform.py already relaxed max_num_seqs based on this same
         # eligibility check, so a silent fallback here would leave a
         # multi-request scheduler pointed at the (single-request-only)
@@ -175,12 +173,10 @@ def apply_selective_paged_attention_transformation(
         )
         return
 
-    # For hybrid models: skip PA transformation entirely due to C++ pattern matcher
-    # crashing on SSM subgraphs (PrevSequenceLengthPattern on Gather/Reshape nodes).
-    # The model will use internal KV cache mechanism instead of PagedAttention.
     logger.warning(
-        "Hybrid Mamba models do not support PagedAttention transformation yet. "
-        "The model will run with internal KV cache."
+        "Hybrid Mamba model has no ScaledDotProductAttention operations. "
+        "Skipping PagedAttention transformation; the model will run with "
+        "internal state."
     )
 
 

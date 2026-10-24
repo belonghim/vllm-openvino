@@ -386,8 +386,7 @@ class OpenVinoPlatform(Platform):
         keeps_external_state = False
         hybrid_pa = False
         if _is_stateful_model(model_config.model):
-            hybrid_pa = (envs.VLLM_OPENVINO_HYBRID_PA
-                         and _is_hybrid_pa_candidate(model_config.model))
+            hybrid_pa = _is_hybrid_pa_candidate(model_config.model)
             stateful_pa = (not hybrid_pa and envs.VLLM_OPENVINO_STATEFUL_PA
                            and _is_stateful_pa_candidate(model_config.model))
             keeps_external_state = not stateful_pa
@@ -396,8 +395,7 @@ class OpenVinoPlatform(Platform):
                     logger.info(
                         "[OV-PLATFORM] Hybrid Mamba/attention model detected: "
                         "attempting Hybrid-PA transformation, keeping "
-                        "max_num_seqs=%d. Set VLLM_OPENVINO_HYBRID_PA=0 to "
-                        "force the sequential stateful path instead.",
+                        "max_num_seqs=%d.",
                         scheduler_config.max_num_seqs)
                 elif stateful_pa:
                     logger.info(

@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
     VLLM_OPENVINO_STATEFUL_PA: bool = True
-    VLLM_OPENVINO_HYBRID_PA: bool = True
     VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER: int = 8
     VLLM_OPENVINO_CACHE_DIR: str | None = None
     VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
@@ -114,14 +113,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # stateful path. Set to 0 to force the sequential stateful path.
     "VLLM_OPENVINO_STATEFUL_PA":
     lambda: _env_bool("VLLM_OPENVINO_STATEFUL_PA", "1"),
-
-    # Default path for hybrid Mamba/attention models (Qwen3.5, LFM2.5):
-    # attempt PagedAttention transformation instead of the sequential
-    # stateful path, enabling concurrent request batching (max_num_seqs > 1).
-    # Set to 0 to force the sequential stateful path instead (e.g. if a new,
-    # unvalidated hybrid model hits a PA transformation issue).
-    "VLLM_OPENVINO_HYBRID_PA":
-    lambda: _env_bool("VLLM_OPENVINO_HYBRID_PA", "1"),
 
     # Hybrid-PA prefix caching: the scheduler block (and conv/SSM checkpoint
     # interval) spans this many OpenVINO KV blocks. Default 8 (256 tokens).
