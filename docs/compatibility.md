@@ -126,8 +126,9 @@ mismatch`).
 
 Greedy output matched the stateful path on TinyLlama-1.1B and
 differed on Qwen-family models; u8 and bf16 caches produced
-byte-identical output, so the difference comes from the transformed
-attention computation, not cache precision. Set
+byte-identical output on those short checks, so the difference comes from
+the transformed attention computation, not cache precision (long-context
+`u8` vs `bf16` differences are in the Performance Profile). Set
 `VLLM_OPENVINO_STATEFUL_PA=0` to force the stateful path.
 
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
@@ -381,7 +382,18 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   same for all three. The `f16` and `bf16` rows are the same configuration on
   this CPU (the plugin stores `bf16` for an `f16` request), so their small
   differences are run-to-run noise. Greedy outputs diverge after 40-480
-  characters between `u8` and the 2-byte cache, but no accuracy metric was run.
+  characters between `u8` and the 2-byte cache, so the two were compared on
+  next-token distributions. 20 prompts of 500 / 2k / 5k / 12k tokens (slices of
+  this repository's sources), each scored at 4 positions along the `bf16`
+  greedy continuation (teacher-forced, `logprobs=20`, `u8` vs `bf16`). Top-1
+  token agreement was 79/80 on Qwen3-1.7B-int4 and 79/80 on
+  Qwen2.5-Coder-0.5B-int4; mean KL over the top-20 was 0.007 and 0.016 nats,
+  mean |logprob change| of the top-1 token 0.019 and 0.024. The one flip per
+  model was a near tie (`bf16` top-1/top-2 gap 0.0 and 0.25 nats). KL did not
+  grow with context (Qwen3: 0.006 / 0.012 / 0.007 / 0.003 at 500 / 2k / 5k /
+  12k), and rerunning `bf16` gave bit-identical logprobs. 80 positions per
+  model is a small sample: this bounds the `u8` effect, it does not replace a
+  task benchmark.
 - **Long-context prefill slows down.** Qwen3-1.7B-int4 `u8`: 845 / 732 / 607 /
   403 tok/s at the same four context lengths, consistent with attention
   becoming about half of the time at 17k tokens. The OpenVINO node profile
