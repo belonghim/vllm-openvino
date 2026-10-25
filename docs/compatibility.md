@@ -25,8 +25,7 @@ those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
 removal for 0.32, but 0.32.0 and main still ship it. vLLM's own CPU runner
 (`CPUModelRunner`) still subclasses the MRV1 `GPUModelRunner`, so MRV1 removal
 waits on CPU MRV2 without Triton
-([#55847](https://github.com/vllm-project/vllm/pull/55847),
-[#60924](https://github.com/vllm-project/vllm/pull/60924)). When
+([#61995](https://github.com/vllm-project/vllm/pull/61995)). When
 `gpu_input_batch` goes away, follow what the CPU runner moves to.
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
@@ -47,10 +46,16 @@ Tracked upstream:
   to opt out of the Triton probe (harmless no-op on vLLM builds without the
   hook). Parked: the reviewer prefers to wait for the MRV1 removal plan.
 - [vllm-project/vllm#62576](https://github.com/vllm-project/vllm/pull/62576)
-  (open) moves the MRV2 Triton check from config validation to
+  (merged after 0.32.0) moves the MRV2 Triton check from config validation to
   `gpu_worker.Worker`. It keeps the MRV1 fallback for every platform except
   the unspecified one, and the plugin's worker does not derive from
   `gpu_worker.Worker`, so it does not affect the plugin.
+- [vllm-project/vllm#61995](https://github.com/vllm-project/vllm/pull/61995)
+  (open) makes MRV2 the default for CPU backends without Triton (Arm, POWER,
+  s390x, RISC-V) by overriding MRV2 components (`sampler_cls`,
+  `block_tables_cls`, `structured_outputs_worker_cls`, ...) in
+  `CPUModelRunner`. It keeps MRV1 selectable and does not apply to x86. Once
+  merged it is the pattern to follow when MRV1 is removed.
 
 Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
 path exists for plugins) are unanswered after two follow-ups.
