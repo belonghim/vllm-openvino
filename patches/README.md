@@ -51,7 +51,7 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   source the executor accepts (f32, bf16) takes the per-expert GEMM branch. Without bf16
   AMX, experts with fewer than 4 routed rows stay on GEMV; on bf16 AMX every expert runs
   a GEMM, as after #38830. An expert's rows are gathered/scattered on one thread when they
-  fit in the per-core L2 (commits c068d3a121 + 6dd69ac13f, +100/-89, mostly re-indent;
+  fit in the per-core L2 (commits c068d3a121, 6dd69ac13f, 09c802d526; +101/-90, mostly re-indent;
   same two files plus a test comment).
   On master 31489b9c: `ov_cpu_func_tests` MoE/GroupedMatMul filter 329 passed, 240 with
   `OV_CPU_MAX_ISA=AVX2`. Zen 4, 8 CPUs, LFM2.5-8B-A1B: prefill at 1024 tokens 421 tok/s
@@ -69,7 +69,9 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   Tests 329/329 and 240/240 (AVX2 cap). Zen 4, previous revision -> 6dd69ac13f, within
   run-to-run spread: LFM2.5-8B-A1B prefill 1024 tokens ~500 -> ~494 tok/s, L=2/4/8 chunks
   unchanged; Qwen3.6-35B-A3B 218 -> 210 tok/s, chunks 1-3% faster. maxnick's
-  hardware-wide performance validation is still pending.
+  hardware-wide performance validation is still pending. A clang-tidy fix (member
+  initializer for the L2 size) and moving the row-count assert before the GEMV path followed
+  as 09c802d526.
   `~/build/gathermatmul-followup.patch` holds both commits (`git am`).
 - Thread scaling, Zen 4 (12C/24T, host shared with VMs), LFM2.5-8B-A1B, stock -> #39086,
   prefill at 1024 tokens: bf16 107 -> 431 / 123 -> 465 / 123 -> 456 tok/s and f32
