@@ -47,10 +47,12 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   into master on 2026-10-21 (1ac0ccb7, milestone 2026.5). It is not in 2026.4.1.
 - Non-AMX CPUs (all AMD, Intel client, pre-Sapphire Rapids Xeon) and f32 sources still
   run per-row GEMV on master, so this patch is still needed there.
-- openvinotoolkit/openvino#39086 (open, replaces #38822, now closed) removes the AMX
-  mode flag: for M > 1 every source the executor accepts (f32, bf16) takes the
-  per-expert GEMM branch, and experts with fewer than 4 routed rows stay on GEMV
-  (commit c068d3a121, +77/-91, mostly re-indent; same two files plus a test comment).
+- openvinotoolkit/openvino#39086 (open, replaces #38822, now closed): for M > 1 every
+  source the executor accepts (f32, bf16) takes the per-expert GEMM branch. Without bf16
+  AMX, experts with fewer than 4 routed rows stay on GEMV; on bf16 AMX every expert runs
+  a GEMM, as after #38830. An expert's rows are gathered/scattered on one thread when they
+  fit in the per-core L2 (commits c068d3a121 + 6dd69ac13f, +100/-89, mostly re-indent;
+  same two files plus a test comment).
   On master 31489b9c: `ov_cpu_func_tests` MoE/GroupedMatMul filter 329 passed, 240 with
   `OV_CPU_MAX_ISA=AVX2`. Zen 4, 8 CPUs, LFM2.5-8B-A1B: prefill at 1024 tokens 421 tok/s
   (bf16), 165 tok/s (AVX2 f32), 286 tok/s (AVX-512 f32, stock 110); 2-token chunk 54 ms
@@ -62,11 +64,13 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   f32, 8 threads), the fused GatherMatmul path went from 165.5 to 46.4 ms at 1024 tokens
   and is faster than the issue's plain-op `grouped` lowering from 64 tokens up. The
   `torch.cond` weight duplication in that issue is out of scope.
-- maxnick is running performance validation on more hardware. On AMX the PR replaces
-  #38830's 16-row GEMM with GEMV for experts with fewer than 4 rows, which may be slower
-  there, so I offered to keep the fallback off on bf16 AMX (no reply yet).
-  `~/build/gathermatmul-followup-amx.patch` (stash on branch `follow-up-gemm-all-amx`)
-  predates the flag removal and needs rebasing before use.
+- maxnick then asked (2026-10-26) for an ISA-dependent threshold (all of M > 1 on GEMM
+  for AMX) and single-thread gather/scatter below the L2 size; both pushed as 6dd69ac13f.
+  Tests 329/329 and 240/240 (AVX2 cap). Zen 4, previous revision -> 6dd69ac13f, within
+  run-to-run spread: LFM2.5-8B-A1B prefill 1024 tokens ~500 -> ~494 tok/s, L=2/4/8 chunks
+  unchanged; Qwen3.6-35B-A3B 218 -> 210 tok/s, chunks 1-3% faster. maxnick's
+  hardware-wide performance validation is still pending.
+  `~/build/gathermatmul-followup.patch` holds both commits (`git am`).
 - Thread scaling, Zen 4 (12C/24T, host shared with VMs), LFM2.5-8B-A1B, stock -> #39086,
   prefill at 1024 tokens: bf16 107 -> 431 / 123 -> 465 / 123 -> 456 tok/s and f32
   109 -> 272 / 111 -> 308 / 127 -> 308 tok/s at 8 / 12 / 24 threads. Chunks of 2-4 tokens
