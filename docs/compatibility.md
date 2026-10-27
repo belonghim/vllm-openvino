@@ -67,6 +67,7 @@ Tracked upstream:
   otherwise keep trimmed copies of the classes in the plugin (the runner uses
   about ten `InputBatch` members). Before any vLLM upgrade, check whether the
   release contains #63373.
+  Asked on the PR (2026-10-27) whether a non-Triton MRV2 path stays supported.
 
 Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
 path exists for plugins) are unanswered after two follow-ups.
