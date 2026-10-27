@@ -56,6 +56,17 @@ Tracked upstream:
   `block_tables_cls`, `structured_outputs_worker_cls`, ...) in
   `CPUModelRunner`. It keeps MRV1 selectable and does not apply to x86. Once
   merged it is the pattern to follow when MRV1 is removed.
+- [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
+  (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
+  `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
+  "vLLM on CPU without Triton". The plugin breaks on import: the runner uses
+  `InputBatch`/`CachedRequestState`, and the model loader uses the V1 `Sampler`.
+  The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`, `block_table.py`,
+  `sample/gumbel.py`, `penalties.py`, ...) are Triton kernels, so the plugin
+  cannot switch to them. If #61995's torch components survive, follow them;
+  otherwise keep trimmed copies of the classes in the plugin (the runner uses
+  about ten `InputBatch` members). Before any vLLM upgrade, check whether the
+  release contains #63373.
 
 Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
 path exists for plugins) are unanswered after two follow-ups.
