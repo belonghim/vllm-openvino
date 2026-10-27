@@ -50,14 +50,12 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
 - openvinotoolkit/openvino#39086 (open, replaces #38822, now closed): for M > 1 every
   source the executor accepts (f32, bf16) takes the per-expert GEMM branch. Without bf16
   AMX, experts with fewer than 4 routed rows stay on GEMV; on bf16 AMX every expert runs
-  a GEMM, as after #38830. An expert's rows are gathered/scattered on one thread when they
-  fit in the per-core L2 (commits c068d3a121, 6dd69ac13f, 09c802d526; +101/-90, mostly re-indent;
-  same two files plus a test comment).
+  a GEMM, as after #38830 (commits c068d3a121, 6dd69ac13f, 09c802d526, 3026141a51;
+  +84/-91, mostly re-indent; same two files plus a test comment).
   On master 31489b9c: `ov_cpu_func_tests` MoE/GroupedMatMul filter 329 passed, 240 with
   `OV_CPU_MAX_ISA=AVX2`. Zen 4, 8 CPUs, LFM2.5-8B-A1B: prefill at 1024 tokens 421 tok/s
   (bf16), 165 tok/s (AVX2 f32), 286 tok/s (AVX-512 f32, stock 110); 2-token chunk 54 ms
-  (stock 49). The 4-row threshold is untested on AMX; the #38830 author was asked to try
-  it on Xeon 6972P.
+  (stock 49). The Jenkins functional tests on Sapphire Rapids (AMX) pass.
 - maxnick requested changes (drop the flag, define the threshold where it is used, comment
   the GEMV branch) and a commit email linked to GitHub; all addressed on 2026-10-26.
   rkazants asked whether it fixes #38517. On the issue's reproducer (64 experts, top-8,
@@ -69,10 +67,12 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   Tests 329/329 and 240/240 (AVX2 cap). Zen 4, previous revision -> 6dd69ac13f, within
   run-to-run spread: LFM2.5-8B-A1B prefill 1024 tokens ~500 -> ~494 tok/s, L=2/4/8 chunks
   unchanged; Qwen3.6-35B-A3B 218 -> 210 tok/s, chunks 1-3% faster. maxnick's
-  hardware-wide performance validation is still pending. A clang-tidy fix (member
-  initializer for the L2 size) and moving the row-count assert before the GEMV path followed
-  as 09c802d526.
-  `~/build/gathermatmul-followup.patch` holds both commits (`git am`).
+  A clang-tidy fix and moving the row-count assert before the GEMV path followed as
+  09c802d526.
+- maxnick's Xeon benchmarks (2026-10-27) showed 2x slower prefill at 1K+ tokens, attributed
+  to the single-thread gather/scatter (no difference on Zen 4). Rolled back in 3026141a51:
+  gather/scatter use `parallel_for` again; the threshold change stays.
+  `~/build/gathermatmul-followup.patch` holds all four commits (`git am`).
 - Thread scaling, Zen 4 (12C/24T, host shared with VMs), LFM2.5-8B-A1B, stock -> #39086,
   prefill at 1024 tokens: bf16 107 -> 431 / 123 -> 465 / 123 -> 456 tok/s and f32
   109 -> 272 / 111 -> 308 / 127 -> 308 tok/s at 8 / 12 / 24 threads. Chunks of 2-4 tokens
