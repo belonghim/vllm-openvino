@@ -66,7 +66,7 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   for AMX) and single-thread gather/scatter below the L2 size; both pushed as 6dd69ac13f.
   Tests 329/329 and 240/240 (AVX2 cap). Zen 4, previous revision -> 6dd69ac13f, within
   run-to-run spread: LFM2.5-8B-A1B prefill 1024 tokens ~500 -> ~494 tok/s, L=2/4/8 chunks
-  unchanged; Qwen3.6-35B-A3B 218 -> 210 tok/s, chunks 1-3% faster. maxnick's
+  unchanged; Qwen3.6-35B-A3B 218 -> 210 tok/s, chunks 1-3% faster.
   A clang-tidy fix and moving the row-count assert before the GEMV path followed as
   09c802d526.
 - maxnick's Xeon benchmarks (2026-10-27) showed 2x slower prefill at 1K+ tokens, attributed
