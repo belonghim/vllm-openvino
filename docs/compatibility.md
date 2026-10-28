@@ -510,7 +510,8 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), with `GatherMatmulCompressed`
   taking 80-90% of the time. The OpenVINO CPU plugin batches routed rows per
   expert into a GEMM only on bf16+AMX; elsewhere it runs one GEMV per routed
-  row. Tracked upstream in openvinotoolkit/openvino#38517. The image ships a
+  row. Tracked upstream in openvinotoolkit/openvino#38517, fixed by #39086
+  (merged into master, milestone 2026.5). Until a release contains it, the image ships a
   patched CPU plugin with per-expert GEMM (`patches/README.md`): 425 and
   204 tok/s at 1024 tokens with unchanged NLL.
 - `VLLM_USE_RUST_FRONTEND=1` starts with the bundled `vllm-rs` binary but gave

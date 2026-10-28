@@ -5,7 +5,8 @@ with `libopenvino_intel_cpu_plugin.so` from this directory (see `Containerfile`)
 
 - Problem: `GatherMatmulDnnlExecutor::execute` uses GEMM for M > 1 only on
   bf16+AMX, so MoE prefill elsewhere runs one GEMV per routed row.
-  Upstream: openvinotoolkit/openvino#38517; PR openvinotoolkit/openvino#39086 (open).
+  Upstream: openvinotoolkit/openvino#38517, fixed by openvinotoolkit/openvino#39086
+  (merged into master on 2026-10-28, ba285632, milestone 2026.5; not in 2026.4.1).
 - Patch: `openvino-gathermatmul-grouped-gemm.patch` (2 files, +67/-10). Without
   AMX each expert with at least 4 routed rows runs one GEMM over those rows; experts
   with fewer stay on GEMV (2-token forwards were ~10% slower otherwise). The AMX
@@ -45,9 +46,10 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   4 rows; at N <= 64 for Qwen3.6, whose 256 experts spread the rows thinner.
 - openvinotoolkit/openvino#38830 (GEMM sized per expert, AMX bf16 branch only) merged
   into master on 2026-10-21 (1ac0ccb7, milestone 2026.5). It is not in 2026.4.1.
-- Non-AMX CPUs (all AMD, Intel client, pre-Sapphire Rapids Xeon) and f32 sources still
-  run per-row GEMV on master, so this patch is still needed there.
-- openvinotoolkit/openvino#39086 (open, replaces #38822, now closed): for M > 1 every
+- Non-AMX CPUs (all AMD, Intel client, pre-Sapphire Rapids Xeon) and f32 sources run
+  per-row GEMV with #38830 alone, so this patch is needed until a release contains #39086.
+- openvinotoolkit/openvino#39086 (merged 2026-10-28 as ba285632 after maxnick's approval
+  and a green CI; replaces #38822; closed #38517): for M > 1 every
   source the executor accepts (f32, bf16) takes the per-expert GEMM branch. Without bf16
   AMX, experts with fewer than 4 routed rows stay on GEMV; on bf16 AMX every expert runs
   a GEMM, as after #38830 (commits c068d3a121, 6dd69ac13f, 09c802d526, 3026141a51;
@@ -81,8 +83,9 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
 
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
 - If the release contains #39086, or #37444 replaces the path, delete the `COPY` line
-  from `Containerfile` and this directory. #38830 alone is not enough.
+  from `Containerfile` and this directory. #38830 alone is not enough. Both carry
+  milestone 2026.5; the 2026.5 release branch did not exist yet on 2026-10-28.
 - Otherwise update `OV_TAG` and the patch in `build-cpu-plugin.sh`, rebuild, re-measure,
-  and update the sha256 there, above, and in `Containerfile`. 2026.5 contains #38830, so the patch conflicts
-  in `execute()`: apply #39086 instead (`~/build/gathermatmul-followup.patch`, branch
+  and update the sha256 there, above, and in `Containerfile`. A release with #38830 but without #39086
+  conflicts with the patch in `execute()`: apply #39086 instead (`~/build/gathermatmul-followup.patch`, branch
   `follow-up-gemm-all` in `~/build/ov-master`).
