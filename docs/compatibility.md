@@ -360,6 +360,10 @@ Requires vLLM >= 0.32.0 (contains vllm-project/vllm #58674 and #56372) and
 Transformers >= 5.18.0; vLLM 0.31.0 and Transformers 5.17.0 lack them. Verified
 on the 0.32.0 image: single and multi-slice images and concurrent image requests
 describe the image correctly; chunked prefill was last checked on 0.32.0rc0.
+On a 640x480 image with ~10 px text, MiniCPM-V-4.7-1B-int4 reads "HELLO 2026"
+as "HELLO 2028", as OpenVINO GenAI 2026.5 nightly does on the same IR; at 48 px
+both read it correctly with the same greedy output, so this is the model, not
+the plugin.
 
 ## N-gram Speculative Decoding
 
