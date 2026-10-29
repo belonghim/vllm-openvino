@@ -316,11 +316,33 @@ text because of prefill vs decode numerics.
 - Text embeddings: `openvino_text_embeddings_model.xml`
 - Vision encoder: `openvino_vision_embeddings_model.xml`
 - Vision merger: `openvino_vision_embeddings_merger_model.xml`
+- Vision position embeddings (Qwen3.5/3.6): `openvino_vision_embeddings_pos_model.xml`
 
 The vision encoder expects a 2D `[num_patches, features]` input. Vision merger
 calls require `hidden_states`, `attention_mask`, and `rotary_pos_emb`.
 Qwen3.5 multimodal inputs use `pixel_values` and `image_grid_thw`; Gemma-4
 uses `pixel_values`.
+
+### Qwen3.5 / Qwen3.6 images
+
+Same steps as OpenVINO GenAI's `qwen3_vl` and `qwen3_5`:
+
+- vLLM 0.32 enables `mm_device_do_normalize` for this family, so `pixel_values`
+  arrive as raw uint8. The loader applies vLLM's `build_mm_input_norm`, as the
+  upstream model does. Without it the encoder sees 0-255 pixels.
+- The position IR takes the four bilinear corner indices `[4, n]` of the 48x48
+  learned grid; the weighted sum is permuted to merge order and added to the
+  patch embeddings before the merger.
+- `rotary_pos_emb` width comes from the merger IR (32 on Qwen3.5-0.8B, 36 on
+  Qwen3.6-35B-A3B), with `dim/2` frequencies per axis.
+- The LM's `position_ids [4, n]` carry the text positions in row 0 and M-RoPE
+  (t, h, w) in rows 1-3, computed by vLLM's `Qwen3VLForConditionalGeneration`;
+  decode positions are `index + rope_delta`.
+
+Before these were in place, Qwen3.5-0.8B misread a synthetic image ("100") and
+Qwen3.6-35B-A3B failed every image request (merger `rotary_pos_emb` width).
+Now Qwen3.5-0.8B gives the same answer as GenAI 2026.4.1 on the same IR, also
+with 128-token chunked prefill, cached images and concurrent requests.
 
 ### MiniCPM-V 4.7
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import time
 from types import SimpleNamespace
 
@@ -127,20 +128,33 @@ class OpenVINOModelRunnerV1:
         self._position_range_buf = np.arange(
             self.model_config.max_model_len, dtype=np.int64)
 
-        # MiniCPM-V 4.7 canvas M-RoPE: the LM takes [3, n] positions, with
-        # image tokens placed on the slice canvas (computed by vLLM's own
-        # model code) and decode positions offset by a per-request delta.
-        self._canvas_mrope = None
+        # M-RoPE: the LM takes [3, n] positions computed by vLLM's own model
+        # code (MiniCPM-V 4.7 slice canvas, Qwen3.5 image grid), with decode
+        # positions offset by a per-request delta. Qwen3.5's IR takes
+        # [4, n] with the plain text positions as row 0 (OpenVINO GenAI
+        # qwen3_5).
+        self._mrope_fn = None
         self._mrope_by_req: dict[str, tuple[np.ndarray, int]] = {}
         hf_config = self.model_config.hf_config
-        if getattr(hf_config, "model_type", None) == "minicpmv4_7":
+        model_type = getattr(hf_config, "model_type", None)
+        mrope_rows = 3
+        if model_type == "minicpmv4_7":
             from vllm.model_executor.models.minicpmv4_7 import (
                 MiniCPMV4_7ForConditionalGeneration as minicpm_model)
             canvas = SimpleNamespace(config=hf_config)
             minicpm_model._init_canvas_mrope(canvas, vllm_config)
-            self._canvas_mrope = (minicpm_model, canvas)
+            self._mrope_fn = functools.partial(
+                minicpm_model.get_mrope_input_positions, canvas)
+        elif model_type in ("qwen3_5", "qwen3_5_moe"):
+            from vllm.model_executor.models.qwen3_vl import (
+                Qwen3VLForConditionalGeneration)
+            self._mrope_fn = functools.partial(
+                Qwen3VLForConditionalGeneration._get_mrope_input_positions,
+                config=hf_config)
+            mrope_rows = 4
+        if self._mrope_fn is not None:
             self._mrope_buf = np.zeros(
-                (3, self.scheduler_config.max_num_batched_tokens),
+                (mrope_rows, self.scheduler_config.max_num_batched_tokens),
                 dtype=np.int64)
 
         # Track requests that have multimodal features.
@@ -418,11 +432,9 @@ class OpenVINOModelRunnerV1:
             self._new_req_ids.add(req_id)
             if req_state.mm_features:
                 self._mm_req_ids.add(req_id)
-                if self._canvas_mrope is not None:
-                    minicpm_model, canvas = self._canvas_mrope
-                    pos3d, delta = minicpm_model.get_mrope_input_positions(
-                        canvas, list(req_state.prompt_token_ids),
-                        req_state.mm_features)
+                if self._mrope_fn is not None:
+                    pos3d, delta = self._mrope_fn(
+                        list(req_state.prompt_token_ids), req_state.mm_features)
                     self._mrope_by_req[req_id] = (pos3d.numpy(), delta)
 
         # Update cached (running) requests
@@ -465,7 +477,7 @@ class OpenVINOModelRunnerV1:
     def _fill_mrope_positions(
         self, req_id: str, pos_idx: int, num_computed: int, num_tokens_total: int,
     ) -> None:
-        out = self._mrope_buf[:, pos_idx:pos_idx + num_tokens_total - num_computed]
+        out = self._mrope_buf[-3:, pos_idx:pos_idx + num_tokens_total - num_computed]
         state = self._mrope_by_req.get(req_id)
         if state is None:
             out[:] = self._position_range_buf[num_computed:num_tokens_total]
@@ -572,7 +584,7 @@ class OpenVINOModelRunnerV1:
             else:
                 self._input_positions_buf[pos_idx:pos_idx + num_tokens] = \
                     self._position_range_buf[num_computed:num_tokens_total]
-            if self._canvas_mrope is not None:
+            if self._mrope_fn is not None:
                 self._fill_mrope_positions(
                     req_id, pos_idx, num_computed, num_tokens_total)
             pos_idx += num_tokens
@@ -677,7 +689,9 @@ class OpenVINOModelRunnerV1:
             raise RuntimeError("Invalid: all scheduled sequences have zero query length")
 
         input_tokens = self._slice_tensor(self._input_tokens_tensor_base, token_idx)
-        if self._canvas_mrope is not None:
+        if self._mrope_fn is not None:
+            if self._mrope_buf.shape[0] == 4:
+                self._mrope_buf[0, :pos_idx] = self._input_positions_buf[:pos_idx]
             input_positions = torch.from_numpy(self._mrope_buf[:, :pos_idx])
         else:
             input_positions = self._slice_tensor(

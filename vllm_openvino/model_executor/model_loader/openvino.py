@@ -20,6 +20,7 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -495,9 +496,9 @@ class OpenVINOCausalLM(nn.Module):
                     continue
                 self._position_input_name = name
                 pshape = inp.get_partial_shape()
-                # Multi-channel position_ids (e.g. M-RoPE [4, seq]): only the
-                # first channel carries real positions, matching the existing
-                # StatefulInputBuilder convention for these models.
+                # Multi-channel position_ids (e.g. M-RoPE [4, seq]): the
+                # runner passes M-RoPE models 2D positions; otherwise only the
+                # first channel is filled.
                 if pshape.rank.get_length() == 2 and pshape[0].is_static:
                     self._position_input_channels = pshape[0].get_length()
                 break
@@ -532,6 +533,9 @@ class OpenVINOCausalLM(nn.Module):
             self.ov_vision_emb_compiled = ov_core.compile_model(
                 vision_emb_model, ov_device, perf_hint)
             self.vision_emb_request = self.ov_vision_emb_compiled.create_infer_request()
+            # With mm_device_do_normalize (vLLM's default for Qwen-VL) the
+            # processor sends raw uint8 pixels and the model normalises them.
+            self.mm_input_norm = build_mm_input_norm(model_config)
 
             # MiniCPM-V 4.6/4.7 encoder: one packed crop per infer plus
             # host-built position/window/merge index tensors.
@@ -555,6 +559,20 @@ class OpenVINOCausalLM(nn.Module):
                 self.vision_merger_request = self.ov_vision_merger_compiled.create_infer_request()
                 self._merger_rope_cache: dict[tuple, np.ndarray] = {}
                 self._merger_attn_mask: np.ndarray | None = None
+
+            # Qwen3-VL/Qwen3.5: learned position embeddings on a square grid,
+            # bilinearly interpolated to the image grid and added to the patch
+            # embeddings before the merger (OpenVINO GenAI qwen3_vl).
+            self.vision_pos_request = None
+            vision_pos_path = model_dir / "openvino_vision_embeddings_pos_model.xml"
+            if vision_pos_path.exists():
+                vision_config = model_config.hf_config.vision_config
+                self._pos_grid_side = int(
+                    vision_config.num_position_embeddings ** 0.5)
+                self._spatial_merge_size = vision_config.spatial_merge_size
+                self.vision_pos_request = ov_core.compile_model(
+                    ov_core.read_model(str(vision_pos_path)), ov_device,
+                    perf_hint).create_infer_request()
 
         self.use_per_layer_embeddings_model = False
         self.ov_per_layer_emb_compiled = None
@@ -715,9 +733,10 @@ class OpenVINOCausalLM(nn.Module):
         image_grid_thw: torch.Tensor,
         num_patches: int,
     ) -> np.ndarray:
-        """Compute [num_patches, 32] rotary position embeddings for the vision merger."""
+        """Compute [num_patches, dim] rotary position embeddings for the vision merger."""
         spatial_merge_size = 2
-        rope_dim_per_spatial = 16
+        rope_dim_per_spatial = self.ov_vision_merger_compiled.input(
+            "rotary_pos_emb").get_partial_shape()[1].get_length() // 2
         theta = 10000.0
         grid_thw_np = self._as_numpy_no_copy(image_grid_thw)
         if grid_thw_np.ndim == 1:
@@ -726,9 +745,9 @@ class OpenVINOCausalLM(nn.Module):
         cached = self._merger_rope_cache.get(cache_key)
         if cached is not None:
             return cached
-        inv_freq = (1.0 / (theta ** (np.arange(0, rope_dim_per_spatial, 2,
+        inv_freq = (1.0 / (theta ** (np.arange(rope_dim_per_spatial,
                                                dtype=np.float32)
-                                     / rope_dim_per_spatial)))  # [8]
+                                     / rope_dim_per_spatial)))  # [16]
         all_hpos: list[np.ndarray] = []
         all_wpos: list[np.ndarray] = []
         for thw in grid_thw_np:
@@ -747,14 +766,50 @@ class OpenVINOCausalLM(nn.Module):
         hpos_ids = np.concatenate(all_hpos)
         wpos_ids = np.concatenate(all_wpos)
         max_pos = max(int(hpos_ids.max()), int(wpos_ids.max())) + 1
-        freqs = np.outer(np.arange(max_pos, dtype=np.float32), inv_freq)  # [max_pos, 8]
-        rope_table = np.concatenate([freqs, freqs], axis=-1)  # [max_pos, 16]
+        rope_table = np.outer(np.arange(max_pos, dtype=np.float32), inv_freq)  # [max_pos, 16]
         h_rope = rope_table[hpos_ids]  # [num_patches, 16]
         w_rope = rope_table[wpos_ids]  # [num_patches, 16]
         result = np.concatenate([h_rope, w_rope], axis=-1)  # [num_patches, 32]
         if len(self._merger_rope_cache) < 8:
             self._merger_rope_cache[cache_key] = result
         return result
+
+    def _interpolated_pos_embeds(self, image_grid_thw: torch.Tensor) -> np.ndarray:
+        """Return [t*h*w, hidden] position embeddings in spatial-merge order."""
+        t, h, w = (int(x) for x in self._as_numpy_no_copy(image_grid_thw).reshape(3))
+        side = self._pos_grid_side
+
+        def grid_idxs(n: int) -> np.ndarray:
+            # torch.linspace(0, side - 1, n) rounding, as in OpenVINO GenAI.
+            scale = np.float32((side - 1) / (n - 1)) if n > 1 else np.float32(0)
+            i = np.arange(n, dtype=np.float32)
+            return np.where(i < n // 2, i * scale,
+                            np.float32(side - 1) - scale * (n - 1 - i)
+                            ).astype(np.float32)
+
+        h_idx, w_idx = grid_idxs(h), grid_idxs(w)
+        h0 = h_idx.astype(np.int64)
+        w0 = w_idx.astype(np.int64)
+        h1 = np.minimum(h0 + 1, side - 1)
+        w1 = np.minimum(w0 + 1, side - 1)
+        dh = (h_idx - h0)[:, None]
+        dw = (w_idx - w0)[None, :]
+        indices = np.stack([
+            (h0[:, None] * side + w0[None, :]),
+            (h0[:, None] * side + w1[None, :]),
+            (h1[:, None] * side + w0[None, :]),
+            (h1[:, None] * side + w1[None, :]),
+        ]).reshape(4, -1)
+        weights = np.stack([
+            (1 - dh) * (1 - dw), (1 - dh) * dw, dh * (1 - dw), dh * dw,
+        ]).reshape(4, -1, 1).astype(np.float32)
+        self.vision_pos_request.infer([indices])
+        corners = self.vision_pos_request.get_output_tensor(0).data
+        pos = (corners * weights).sum(axis=0)  # [h*w, hidden]
+        m = self._spatial_merge_size
+        pos = (pos.reshape(h // m, m, w // m, m, -1)
+               .transpose(0, 2, 1, 3, 4).reshape(h * w, -1))
+        return np.tile(pos, (t, 1))
 
     def encode_image(
         self,
@@ -763,6 +818,7 @@ class OpenVINOCausalLM(nn.Module):
         image_grid_thw: torch.Tensor | None,
     ) -> np.ndarray:
         """Return the merged vision embeddings [num_tokens, hidden] of one image."""
+        pixel_values = self.mm_input_norm(pixel_values, torch.float32)
         if self._crop_vision:
             return self._encode_crops(pixel_values, image_grid_thw)
 
@@ -780,6 +836,9 @@ class OpenVINOCausalLM(nn.Module):
             self.vision_emb_request.infer([pixel_values_np])
         vision_embeds = self.vision_emb_request.get_output_tensor(0)
         vision_embeds_2d = vision_embeds.data.reshape(-1, vision_embeds.shape[-1])
+        if self.vision_pos_request is not None and image_grid_thw is not None:
+            vision_embeds_2d = (vision_embeds_2d
+                                + self._interpolated_pos_embeds(image_grid_thw))
 
         if self.ov_vision_merger_compiled is not None:
             num_patches = vision_embeds_2d.shape[0]
@@ -1321,7 +1380,9 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
                 if positions_np is None:
                     positions_np = model._as_numpy_no_copy(positions)
                 pos = positions_np
-                if len(shape) == 3:
+                if len(shape) == 3 and pos.ndim == 2:
+                    inputs_dict[name] = np.ascontiguousarray(pos[:, None, :])
+                elif len(shape) == 3:
                     seq_len_pos = pos.shape[-1] if pos.ndim > 0 else 1
                     if self._pos_3d_buf is None and self._pos_3d_channels > 0:
                         self._pos_3d_buf = np.zeros(
@@ -1344,7 +1405,7 @@ class StatefulInputBuilder(OpenVINOInputBuilder):
             elif name == "attention_mask":
                 if positions_np is None:
                     positions_np = model._as_numpy_no_copy(positions)
-                pos_np = positions_np
+                pos_np = positions_np[0] if positions_np.ndim == 2 else positions_np
                 total_seq_len = (int(pos_np.max()) + 1
                                  if pos_np.size > 0 else seq_len)
                 if total_seq_len <= self._attention_mask_buf.shape[1]:
