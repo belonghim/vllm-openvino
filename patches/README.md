@@ -80,11 +80,25 @@ Measured on Zen 4, 8 CPUs, stock -> patched:
   109 -> 272 / 111 -> 308 / 127 -> 308 tok/s at 8 / 12 / 24 threads. Chunks of 2-4 tokens
   stay within run-to-run spread at every thread count (f32 L=4 about 6% slower at 8
   threads in three runs); L >= 8 is faster. No sign that more threads move the threshold.
+- Pre-release check (2026-10-30, Zen 4, 8 CPUs, host shared with VMs): nightly
+  `2026.5.0.dev20261028` (41e0f2d7, the parent of #39086's merge) with its own CPU plugin,
+  and with a CPU plugin built from ba285632 dropped in, against this image.
+  This image / nightly / nightly + ba285632:
+  - LFM2.5-8B-A1B prefill at 1024 tokens 425 / 104 / 426 tok/s; L=2 and L=7 chunks within
+    noise; NLL 4.2192 / 4.2144 / 4.2192.
+  - Qwen3.6-35B-A3B prefill at 1024 tokens 182 / 64 / 179 tok/s; NLL 2.2278 / 2.2355 / 2.2278.
+  - Through vLLM, LFM2.5-8B-A1B TTFT for a 5033-token prompt 10.2 / 46.9 / 10.5 s.
+  So an OpenVINO build with #39086 replaces this patch without loss. The nightly passed
+  `scripts/smoke-test.sh` (PA, Gemma-4, Hybrid-PA, stateful), image, concurrent and
+  structured-output requests on Qwen3.5-0.8B, gemma-4-E2B and MiniCPM-V-4.7, and n-gram
+  speculation on Qwen3-1.7B (acceptance length 3.83). Smoke-test speeds were within 3% of
+  the baseline and Qwen3.5-0.8B gave the same outputs as this image.
 
 The binary is tied to OpenVINO 2026.4.1. When upgrading OpenVINO:
 - If the release contains #39086, or #37444 replaces the path, delete the `COPY` line
   from `Containerfile` and this directory. #38830 alone is not enough. Both carry
-  milestone 2026.5; the 2026.5 release branch did not exist yet on 2026-10-28.
+  milestone 2026.5; the 2026.5 release branch did not exist yet on 2026-10-29.
+  The first nightly with #39086 is the one after `2026.5.0.dev20261028`.
 - Otherwise update `OV_TAG` and the patch in `build-cpu-plugin.sh`, rebuild, re-measure,
   and update the sha256 there, above, and in `Containerfile`. A release with #38830 but without #39086
   conflicts with the patch in `execute()`: apply #39086 instead (`~/build/gathermatmul-followup.patch`, branch
