@@ -52,10 +52,16 @@ Tracked upstream:
   `gpu_worker.Worker`, so it does not affect the plugin.
 - [vllm-project/vllm#61995](https://github.com/vllm-project/vllm/pull/61995)
   (open) makes MRV2 the default for CPU backends without Triton (Arm, POWER,
-  s390x, RISC-V) by overriding MRV2 components (`sampler_cls`,
-  `block_tables_cls`, `structured_outputs_worker_cls`, ...) in
-  `CPUModelRunner`. It keeps MRV1 selectable and does not apply to x86. Once
-  merged it is the pattern to follow when MRV1 is removed.
+  s390x, RISC-V). Since 2026-10-28 it is a standalone runner under
+  `vllm/v1/worker/cpu/` (`no_triton_model_runner.py`, `input_batch.py`,
+  `sampler.py`, `structured_outputs.py`, `model_states/`, ...) with no
+  dependency on `vllm/v1/worker/gpu`; MRV2 code is copied and Triton kernels
+  are replaced by PyTorch or new `csrc/cpu` C++ ops (Gumbel argmax, input
+  batch, block table, slot mapping, M-RoPE). Speculative decoding is not
+  supported. It keeps MRV1 selectable and does not apply where Triton is
+  available. Once merged it is the pattern to follow when MRV1 is removed; the
+  C++ ops are missing from the `VLLM_TARGET_DEVICE=empty` wheel, like
+  `greedy_argmax` today, and n-gram speculation would need its own path.
 - [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
   (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
@@ -65,7 +71,7 @@ Tracked upstream:
   output), all removed.
   The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`, `block_table.py`,
   `sample/gumbel.py`, `penalties.py`, ...) are Triton kernels, so the plugin
-  cannot switch to them. If #61995's torch components survive, follow them;
+  cannot switch to them. If #61995's CPU runner survives, follow it;
   otherwise keep trimmed copies of the classes in the plugin (the runner uses
   about ten `InputBatch` members). Before any vLLM upgrade, check whether the
   release contains #63373.
