@@ -269,7 +269,7 @@ The following vLLM features are compatible with the OpenVINO backend:
 - N-gram speculative decoding (`--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":5,"prompt_lookup_max":8}'`) on PagedAttention and Hybrid-PA models; drafts are verified greedily and only for greedy requests without penalties, logprobs, or structured output. Stateful-path models reject it. It speeds up copy-heavy output (code edits, quoting, RAG); see `docs/compatibility.md`
 - Gemma 3 and Gemma 4 text and multimodal (text + image)
 - Qwen3.5 and LFM2.5 (hybrid Mamba/attention architecture, via Hybrid-PA)
-- LFM3 (Hybrid-PA); pass `--trust-remote-code` and use OpenVINO 2026.5 (the image's nightly), see `docs/compatibility.md`
+- LFM3 (Hybrid-PA); pass `--trust-remote-code` and use OpenVINO 2026.5 (the image's nightly), see `docs/compatibility.md`. Its `generation_config.json` sets `repetition_penalty: 1.1`, which disables n-gram drafts; send `"repetition_penalty": 1.0` to use them
 - MiniCPM-V 4.7 text and image (Hybrid-PA); needs vLLM >= 0.32.0 and Transformers >= 5.18.0, see `docs/compatibility.md`
 
 ## Limitations
