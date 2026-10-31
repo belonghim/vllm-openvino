@@ -17,7 +17,6 @@ from vllm.sampling_params import SamplingType
 
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.attention.backend import AttentionMetadata
 
@@ -28,6 +27,46 @@ from vllm_openvino.utils import StepStatsLogger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
+
+
+def apply_grammar_bitmask(logits: torch.Tensor, req_ids: list[str],
+                          spec_tokens: dict[str, list[int]],
+                          grammar_output) -> None:
+    """Mask the logits rows of structured-output requests in place.
+
+    Bitmask rows come in `structured_output_request_ids` order, one per
+    logits row of the request (1 + its drafts). Tokens past the bitmask width
+    stay unmasked, as in xgrammar.
+    """
+    logit_start = {}
+    row = 0
+    for req_id in req_ids:
+        logit_start[req_id] = row
+        row += 1 + len(spec_tokens.get(req_id, ()))
+    bitmask_rows, logit_rows = [], []
+    bitmask_row = 0
+    for req_id in grammar_output.structured_output_request_ids:
+        num_rows = 1 + len(spec_tokens.get(req_id, ()))
+        start = logit_start.get(req_id)
+        if start is not None:
+            bitmask_rows.extend(range(bitmask_row, bitmask_row + num_rows))
+            logit_rows.extend(range(start, start + num_rows))
+        bitmask_row += num_rows
+    if not logit_rows:
+        return
+
+    bitmask = np.ascontiguousarray(
+        grammar_output.grammar_bitmask[bitmask_rows], dtype="<i4")
+    vocab_size = min(logits.shape[1], bitmask.shape[1] * 32)
+    rejected = torch.from_numpy(np.unpackbits(
+        bitmask.view(np.uint8), axis=1, count=vocab_size,
+        bitorder="little")) == 0
+    if logit_rows == list(range(logits.shape[0])):
+        logits[:, :vocab_size].masked_fill_(rejected, -float("inf"))
+    else:
+        rows = torch.tensor(logit_rows)
+        logits[rows, :vocab_size] = logits[rows, :vocab_size].masked_fill_(
+            rejected, -float("inf"))
 
 
 def num_state_slots(vllm_config: VllmConfig) -> int:
@@ -84,7 +123,7 @@ class OpenVINOModelRunnerV1:
         self.drafter = None
         self._draft_token_ids: DraftTokenIds | None = None
         if spec_config is not None:
-            from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+            from vllm_openvino.worker_v1.ngram_proposer import NgramProposer
             self.drafter = NgramProposer(vllm_config)
         max_sampled_rows = max_seqs * (1 + self._num_spec_tokens)
         self._sampled_idx_buf = np.zeros(max_sampled_rows, dtype=np.int64)
@@ -930,7 +969,8 @@ class OpenVINOModelRunnerV1:
 
         if grammar_output is not None:
             apply_grammar_bitmask(
-                scheduler_output, grammar_output, self.input_batch, logits)
+                logits, self.input_batch.req_ids,
+                scheduler_output.scheduled_spec_decode_tokens, grammar_output)
 
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         if spec_tokens:

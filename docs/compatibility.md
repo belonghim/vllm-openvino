@@ -3,7 +3,8 @@
 ## Requirements
 
 - vLLM `0.32.0`
-- OpenVINO `>= 2026.4.1`
+- OpenVINO `>= 2026.4.1`; the image pins nightly `2026.5.0.dev20261030`, which
+  has the MoE prefill fix (#39086) and reads IRs exported with 2026.5 (LFM3)
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
 - Tensor and pipeline parallelism are unsupported; multi-socket scaling is poor (see CPU Tuning in README)
@@ -68,18 +69,16 @@ Tracked upstream:
   Gumbel sample, logit bias) are missing from the `VLLM_TARGET_DEVICE=empty`
   wheel, like the `greedy_argmax` kernel of the V1 sampler. Not supported: speculative decoding
   (n-gram included), prompt embeddings, custom logits processors, decode and
-  prefill context parallelism, LoRA tower/connector. Its structured-output
-  step, `CPUStructuredOutputsWorker.apply_grammar_bitmask`, is plain PyTorch
-  (about 40 lines) and is the model for replacing the removed
-  `apply_grammar_bitmask`.
+  prefill context parallelism, LoRA tower/connector.
 - [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
   (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
-  "vLLM on CPU without Triton". The plugin breaks on import: it uses
-  `InputBatch`/`CachedRequestState` (which also build `SamplingMetadata` and
-  its logits processors), `NgramProposer` (n-gram speculation) and
-  `apply_grammar_bitmask` (structured output), all removed. The sampler is
-  already the plugin's own (`sampler.py`).
+  "vLLM on CPU without Triton". The plugin still imports
+  `InputBatch`/`CachedRequestState`, which also build `SamplingMetadata` and
+  its logits processors. The sampler (`sampler.py`), the grammar bitmask
+  (`apply_grammar_bitmask` in the runner, bit-identical to vLLM's xgrammar
+  call and about 3x faster) and the n-gram drafter
+  (`worker_v1/ngram_proposer.py`) are already the plugin's own.
   The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`, `block_table.py`,
   `sample/gumbel.py`, `penalties.py`, ...) are Triton kernels, so the plugin
   cannot switch to them. #61995's CPU runner is not a drop-in either: it
@@ -170,9 +169,16 @@ the transformed attention computation, not cache precision (long-context
 `VLLM_OPENVINO_STATEFUL_PA=0` to force the stateful path.
 
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
-Qwen3.5 and LFM2.5. Hybrid models without SDPA ops keep the stateful path.
+Qwen3.5, LFM2.5 and LFM3. Hybrid models without SDPA ops keep the stateful path.
 Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV
 cache, not SSM/conv state.
+
+LFM3 (conv width 7, full and 256-token sliding-window attention layers) is
+not in vLLM 0.32 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM`
+as a `vllm.general_plugins` entry so the config passes validation, and the
+model needs `--trust-remote-code` for its `configuration_lfm3.py`. Its IR is
+exported with OpenVINO 2026.5. On LFM3-1.7B-int4-ov a 1746-token prompt gave
+byte-identical 400-token greedy output on Hybrid-PA and the stateful path.
 
 Hybrid-PA uses standard PagedAttention for attention layers. Conv/SSM state
 storage depends on prefix caching:
@@ -555,10 +561,9 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), with `GatherMatmulCompressed`
   taking 80-90% of the time. The OpenVINO CPU plugin batches routed rows per
   expert into a GEMM only on bf16+AMX; elsewhere it runs one GEMV per routed
-  row. Tracked upstream in openvinotoolkit/openvino#38517, fixed by #39086
-  (merged into master, milestone 2026.5). Until a release contains it, the image ships a
-  patched CPU plugin with per-expert GEMM (`patches/README.md`): 425 and
-  204 tok/s at 1024 tokens with unchanged NLL.
+  row. Fixed by openvinotoolkit/openvino#39086 (milestone 2026.5), which the
+  image's nightly contains: a 6259-token LFM2.5-8B-A1B prompt has the same
+  TTFT (11.7 s) as the patched 2026.4.1 plugin the image shipped before.
 - `VLLM_USE_RUST_FRONTEND=1` starts with the bundled `vllm-rs` binary but gave
   no throughput change (Qwen3-1.7B, 1/8/16 concurrent, within run-to-run
   noise): decode runs at 20-300 tok/s, so the frontend is not the bottleneck.
