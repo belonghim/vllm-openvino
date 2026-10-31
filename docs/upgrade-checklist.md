@@ -27,9 +27,7 @@ High-risk interfaces include:
 - `vllm.v1.attention.backend`
 - `vllm.v1.attention.backends.utils`
 - `vllm.v1.outputs`
-- `vllm.v1.sample.metadata`
-- `vllm.v1.sample.sampler` (`apply_all_penalties` is patched by `sampler_patch.py`)
-- `vllm.v1.sample.ops.topk_topp_sampler` (`apply_top_k_top_p` is patched by `sampler_patch.py`; `forward_cpu` calls `torch.ops._C.greedy_argmax`/`fused_gumbel_argmax`, which `platform.py` registers because the wheel has no CPU kernels; re-check the `_C` ops `forward_cpu` uses after an upgrade)
+- `vllm.v1.sample.metadata` (`SamplingMetadata`, built by `InputBatch` and read by the plugin's `sampler.py`)
 - `vllm.v1.worker.gpu_input_batch`
 - `vllm.v1.worker.worker_base`
 - `vllm.v1.worker.utils`

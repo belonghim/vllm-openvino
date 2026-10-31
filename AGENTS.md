@@ -40,7 +40,7 @@ Stateful 경로는 유지보수 대상으로만 유지하고, hybrid 모델의 �
 | `model_executor/model_loader/openvino.py` | 모델 로딩, PagedAttention·gather-before-matmul 변환, 비전 IR |
 | `worker_v1/openvino_worker_v1.py` | 워커 — warmup, 로드 후 KV 풀 산정, 캐시 할당 |
 | `worker_v1/openvino_model_runner_v1.py` | ModelRunner — 입력 준비, 추론, 샘플링 |
-| `sampler_patch.py` | CPU용 샘플러 fast path (`VLLM_OPENVINO_FAST_SAMPLER`) |
+| `sampler.py` | CPU 샘플러 — V1 `Sampler` 대체, fast path (`VLLM_OPENVINO_FAST_SAMPLER`) |
 
 ## 검증
 

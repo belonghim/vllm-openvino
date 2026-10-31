@@ -24,9 +24,9 @@ from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler as SamplerV1
 
 import vllm_openvino.envs as envs
+from vllm_openvino.sampler import OpenVINOSampler
 from vllm_openvino.utils import (cpu_thread_limit, format_memory_size,
                                  image_input_enabled, model_weights_bytes)
 
@@ -318,7 +318,7 @@ class OpenVINOCausalLM(nn.Module):
         self.model_config = model_config
         self.logits_processor = LogitsProcessor(
             model_config.get_vocab_size(), logits_as_input=True)
-        self.sampler = SamplerV1()
+        self.sampler = OpenVINOSampler()
         self.last_infer_s = 0.0
         load_start = time.perf_counter()
 

@@ -66,7 +66,7 @@ Tracked upstream:
   (block-table gather, slot mapping, prefill inputs, position/seq-lens,
   M-RoPE, combine sampled/draft tokens, post-update, prompt-logprob token ids,
   Gumbel sample, logit bias) are missing from the `VLLM_TARGET_DEVICE=empty`
-  wheel, like `greedy_argmax` today. Not supported: speculative decoding
+  wheel, like the `greedy_argmax` kernel of the V1 sampler. Not supported: speculative decoding
   (n-gram included), prompt embeddings, custom logits processors, decode and
   prefill context parallelism, LoRA tower/connector. Its structured-output
   step, `CPUStructuredOutputsWorker.apply_grammar_bitmask`, is plain PyTorch
@@ -76,9 +76,10 @@ Tracked upstream:
   (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
   "vLLM on CPU without Triton". The plugin breaks on import: it uses
-  `InputBatch`/`CachedRequestState`, the V1 `Sampler`/`SamplingMetadata`,
-  `NgramProposer` (n-gram speculation) and `apply_grammar_bitmask` (structured
-  output), all removed.
+  `InputBatch`/`CachedRequestState` (which also build `SamplingMetadata` and
+  its logits processors), `NgramProposer` (n-gram speculation) and
+  `apply_grammar_bitmask` (structured output), all removed. The sampler is
+  already the plugin's own (`sampler.py`).
   The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`, `block_table.py`,
   `sample/gumbel.py`, `penalties.py`, ...) are Triton kernels, so the plugin
   cannot switch to them. #61995's CPU runner is not a drop-in either: it
@@ -92,9 +93,9 @@ Tracked upstream:
 Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
 path exists for plugins) are unanswered after two follow-ups.
 
-Since vLLM 0.32 the `Sampler` calls `torch.ops._C.greedy_argmax` whenever the
-platform reports CPU, and the PyPI-style wheel has no CPU kernels. `platform.py`
-registers an argmax implementation for that op when it is missing.
+The plugin samples with its own `sampler.py`, which follows vLLM 0.32's V1
+`Sampler` and needs no `torch.ops._C` kernel: vLLM's CPU path calls
+`greedy_argmax` and `fused_gumbel_argmax`, which the PyPI-style wheel lacks.
 
 ## Serving Paths
 

@@ -207,29 +207,6 @@ def _is_hybrid_pa_candidate(model_path: str) -> bool:
         return False
 
 
-def _register_cpu_sampler_ops() -> None:
-    # vLLM's CPU sampler calls these torch.ops._C kernels whenever the platform
-    # reports CPU; the wheel here has no CPU kernels, so provide them.
-    from vllm_openvino.sampler_patch import fused_gumbel_argmax
-    ops = {
-        "greedy_argmax(Tensor logits) -> Tensor":
-        lambda logits: logits.argmax(dim=-1).view(-1),
-        "fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor":
-        fused_gumbel_argmax,
-    }
-    lib = None
-    for schema, impl in ops.items():
-        name = schema.split("(", 1)[0]
-        if hasattr(torch.ops._C, name):
-            continue
-        lib = lib or torch.library.Library("_C", "FRAGMENT")
-        lib.define(schema)
-        lib.impl(name, impl, "CPU")
-    _register_cpu_sampler_ops.lib = lib  # type: ignore[attr-defined]
-
-
-_register_cpu_sampler_ops()
-
 # Constants for memory and block size configuration
 GIB_BYTES = 1024 ** 3
 CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
@@ -353,15 +330,6 @@ class OpenVinoPlatform(Platform):
                 "[OV-PLATFORM] TORCH_COMPILE_DISABLE is not set. "
                 "torch.compile is incompatible with OpenVINO; set "
                 "TORCH_COMPILE_DISABLE=1 to prevent unexpected failures.")
-
-        if envs.VLLM_OPENVINO_FAST_SAMPLER:
-            from vllm_openvino import sampler_patch
-            sampler_patch.install()
-        else:
-            logger.info(
-                "[OV-SAMPLER] VLLM_OPENVINO_FAST_SAMPLER=0: keeping stock "
-                "vllm.v1.sample.ops.topk_topp_sampler.compiled_random_sample "
-                "(torch.exponential_()).")
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.world_size != 1:
