@@ -60,6 +60,7 @@ class InputBatch:
             torch.float32)
         self.repetition_penalties, self.repetition_penalties_cpu = row_tensor(
             torch.float32)
+        self.min_p, self.min_p_cpu = row_tensor(torch.float32)
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
         self.top_p_reqs: set[str] = set()
@@ -67,6 +68,7 @@ class InputBatch:
         self.frequency_penalties_reqs: set[str] = set()
         self.presence_penalties_reqs: set[str] = set()
         self.repetition_penalties_reqs: set[str] = set()
+        self.min_p_reqs: set[str] = set()
 
         # Only rows whose request has its own seed.
         self.generators: dict[int, torch.Generator] = {}
@@ -76,6 +78,8 @@ class InputBatch:
         # True marks tokens to mask; allocated on first use (max_reqs x vocab).
         self.allowed_token_ids_mask: torch.Tensor | None = None
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
+        self.logit_bias: dict[int, dict[int, float]] = {}
+        self.min_tokens: dict[int, tuple[int, list[int], set[int], bool]] = {}
 
         # Rows freed by remove_request(), refilled smallest first.
         self._removed: list[int] = []
@@ -137,6 +141,9 @@ class InputBatch:
         self.repetition_penalties_cpu[req_index] = params.repetition_penalty
         if params.repetition_penalty != 1.0:
             self.repetition_penalties_reqs.add(req_id)
+        self.min_p_cpu[req_index] = params.min_p
+        if params.min_p:
+            self.min_p_reqs.add(req_id)
 
         if request.generator is not None:
             self.generators[req_index] = request.generator
@@ -155,6 +162,14 @@ class InputBatch:
                 params.allowed_token_ids] = False
         if params.bad_words_token_ids:
             self.bad_words_token_ids[req_index] = params.bad_words_token_ids
+        if params.logit_bias:
+            self.logit_bias[req_index] = params.logit_bias
+        if (params.min_tokens
+                and len(request.output_token_ids) < params.min_tokens):
+            self.min_tokens[req_index] = (
+                params.min_tokens, request.output_token_ids,
+                params.all_stop_token_ids,
+                params.structured_outputs is not None)
         return req_index
 
     def remove_request(self, req_id: str) -> int | None:
@@ -174,6 +189,7 @@ class InputBatch:
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
+        self.min_p_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.logprob_token_ids.pop(req_id, None)
@@ -181,6 +197,8 @@ class InputBatch:
         if self.allowed_token_ids_mask is not None:
             self.allowed_token_ids_mask[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        self.logit_bias.pop(req_index, None)
+        self.min_tokens.pop(req_index, None)
         return req_index
 
     def condense(self) -> None:
@@ -218,7 +236,7 @@ class InputBatch:
                           self.top_p_cpu, self.top_k_cpu,
                           self.frequency_penalties_cpu,
                           self.presence_penalties_cpu,
-                          self.repetition_penalties_cpu):
+                          self.repetition_penalties_cpu, self.min_p_cpu):
                 array[empty_index] = array[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
@@ -227,9 +245,11 @@ class InputBatch:
                 self.allowed_token_ids_mask[empty_index] = (
                     self.allowed_token_ids_mask[last_req_index])
                 self.allowed_token_ids_mask[last_req_index].fill_(False)
-            bad_words = self.bad_words_token_ids.pop(last_req_index, None)
-            if bad_words is not None:
-                self.bad_words_token_ids[empty_index] = bad_words
+            for row_state in (self.bad_words_token_ids, self.logit_bias,
+                              self.min_tokens):
+                state = row_state.pop(last_req_index, None)
+                if state is not None:
+                    row_state[empty_index] = state
             last_req_index -= 1
 
         del self._req_ids[num_reqs:]
@@ -285,5 +305,8 @@ class InputBatch:
             allowed_token_ids_mask=(self.allowed_token_ids_mask[:num_reqs]
                                     if self.has_allowed_token_ids else None),
             bad_words_token_ids=self.bad_words_token_ids,
+            logit_bias=self.logit_bias,
+            min_tokens=self.min_tokens,
+            min_p=self.min_p[:num_reqs].clone() if self.min_p_reqs else None,
             logprob_token_ids=logprob_token_ids,
         )

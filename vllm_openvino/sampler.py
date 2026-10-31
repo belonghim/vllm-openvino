@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU sampler for the OpenVINO runner.
 
-Follows vLLM 0.32's V1 `Sampler` with `raw_logprobs` step for step (logprobs
-from the unprocessed logits, allowed-token mask, bad words, penalties,
-greedy/temperature, top-k/top-p, random draw), so the plugin does not depend
-on the V1 sampler that vLLM is removing with Model Runner V1.
+Follows vLLM 0.32's V1 `Sampler` with `raw_logprobs` and its builtin logits
+processors step for step (logprobs from the unprocessed logits, allowed-token
+mask, bad words, min_tokens, logit_bias, penalties, greedy/temperature, min_p,
+top-k/top-p, random draw), so the plugin does not depend on the V1 sampler
+that vLLM is removing with Model Runner V1.
 
 At decode, sampling runs on the critical path of every step and, for small
 models, costs as much as the OpenVINO inference itself. With
@@ -66,6 +67,10 @@ class SamplingMetadata:
     # True marks tokens to mask.
     allowed_token_ids_mask: torch.Tensor | None
     bad_words_token_ids: dict[int, list[list[int]]]
+    logit_bias: dict[int, dict[int, float]]
+    # row -> (min_tokens, live output token ids, stop token ids, structured)
+    min_tokens: dict[int, tuple[int, list[int], set[int], bool]]
+    min_p: torch.Tensor | None
     logprob_token_ids: dict[int, list[int]] | None = None
 
 
@@ -113,6 +118,10 @@ class OpenVINOSampler:
         if md.bad_words_token_ids:
             _apply_bad_words(logits, md.bad_words_token_ids,
                              md.output_token_ids)
+        if md.min_tokens:
+            _apply_min_tokens(logits, md.min_tokens)
+        if md.logit_bias:
+            _apply_logit_bias(logits, md.logit_bias)
         if not md.no_penalties:
             logits = self._apply_penalties(logits, md)
         return logits
@@ -129,6 +138,8 @@ class OpenVINOSampler:
         if not md.all_random:
             temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         logits = logits.div_(temp.unsqueeze(dim=1))
+        if md.min_p is not None:
+            _apply_min_p(logits, md.min_p)
         logits = self._apply_top_k_top_p(logits, md.top_k, md.top_p)
         sampled = _random_sample(logits, md.generators)
         if greedy is None:
@@ -174,6 +185,50 @@ def _random_sample(logits: torch.Tensor,
         draw[row] = torch.rand(1, generator=generator.manual_seed(seed))
     return torch.searchsorted(cdf, draw * cdf[:, -1:], right=True).clamp_(
         max=cdf.shape[-1] - 1).view(-1)
+
+
+def _apply_min_tokens(
+        logits: torch.Tensor,
+        min_tokens: dict[int, tuple[int, list[int], set[int], bool]]) -> None:
+    rows, toks, restore_rows, restore_toks = [], [], [], []
+    for row, (min_toks, output_ids, stop_ids, structured) in min_tokens.items():
+        if len(output_ids) >= min_toks or not stop_ids:
+            continue
+        rows += [row] * len(stop_ids)
+        toks += list(stop_ids)
+        if structured:
+            restore_rows += [row] * len(stop_ids)
+            restore_toks += list(stop_ids)
+    if not rows:
+        return
+    stop_logits = logits[restore_rows, restore_toks]
+    logits[rows, toks] = float("-inf")
+    if not restore_rows:
+        return
+    # A grammar that only allows stop tokens would leave the row all -inf;
+    # keep its stop tokens then, as vLLM does.
+    rows_t = torch.tensor(restore_rows)
+    unique_rows, inverse = torch.unique_consecutive(rows_t, return_inverse=True)
+    restore = (torch.isneginf(logits[unique_rows]).all(dim=-1)[inverse]
+               & torch.isfinite(stop_logits))
+    logits[rows_t[restore], torch.tensor(restore_toks)[restore]] = (
+        stop_logits[restore])
+
+
+def _apply_logit_bias(logits: torch.Tensor,
+                      logit_bias: dict[int, dict[int, float]]) -> None:
+    rows, toks, biases = [], [], []
+    for row, bias in logit_bias.items():
+        rows += [row] * len(bias)
+        toks += bias.keys()
+        biases += bias.values()
+    logits[rows, toks] += torch.tensor(biases, dtype=torch.float32)
+
+
+def _apply_min_p(logits: torch.Tensor, min_p: torch.Tensor) -> None:
+    probs = logits.softmax(dim=-1)
+    threshold = probs.amax(dim=-1, keepdim=True).mul_(min_p.unsqueeze(1))
+    logits.masked_fill_(probs < threshold, -float("inf"))
 
 
 def _apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
