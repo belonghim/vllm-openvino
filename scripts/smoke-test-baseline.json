@@ -1,25 +1,25 @@
 {
   "_meta": {
-    "git_sha": "c3923a3"
+    "git_sha": "c626317"
   },
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov": {
-    "total_ms": 13553,
+    "total_ms": 12455,
     "total_tokens": 735,
-    "avg_tps": 54.23
+    "avg_tps": 59.01
   },
   "gemma-4-E2B-it-int4-ov": {
-    "total_ms": 60053,
+    "total_ms": 51288,
     "total_tokens": 1127,
-    "avg_tps": 18.77
+    "avg_tps": 21.97
   },
   "LFM2.5-350M-int8-ov": {
-    "total_ms": 12861,
+    "total_ms": 11008,
     "total_tokens": 735,
-    "avg_tps": 57.15
+    "avg_tps": 66.77
   },
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov (VLLM_OPENVINO_STATEFUL_PA=0)": {
-    "total_ms": 18813,
+    "total_ms": 15575,
     "total_tokens": 953,
-    "avg_tps": 50.66
+    "avg_tps": 61.19
   }
 }
