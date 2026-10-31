@@ -25,8 +25,8 @@ those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
 removal for 0.32, but 0.32.0 and main still ship it. vLLM's own CPU runner
 (`CPUModelRunner`) still subclasses the MRV1 `GPUModelRunner`, so MRV1 removal
 waits on CPU MRV2 without Triton
-([#61995](https://github.com/vllm-project/vllm/pull/61995)). When
-`gpu_input_batch` goes away, follow what the CPU runner moves to.
+([#61995](https://github.com/vllm-project/vllm/pull/61995), merged, but only
+for non-x86 CPUs).
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
 not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
@@ -51,17 +51,27 @@ Tracked upstream:
   the unspecified one, and the plugin's worker does not derive from
   `gpu_worker.Worker`, so it does not affect the plugin.
 - [vllm-project/vllm#61995](https://github.com/vllm-project/vllm/pull/61995)
-  (open) makes MRV2 the default for CPU backends without Triton (Arm, POWER,
-  s390x, RISC-V). Since 2026-10-28 it is a standalone runner under
-  `vllm/v1/worker/cpu/` (`no_triton_model_runner.py`, `input_batch.py`,
-  `sampler.py`, `structured_outputs.py`, `model_states/`, ...) with no
-  dependency on `vllm/v1/worker/gpu`; MRV2 code is copied and Triton kernels
-  are replaced by PyTorch or new `csrc/cpu` C++ ops (Gumbel argmax, input
-  batch, block table, slot mapping, M-RoPE). Speculative decoding is not
-  supported. It keeps MRV1 selectable and does not apply where Triton is
-  available. Once merged it is the pattern to follow when MRV1 is removed; the
-  C++ ops are missing from the `VLLM_TARGET_DEVICE=empty` wheel, like
-  `greedy_argmax` today, and n-gram speculation would need its own path.
+  (merged 2026-10-30, after 0.32.0; main only) adds `StandaloneCPUModelRunner`
+  (`vllm/v1/worker/cpu/standalone_model_runner.py`), an MRV2 runner with no
+  dependency on `vllm/v1/worker/gpu`. It is selected when
+  `Platform.uses_standalone_cpu_model_runner()` is true:
+  `not HAS_TRITON and cpu_architecture != X86` (`platforms/cpu.py`), i.e. Arm,
+  POWER, s390x, RISC-V. On x86 without Triton `use_v2_model_runner` still takes
+  the "requires Triton; using the V1 model runner" branch, so nothing changes
+  for this plugin on x86.
+  The runner is a different design from MRV1: a per-step `InputBatch`
+  dataclass over a persistent `CPURequestState` indexed by `idx_mapping`, a
+  PyTorch `CPUSampler`, and per-model `ModelState`s (default, mamba-hybrid,
+  encoder-only, encoder-decoder). Ten `torch.ops._C.*_cpu` ops from `csrc/cpu`
+  (block-table gather, slot mapping, prefill inputs, position/seq-lens,
+  M-RoPE, combine sampled/draft tokens, post-update, prompt-logprob token ids,
+  Gumbel sample, logit bias) are missing from the `VLLM_TARGET_DEVICE=empty`
+  wheel, like `greedy_argmax` today. Not supported: speculative decoding
+  (n-gram included), prompt embeddings, custom logits processors, decode and
+  prefill context parallelism, LoRA tower/connector. Its structured-output
+  step, `CPUStructuredOutputsWorker.apply_grammar_bitmask`, is plain PyTorch
+  (about 40 lines) and is the model for replacing the removed
+  `apply_grammar_bitmask`.
 - [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
   (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
@@ -71,10 +81,12 @@ Tracked upstream:
   output), all removed.
   The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`, `block_table.py`,
   `sample/gumbel.py`, `penalties.py`, ...) are Triton kernels, so the plugin
-  cannot switch to them. If #61995's CPU runner survives, follow it;
-  otherwise keep trimmed copies of the classes in the plugin (the runner uses
-  about ten `InputBatch` members). Before any vLLM upgrade, check whether the
-  release contains #63373.
+  cannot switch to them. #61995's CPU runner is not a drop-in either: it
+  needs the C++ ops above, and adopting its `InputBatch`/`CPURequestState`/
+  `CPUSampler` split would replace the plugin's runner state handling.
+  The cheaper path is trimmed copies of the removed classes in the plugin (the
+  runner uses about ten `InputBatch` members). Before any vLLM upgrade, check
+  whether the release contains #63373.
   Asked on the PR (2026-10-27) whether a non-Triton MRV2 path stays supported.
 
 Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
