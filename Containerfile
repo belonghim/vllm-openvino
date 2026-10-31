@@ -19,6 +19,8 @@ RUN pip install -U pip setuptools wheel && \
         humming-kernels pynvvideocodec quack-kernels \
         tokenspeed-mla tokenspeed-triton tilelang && \
     pip cache purge && \
+    SP=/opt/vllm-env/lib/python3.12/site-packages && \
+    rm -rf $SP/vllm/vllm_flash_attn $SP/vllm/third_party/deep_gemm $SP/vllm/_flashkda_C.abi3.so $SP/nccl && \
     find /opt/vllm-env -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 WORKDIR /opt/vllm
 COPY pyproject.toml ./
@@ -29,7 +31,7 @@ RUN pip install --no-deps --no-cache-dir .
 COPY patches/libopenvino_intel_cpu_plugin.so /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/
 RUN echo "bd4b1036c173a900944b5f6e0dd99b656c194a49f6dbdada8f2b381bc6361c38  /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/libopenvino_intel_cpu_plugin.so" | sha256sum -c -
 FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
-RUN microdnf install -y python3 shadow-utils && microdnf clean all
+RUN microdnf install -y python3 && microdnf clean all
 COPY --from=builder /opt/vllm-env /opt/vllm-env
 ENV VIRTUAL_ENV=/opt/vllm-env
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
