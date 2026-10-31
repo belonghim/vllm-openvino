@@ -22,11 +22,12 @@ CONTAINER_NAME="vllm-smoke"
 IMAGE="quay.io/joopark/vllm-openvino"
 MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
-# "<model dir> [ENV=VALUE]"
+# "<model dir> [ENV=VALUE | --serve-arg]..."
 MODELS=(
-  "Qwen2.5-Coder-0.5B-Instruct-int4-ov"
+  "Qwen3-1.7B-int4-ov"
   "gemma-4-E2B-it-int4-ov"
-  "LFM2.5-350M-int8-ov"
+  "LFM3-1.7B-int4-ov --trust-remote-code"
+  "Qwen3.5-0.8B-int4-ov"
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov VLLM_OPENVINO_STATEFUL_PA=0"
 )
 CONCURRENT_REQUESTS=4
@@ -47,9 +48,17 @@ cleanup_container() {
 }
 
 run_model_perf() {
-  local model_name model_env
-  read -r model_name model_env <<< "$1"
-  local label="$model_name${model_env:+ ($model_env)}"
+  local model_name opts
+  read -r model_name opts <<< "$1"
+  local label="$model_name${opts:+ ($opts)}"
+  local env_args=() serve_args=() opt
+  for opt in $opts; do
+    if [[ "$opt" == --* ]]; then
+      serve_args+=("$opt")
+    else
+      env_args+=(-e "$opt")
+    fi
+  done
   local model_dir="$MODEL_BASE/$model_name"
 
   if [[ ! -d "$model_dir" ]]; then
@@ -67,9 +76,9 @@ run_model_perf() {
     -v "$model_dir:/models:Z" \
     -e VLLM_OPENVINO_DEVICE=CPU \
     -e TORCH_COMPILE_DISABLE=1 \
-    ${model_env:+-e "$model_env"} \
+    "${env_args[@]}" \
     "$IMAGE" \
-    --port=8080 --model /models --max-model-len 4096 >/dev/null
+    --port=8080 --model /models --max-model-len 4096 "${serve_args[@]}" >/dev/null
 
   local ready=false
   for _ in $(seq 1 60); do
