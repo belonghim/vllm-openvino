@@ -10,9 +10,9 @@ the supported vLLM version changes.
 3. Check worker, model runner, scheduler output, attention metadata, and
    KV-cache interface signatures.
 4. Check platform registration and worker selection.
-5. Check that vLLM still ships MRV1 (the V1-style model runner this plugin
-   uses) and whether `Platform.supports_v2_model_runner` has merged; see
-   "Upstream vLLM Compatibility" in `compatibility.md`. The plugin consumes
+5. The plugin runs its own runner and keeps its own copies of the MRV1 pieces
+   it used, so MRV1 removal (#63373) does not affect it; see "Upstream vLLM
+   Compatibility" in `compatibility.md`. The plugin consumes
    `WorkerBase`, `bind_kv_cache`, `SchedulerOutput`, `ModelRunnerOutput` and
    other `vllm.v1.*` symbols without running the built-in runner; check them
    against the new wheel before bumping:

@@ -39,13 +39,6 @@ that configuration.
 
 Tracked upstream:
 
-- [vllm-project/vllm#57684](https://github.com/vllm-project/vllm/issues/57684) —
-  support-path policy question for platform plugins that ship their own
-  worker/model runner and cannot install Triton.
-- [vllm-project/vllm#58703](https://github.com/vllm-project/vllm/pull/58703) —
-  adds `Platform.supports_v2_model_runner`; the plugin overrides it to `False`
-  to opt out of the Triton probe (harmless no-op on vLLM builds without the
-  hook). Parked: the reviewer prefers to wait for the MRV1 removal plan.
 - [vllm-project/vllm#62576](https://github.com/vllm-project/vllm/pull/62576)
   (merged after 0.32.0) moves the MRV2 Triton check from config validation to
   `gpu_worker.Worker`. It keeps the MRV1 fallback for every platform except
@@ -87,10 +80,10 @@ Tracked upstream:
   `ModelRunnerOutput`/`SamplerOutput`/`LogprobsTensors`/`DraftTokenIds`, the
   KV-cache specs and the attention backend interfaces; the draft leaves them
   in place.
-  Asked on the PR (2026-10-27) whether a non-Triton MRV2 path stays supported.
 
-Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner
-path exists for plugins) are unanswered after two follow-ups.
+vLLM offers no upstream runner for an x86 plugin that cannot use Triton
+(#61995 is non-x86 only), so the plugin keeps its own; the support question
+(#57684) is closed on that basis.
 
 The plugin samples with its own `sampler.py`, which follows vLLM 0.32's V1
 `Sampler` and needs no `torch.ops._C` kernel: vLLM's CPU path calls
