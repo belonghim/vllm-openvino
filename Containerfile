@@ -5,8 +5,8 @@ ENV VIRTUAL_ENV=/opt/vllm-env
 RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN pip install -U pip setuptools wheel && \
-    PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" \
-    pip install --no-cache-dir "torch==2.13.0+cpu" "torchvision==0.28.0+cpu" "openvino==2026.4.1" "transformers==5.18.0" "vllm @ https://wheels.vllm.ai/5df63a7203cdb9328d824a27b682e77c7b9928be/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl" && \
+    PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/nightly" \
+    pip install --no-cache-dir "torch==2.13.0+cpu" "torchvision==0.28.0+cpu" "openvino==2026.5.0.dev20261030" "transformers==5.18.0" "vllm @ https://wheels.vllm.ai/5df63a7203cdb9328d824a27b682e77c7b9928be/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl" && \
     pip uninstall -y \
         triton \
         flashinfer-cubin flashinfer-python \
@@ -25,11 +25,6 @@ RUN pip install -U pip setuptools wheel && \
 WORKDIR /opt/vllm
 COPY pyproject.toml ./
 RUN pip install --no-deps --no-cache-dir .
-# Patched CPU plugin (openvinotoolkit/openvino#38517), see patches/README.md. Remove once upstream ships the fix.
-# The .so is gitignored, so a stale or locally rebuilt file is easy to copy in by
-# accident; the hash pins it to the 2026.4.1 wheel it must match.
-COPY patches/libopenvino_intel_cpu_plugin.so /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/
-RUN echo "bd4b1036c173a900944b5f6e0dd99b656c194a49f6dbdada8f2b381bc6361c38  /opt/vllm-env/lib/python3.12/site-packages/openvino/libs/libopenvino_intel_cpu_plugin.so" | sha256sum -c -
 FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
 RUN microdnf install -y python3 && microdnf clean all
 COPY --from=builder /opt/vllm-env /opt/vllm-env

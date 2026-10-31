@@ -32,6 +32,9 @@ Repository = "https://github.com/belonghim/vllm-openvino"
 [project.entry-points."vllm.platform_plugins"]
 openvino = "vllm_openvino:register"
 
+[project.entry-points."vllm.general_plugins"]
+openvino_models = "vllm_openvino:register_models"
+
 [tool.setuptools.packages.find]
 where = ["."]  # list of folders that contain the packages (["."] by default)
 include = ["vllm_openvino*"]  # package names should match these glob patterns (["*"] by default)

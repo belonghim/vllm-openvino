@@ -54,15 +54,17 @@ Update every place that names a version:
 
 - `pyproject.toml`: `version`, `vllm`, `transformers`, `openvino`
 - `Containerfile`: the vLLM wheel URL, `torch`, `torchvision`, `openvino`,
-  `transformers`, and the CPU plugin sha256
+  and `transformers`
 - `AGENTS.md` and `CONTRIBUTING.md`: vLLM and OpenVINO versions
 - `docs/compatibility.md`: Requirements and the version-specific notes
 
 ## OpenVINO Upgrades
 
-The image overwrites the wheel's CPU plugin with a patched build tied to
-OpenVINO 2026.4.1. On an OpenVINO version change, follow `patches/README.md`
-to drop or rebuild it.
+The image pins OpenVINO nightly `2026.5.0.dev20261030` from
+`storage.openvinotoolkit.org/simple/wheels/nightly` for the MoE prefill fix
+(#39086) and 2026.5-exported IRs (LFM3). Move to the 2026.5 release once it
+ships and drop the nightly index. When upgrading, re-check LFM2.5-8B-A1B
+prefill TTFT and that vLLM still lacks LFM3 before keeping `register_models`.
 
 ## Validation
 

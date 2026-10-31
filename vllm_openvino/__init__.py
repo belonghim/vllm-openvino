@@ -9,6 +9,15 @@ def register():
     return "vllm_openvino.platform.OpenVinoPlatform"
 
 
+def register_models():
+    # vLLM 0.32 lacks LFM3; it only needs the arch for config validation.
+    from vllm import ModelRegistry
+    if "Lfm3ForCausalLM" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model(
+            "Lfm3ForCausalLM",
+            "vllm_openvino.model_executor.lfm3:Lfm3ForCausalLM")
+
+
 class _ProcessNameFilter(logging.Filter):
     """vLLM installs the record factory that sets vllm_process_name only after
     plugins load; records emitted earlier would fail to format."""
