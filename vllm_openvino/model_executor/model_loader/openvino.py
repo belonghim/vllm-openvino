@@ -23,10 +23,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.v1.outputs import SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
 
 import vllm_openvino.envs as envs
-from vllm_openvino.sampler import OpenVINOSampler
+from vllm_openvino.sampler import OpenVINOSampler, SamplingMetadata
 from vllm_openvino.utils import (cpu_thread_limit, format_memory_size,
                                  image_input_enabled, model_weights_bytes)
 

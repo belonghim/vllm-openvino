@@ -16,12 +16,12 @@ from vllm.multimodal import BatchedTensorInputs
 from vllm.sampling_params import SamplingType
 
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.attention.backend import AttentionMetadata
 
 from vllm_openvino.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm_openvino.model_executor.model_loader.openvino import get_model
+from vllm_openvino.sampler import SamplingMetadata
+from vllm_openvino.worker_v1.input_batch import CachedRequestState, InputBatch
 from vllm_openvino.utils import StepStatsLogger
 
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -104,7 +104,11 @@ class OpenVINOModelRunnerV1:
         self.requests: dict[str, CachedRequestState] = {}
         self._execute_state: tuple[SchedulerOutput, torch.Tensor] | None = None
         self.num_cache_groups = 1
-        self.input_batch = self._create_input_batch(self.num_cache_groups)
+        self.input_batch = InputBatch(
+            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_model_len=self.model_config.max_model_len,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
 
         # KV cache — set by worker after initialize_cache
         self.kv_caches: list[tuple[ov.Tensor, ov.Tensor]] = []
@@ -301,26 +305,8 @@ class OpenVINOModelRunnerV1:
                 cache.data[slot] = 0
         return slot
 
-    def _create_input_batch(self, num_cache_groups: int) -> InputBatch:
-        block_size = self.cache_config.block_size
-        n_groups = max(1, num_cache_groups)
-        block_sizes = [block_size] * n_groups
-        max_blocks = max(1, (self.model_config.max_model_len + block_size - 1) // block_size)
-        max_num_blocks_per_req = [max_blocks] * n_groups
-        return InputBatch(
-            max_num_reqs=self.scheduler_config.max_num_seqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
-            device=self.device,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=block_sizes,
-            max_num_blocks_per_req=max_num_blocks_per_req,
-            is_pooling_model=getattr(self.model_config, 'is_pooling_model', False),
-        )
-
     def configure_cache_groups(self, num_cache_groups: int) -> None:
         self.num_cache_groups = max(1, num_cache_groups)
-        self.input_batch = self._create_input_batch(self.num_cache_groups)
         self._init_block_index_tensors()
 
     def configure_la_prefix_cache(self, interval: int, kv_blocks_per_block: int) -> None:
@@ -455,16 +441,11 @@ class OpenVINOModelRunnerV1:
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                prompt_embeds=getattr(new_req_data, 'prompt_embeds', None),
-                prompt_is_token_ids=getattr(new_req_data, 'prompt_is_token_ids', True),
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
-                pooling_params=new_req_data.pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
             self.input_batch.add_request(req_state)

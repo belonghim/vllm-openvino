@@ -73,20 +73,20 @@ Tracked upstream:
 - [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
   (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
-  "vLLM on CPU without Triton". The plugin still imports
-  `InputBatch`/`CachedRequestState`, which also build `SamplingMetadata` and
-  its logits processors. The sampler (`sampler.py`), the grammar bitmask
-  (`apply_grammar_bitmask` in the runner, bit-identical to vLLM's xgrammar
-  call and about 3x faster) and the n-gram drafter
-  (`worker_v1/ngram_proposer.py`) are already the plugin's own.
-  The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`, `block_table.py`,
-  `sample/gumbel.py`, `penalties.py`, ...) are Triton kernels, so the plugin
-  cannot switch to them. #61995's CPU runner is not a drop-in either: it
-  needs the C++ ops above, and adopting its `InputBatch`/`CPURequestState`/
-  `CPUSampler` split would replace the plugin's runner state handling.
-  The cheaper path is trimmed copies of the removed classes in the plugin (the
-  runner uses about ten `InputBatch` members). Before any vLLM upgrade, check
-  whether the release contains #63373.
+  "vLLM on CPU without Triton". The plugin imports none of what the draft
+  removes: it keeps its own trimmed copies of the MRV1 pieces it used, which
+  give the same output as vLLM 0.32's (`sampler.py` for the V1 `Sampler` and
+  `SamplingMetadata`, `worker_v1/input_batch.py` for `InputBatch` and
+  `CachedRequestState`, `worker_v1/ngram_proposer.py`, and
+  `apply_grammar_bitmask` in the runner, about 3x faster than vLLM's xgrammar
+  call on CPU). The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`,
+  `block_table.py`, `sample/gumbel.py`, ...) are Triton kernels, and #61995's
+  CPU runner needs the C++ ops above and a different runner state design, so
+  neither is a drop-in. What the plugin still takes from `vllm.v1` is
+  `WorkerBase`/`CompilationTimes`, `bind_kv_cache`, `SchedulerOutput`,
+  `ModelRunnerOutput`/`SamplerOutput`/`LogprobsTensors`/`DraftTokenIds`, the
+  KV-cache specs and the attention backend interfaces; the draft leaves them
+  in place.
   Asked on the PR (2026-10-27) whether a non-Triton MRV2 path stays supported.
 
 Open questions on #57684 (MRV1 removal timing, and whether a replacement-runner

@@ -13,9 +13,9 @@ the supported vLLM version changes.
 5. Check that vLLM still ships MRV1 (the V1-style model runner this plugin
    uses) and whether `Platform.supports_v2_model_runner` has merged; see
    "Upstream vLLM Compatibility" in `compatibility.md`. The plugin consumes
-   `InputBatch`, `CachedRequestState`, `bind_kv_cache` and other `vllm.v1.*`
-   symbols without running the built-in runner; check them against the new
-   wheel before bumping:
+   `WorkerBase`, `bind_kv_cache`, `SchedulerOutput`, `ModelRunnerOutput` and
+   other `vllm.v1.*` symbols without running the built-in runner; check them
+   against the new wheel before bumping:
 
    ```bash
    podman run --rm -v "$PWD:/w:Z" -w /w --entrypoint python <new-image> scripts/check-vllm-imports.py
@@ -27,8 +27,6 @@ High-risk interfaces include:
 - `vllm.v1.attention.backend`
 - `vllm.v1.attention.backends.utils`
 - `vllm.v1.outputs`
-- `vllm.v1.sample.metadata` (`SamplingMetadata`, built by `InputBatch` and read by the plugin's `sampler.py`)
-- `vllm.v1.worker.gpu_input_batch`
 - `vllm.v1.worker.worker_base`
 - `vllm.v1.worker.utils`
 - `vllm.v1.core.sched.output`
@@ -44,8 +42,13 @@ Verify every overridden or consumed symbol in:
 - `worker_v1/openvino_model_runner_v1.py`
 - `kv_cache.py`
 
+`sampler.py`, `worker_v1/input_batch.py` and `worker_v1/ngram_proposer.py` are
+copies of vLLM 0.32's V1 sampler, `InputBatch` and `NgramProposer`. They do
+not break when vLLM changes, but compare them with the new release's sampling
+semantics (new `SamplingParams` fields, changed defaults).
+
 Pay particular attention to `WorkerBase`, `ModelRunnerOutput`,
-`SchedulerOutput`, `InputBatch`, `AttentionMetadata`, `KVCacheSpec`,
+`SchedulerOutput`, `AttentionMetadata`, `KVCacheSpec`,
 `MambaSpec`, `bind_kv_cache`, and `CompilationTimes`.
 
 ## Version Pins

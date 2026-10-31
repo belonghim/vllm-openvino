@@ -2,10 +2,9 @@
 """CPU sampler for the OpenVINO runner.
 
 Follows vLLM 0.32's V1 `Sampler` with `raw_logprobs` step for step (logprobs
-from the unprocessed logits, allowed-token mask, bad words, non-argmax-
-invariant processors, penalties, thinking budget, greedy/temperature,
-argmax-invariant processors, top-k/top-p, random draw), so the plugin does
-not depend on the V1 sampler that vLLM is removing with Model Runner V1.
+from the unprocessed logits, allowed-token mask, bad words, penalties,
+greedy/temperature, top-k/top-p, random draw), so the plugin does not depend
+on the V1 sampler that vLLM is removing with Model Runner V1.
 
 At decode, sampling runs on the critical path of every step and, for small
 models, costs as much as the OpenVINO inference itself. With
@@ -33,6 +32,8 @@ last bucket.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 
@@ -44,12 +45,37 @@ _SAMPLING_EPS = 1e-5
 _NUCLEUS_CANDIDATES = 1024
 
 
+@dataclass
+class SamplingMetadata:
+    temperature: torch.Tensor | None
+    all_greedy: bool
+    all_random: bool
+    top_p: torch.Tensor | None
+    top_k: torch.Tensor | None
+    # Only rows whose request has its own seed.
+    generators: dict[int, torch.Generator]
+    # None: no logprobs; 0: sampled token only.
+    max_num_logprobs: int | None
+    no_penalties: bool
+    # Padded with vocab_size; set only when penalties apply.
+    prompt_token_ids: torch.Tensor | None
+    frequency_penalties: torch.Tensor
+    presence_penalties: torch.Tensor
+    repetition_penalties: torch.Tensor
+    output_token_ids: list[list[int]]
+    # True marks tokens to mask.
+    allowed_token_ids_mask: torch.Tensor | None
+    bad_words_token_ids: dict[int, list[list[int]]]
+    logprob_token_ids: dict[int, list[int]] | None = None
+
+
 class OpenVINOSampler:
 
     def __init__(self) -> None:
         self.fast = envs.VLLM_OPENVINO_FAST_SAMPLER
 
-    def __call__(self, logits: torch.Tensor, sampling_metadata) -> SamplerOutput:
+    def __call__(self, logits: torch.Tensor,
+                 sampling_metadata: SamplingMetadata) -> SamplerOutput:
         md = sampling_metadata
         num_logprobs = md.max_num_logprobs
         raw_logprobs = None
@@ -81,24 +107,18 @@ class OpenVINOSampler:
         )
 
     def _apply_logits_processors(self, logits: torch.Tensor,
-                                 md) -> torch.Tensor:
+                                 md: SamplingMetadata) -> torch.Tensor:
         if md.allowed_token_ids_mask is not None:
             logits.masked_fill_(md.allowed_token_ids_mask, float("-inf"))
         if md.bad_words_token_ids:
             _apply_bad_words(logits, md.bad_words_token_ids,
                              md.output_token_ids)
-        for processor in md.logitsprocs.non_argmax_invariant:
-            logits = processor.apply(logits)
         if not md.no_penalties:
             logits = self._apply_penalties(logits, md)
-        holder = md.thinking_budget_state_holder
-        if holder is not None and holder.has_tracked_requests():
-            holder.update_state(md.output_token_ids, md.spec_token_ids,
-                                repeat_indices=None)
-            logits = holder.apply_to_logits(logits, False, md.spec_token_ids)
         return logits
 
-    def _sample(self, logits: torch.Tensor, md) -> torch.Tensor:
+    def _sample(self, logits: torch.Tensor,
+                md: SamplingMetadata) -> torch.Tensor:
         greedy = None
         if not md.all_random:
             greedy = logits.argmax(dim=-1).view(-1)
@@ -109,8 +129,6 @@ class OpenVINOSampler:
         if not md.all_random:
             temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         logits = logits.div_(temp.unsqueeze(dim=1))
-        for processor in md.logitsprocs.argmax_invariant:
-            logits = processor.apply(logits)
         logits = self._apply_top_k_top_p(logits, md.top_k, md.top_p)
         sampled = _random_sample(logits, md.generators)
         if greedy is None:
@@ -128,7 +146,8 @@ class OpenVINOSampler:
                 return out
         return _apply_top_k_top_p_sort(logits, k, p)
 
-    def _apply_penalties(self, logits: torch.Tensor, md) -> torch.Tensor:
+    def _apply_penalties(self, logits: torch.Tensor,
+                         md: SamplingMetadata) -> torch.Tensor:
         if (self.fast and not bool((md.presence_penalties != 0).any())
                 and not bool((md.frequency_penalties != 0).any())):
             return _apply_repetition_penalty_sparse(
