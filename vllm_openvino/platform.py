@@ -311,6 +311,12 @@ class OpenVinoPlatform(Platform):
                 "prompt_logprobs is not supported on the OpenVINO backend.",
                 parameter="prompt_logprobs",
                 value=params.prompt_logprobs)
+        if getattr(params, "thinking_token_budget", None) is not None:
+            raise VLLMValidationError(
+                "thinking_token_budget is not supported on the OpenVINO "
+                "backend.",
+                parameter="thinking_token_budget",
+                value=params.thinking_token_budget)
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
@@ -330,6 +336,12 @@ class OpenVinoPlatform(Platform):
                 "[OV-PLATFORM] TORCH_COMPILE_DISABLE is not set. "
                 "torch.compile is incompatible with OpenVINO; set "
                 "TORCH_COMPILE_DISABLE=1 to prevent unexpected failures.")
+
+        if vllm_config.model_config.logits_processors:
+            raise ValueError(
+                "Custom logits processors are not supported on the OpenVINO "
+                "backend; its sampler applies only vLLM's builtin min_p, "
+                "logit_bias and min_tokens.")
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.world_size != 1:
