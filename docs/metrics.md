@@ -1,188 +1,159 @@
-# Metrics
+# vLLM Metrics on GPU (KServe)
 
-The API server exposes vLLM's Prometheus metrics at `/metrics` on the serving
-port (`curl -s http://127.0.0.1:8080/metrics`). Every `vllm:*` metric comes
-from vLLM itself: the scheduler in the EngineCore process and the frontend in
-the APIServer process. The plugin adds no metric. Its own per-step timing is
-the `[OV-RUNNER]` log line (below).
+How to collect and read vLLM's Prometheus metrics for a model served by stock
+vLLM on an NVIDIA GPU under KServe (OpenShift AI). Collection stays inside the
+cluster, so it works the same on a closed network.
 
-Checked on vLLM 0.32.0 with Qwen3-1.7B-int4-ov (PagedAttention, n-gram
-speculation) and Qwen3.5-0.8B-int4-ov (Hybrid-PA, `--enable-mfu-metrics`),
-8 CPUs. The stateful path was not checked.
+Checked on a reference deployment:
 
-## What Is Populated
+- Red Hat AI Inference Server image, vLLM `0.24.0+rhaiv.9`, `vllm-cuda-runtime`
+- Qwen3.5-0.8B (`Qwen3_5ForConditionalGeneration`, hybrid attention/Mamba),
+  one GeForce RTX 3060 12 GB
+- `--max-model-len=8192 --max-num-seqs=32 --max-num-batched-tokens=1280
+  --gpu-memory-utilization=0.93`
 
-| Metrics | Status on this plugin |
+The metric set changes between vLLM releases (0.32 adds
+`admission_rejections_total`, `prompt_tokens_cached_by_source_total` and
+`request_num_preemptions`). Check the `# HELP` lines of the target server
+before building dashboards on a name.
+
+## Collection Path
+
+| Piece | Reference deployment |
 |---|---|
-| `num_requests_running`, `num_requests_waiting`, `num_requests_waiting_by_reason` | Populated |
-| `kv_cache_usage_perc` | Populated; fraction of CPU pool blocks in use (see below) |
-| `prefix_cache_queries_total`, `prefix_cache_hits_total`, `prompt_tokens_cached*`, `prompt_tokens_by_source_total` | Populated where prefix caching is on |
-| `prompt_tokens_total`, `generation_tokens_total`, `iteration_tokens_total`, `request_*_tokens`, `request_params_*` | Populated |
-| `time_to_first_token_seconds`, `inter_token_latency_seconds`, `request_time_per_output_token_seconds`, `e2e_request_latency_seconds` | Populated |
-| `request_queue_time_seconds`, `request_inference_time_seconds`, `request_prefill_time_seconds`, `request_decode_time_seconds` | Populated |
-| `request_success_total{finished_reason}` | Populated; rejected requests (HTTP 400, e.g. `prompt_logprobs`) are not counted |
-| `num_preemptions_total`, `request_num_preemptions` | Populated |
-| `spec_decode_*` | Populated with `--speculative-config` (`method=ngram`) |
+| Endpoint | vLLM API server, container port 8080, `/metrics` (no auth on the pod port) |
+| Service | `<isvc>-metrics`, port `vllm-cuda-runtime-metrics` (8080) |
+| ServiceMonitor | `<isvc>-metrics`, path `/metrics`, http |
+| Prometheus | User workload monitoring (`enableUserWorkload: true`), scrape interval 30 s; query through `thanos-querier` |
+| Series labels | `namespace`, `pod`, `job`/`service` (`<isvc>-metrics`), `model_name` (served model name, the isvc name), `engine` |
+| GPU metrics | NVIDIA GPU Operator's DCGM exporter; the serving pod is in `exported_namespace` / `exported_pod` |
+
+`up{namespace="<ns>", job="<isvc>-metrics"}` is 1 when scraping works. To
+read the raw endpoint:
+
+```bash
+oc exec -n <ns> <predictor-pod> -c kserve-container -- curl -s http://127.0.0.1:8080/metrics
+```
+
+vLLM does not export GPU utilization or GPU memory. Use DCGM:
+`DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_FB_USED` and `DCGM_FI_DEV_FB_FREE` (MiB).
+The `process_*` metrics in `/metrics` cover only the API server process.
+
+## Metrics (vLLM 0.24)
+
+| Metrics | Notes |
+|---|---|
+| `num_requests_running`, `num_requests_waiting` | Gauges, updated every engine step |
+| `num_requests_waiting_by_reason{reason}` | Stayed 0 while `num_requests_waiting` peaked at 7; use `num_requests_waiting` |
+| `kv_cache_usage_perc` | Fraction of KV blocks in use (0-1) |
+| `prefix_cache_queries_total`, `prefix_cache_hits_total`, `prompt_tokens_cached_total`, `prompt_tokens_by_source_total` | 0 when prefix caching is off |
+| `external_prefix_cache_*` | KV connector only |
+| `mm_cache_queries_total`, `mm_cache_hits_total` | Multimodal processor cache, in items |
+| `num_preemptions_total` | See Preemption below |
+| `prompt_tokens_total`, `generation_tokens_total` | Throughput counters |
+| `iteration_tokens_total` | Histogram of tokens per engine step |
+| `request_prompt_tokens`, `request_generation_tokens`, `request_max_num_generation_tokens`, `request_params_n`, `request_params_max_tokens` | Per-request histograms |
+| `time_to_first_token_seconds`, `inter_token_latency_seconds`, `request_time_per_output_token_seconds`, `e2e_request_latency_seconds` | Latency histograms |
+| `request_queue_time_seconds`, `request_inference_time_seconds`, `request_prefill_time_seconds`, `request_decode_time_seconds` | Per-phase histograms |
+| `request_prefill_kv_computed_tokens` | Prefill tokens computed (cached tokens excluded) |
+| `request_success_total{finished_reason}` | `stop`, `length`, `abort`, `error`, `repetition`; requests rejected with HTTP 400 are not counted |
 | `estimated_flops_per_gpu_total`, `estimated_read_bytes_per_gpu_total`, `estimated_write_bytes_per_gpu_total` | 0 unless `--enable-mfu-metrics` |
-| `mm_cache_queries_total`, `mm_cache_hits_total` | Multimodal requests only |
-| `cache_config_info` | Populated; includes plugin fields (see below) |
-| `external_prefix_cache_*`, `prompt_tokens_cached_by_source{source!="device"}` | Always 0: no KV connector or offloading |
-| `admission_rejections_total` | 0 unless queue limits are configured |
-| `process_*`, `python_gc_*`, `http_*` | APIServer process only |
+| `spec_decode_*` | Present only with `--speculative-config` |
+| `engine_sleep_state{sleep_state}` | `awake` 1 unless sleep mode is used |
+| `cache_config_info` | Config as labels, value 1 |
 
-## Reading Them on CPU
+## Reading Them
 
-**Gauges update once per engine step.** The scheduler attaches its stats to
-every step's output, so `num_requests_running` and `kv_cache_usage_perc` keep
-the previous step's value until the current step finishes. CPU prefill steps
-can take seconds: on Qwen3.5-0.8B four ~2.4k-token prompts arriving together
-gave a 16.5 s step, and scrapes kept reading the idle values (0 running, 0%)
-for about 21 s. In the GPU comparison below, the CPU gauges read 0 for the
-first 27 s of a 4-request burst, while the GPU server showed all 4 running at
-the first 0.5 s scrape. A Prometheus scrape inside a long prefill sees stale gauges;
-counters and histograms catch up when the step ends.
-`--max-num-batched-tokens 512` shortens the steps (README, Chunked Prefill
-Size).
+**Gauges against a 30 s scrape.** On GPU an engine step takes milliseconds,
+so the gauges are current: a burst of 4 requests showed all 4 running at the
+first 0.5 s read of `/metrics`. Prometheus, however, keeps one sample per
+30 s, so bursts shorter than that can fall between samples. Alert and graph
+on `max_over_time(...[5m])` rather than the instant value.
 
-**`kv_cache_usage_perc` counts blocks, not memory.** It is used blocks over
-`num_gpu_blocks`, which on CPU is the size of the plugin's KV pool. The pool
-is one fixed mapping whose pages become resident only as blocks are first
-used, and prefix caching keeps freed blocks, so this gauge can drop to 0%
-while the container's resident memory stays at its peak. Watch the cgroup
-memory (container metrics) for memory; this gauge only tells how close the
-scheduler is to preempting. On Hybrid-PA with prefix caching a block is a
-scheduler block (256 tokens by default, `block_size="256"` in
-`cache_config_info`), and its page includes the conv/SSM checkpoint, so the
-same pool holds fewer tokens than on a pure-attention model.
+**Waiting with free KV cache.** In a 16-client soak (below)
+`num_requests_waiting` peaked at 7 and `request_queue_time_seconds` p95 was
+0.29 s while `kv_cache_usage_perc` stayed under 9% and `max-num-seqs` (32)
+was above the client count. The remaining limit is the per-step token budget
+(`--max-num-batched-tokens=1280`): new prompts wait until a step has room for
+their prefill. A non-zero waiting count does not by itself mean the KV cache
+is full; check `kv_cache_usage_perc` before adding memory.
 
-**`cache_config_info` labels.**
+**`kv_cache_usage_perc` on a hybrid model.** vLLM puts attention KV and Mamba
+state in pages of the same size. For Qwen3.5-0.8B it raised the block to 544
+tokens (`block_size="544"`, Mamba page padded 2.64%), giving 1224 blocks and
+`kv_cache_size_tokens="527737"`. A 2192-token request held 8 blocks: 5 for
+attention KV and 3 more, which match one Mamba-state block for each of the
+model's three groups of linear-attention layers (24 layers: 6 full, 18
+linear). Short requests therefore use more of the pool than their token count
+suggests, and `kv_cache_size_tokens` overstates the token capacity.
 
-| Label | Meaning on this plugin |
-|---|---|
-| `block_size` | 32 (CPU KV block), or the Hybrid-PA scheduler block |
-| `num_gpu_blocks` | Blocks in the CPU KV pool |
-| `kv_cache_size_tokens`, `kv_cache_max_concurrency` | `num_gpu_blocks x block_size`, and that over `max-model-len` |
-| `openvino_kvcache_space_bytes` | Final pool size in bytes, after the post-load sizing |
-| `openvino_kv_dtype` | `VLLM_OPENVINO_KV_CACHE_PRECISION`; `None` when unset, in which case OpenVINO picks the precision (u8 on CPU) |
-| `cache_dtype` | Stays `auto`; it does not show the OpenVINO KV precision |
-| `gpu_memory_utilization` | Ignored on CPU; the pool is sized from `VLLM_OPENVINO_KVCACHE_SPACE` or the memory limit |
+**Preemption.** A request needs at most `ceil(8192 / 544) + 3 = 19` blocks
+here, so 32 sequences need at most 608 of the 1224 blocks: with these
+arguments the KV cache cannot run out, and `num_preemptions_total` stays 0.
+It becomes a useful alert after raising `--max-num-seqs` or
+`--max-model-len`. Recompute this bound for the target model from
+`cache_config_info`.
 
-**Memory is not in `/metrics`.** `process_resident_memory_bytes` and the other
-`process_*` metrics describe the APIServer process. The weights, the KV pool
-and the inference buffers live in the EngineCore process, which `/metrics`
-does not report; use the cgroup's `memory.current` / `memory.stat` (container
-or node exporter). The sizing rules are in the README (Memory Footprint).
+**GPU memory does not follow load.** vLLM reserves
+`--gpu-memory-utilization` of the GPU at startup. `DCGM_FI_DEV_FB_USED` read
+10,096-10,108 MiB (85% of the card) over 30 minutes covering idle, the burst
+and the soak. Use `kv_cache_usage_perc` for how full the cache is, and FB
+used/free only to catch other processes on the GPU or a restart that failed
+to reserve memory.
 
-**Prefix cache counters.** Prefix caching is turned off for the stateful path
-and for Hybrid-PA with speculative decoding, so no hits are recorded there. On
-Hybrid-PA hits are block-aligned, so `prefix_cache_hits_total` grows in
-multiples of the scheduler block (256 tokens by default).
+**GPU utilization is not saturation.** `DCGM_FI_DEV_GPU_UTIL` reached 100
+during the soak with the KV cache under 9%. It reports the share of time a
+kernel was running, not how much work the GPU could still take; capacity
+shows in throughput flattening while latency rises.
 
-**Speculative decoding.** Drafts are proposed only for greedy requests without
-penalties, logprobs or structured output (README, Compatibility), so
-`spec_decode_num_drafts_total` counts only those requests. The acceptance rate
-is `spec_decode_num_accepted_tokens_total / spec_decode_num_draft_tokens_total`;
-a copy prompt on Qwen3-1.7B accepted 104 of 104 draft tokens. A model whose
-`generation_config.json` sets `repetition_penalty` gets no drafts at all, which
-shows up as a flat `spec_decode_num_drafts_total`.
+**Prefix caching.** vLLM 0.24 left prefix caching off for this hybrid model
+(`enable_prefix_caching="False"`, `mamba_cache_mode="none"`), so the prefix
+counters record neither queries nor hits. A repeated 1892-token prompt was
+prefilled again (TTFT 0.13 s on the idle server, against 0.46 s inside the
+4-request burst). Models with prefix caching on report hit rate as
+`prefix_cache_hits_total / prefix_cache_queries_total`.
 
-**MFU estimates.** With `--enable-mfu-metrics` vLLM computes FLOPs and bytes
-per step analytically from the model config; the plugin does not measure them.
-`per_gpu` means per engine here. Compare
-`rate(vllm:estimated_flops_per_gpu_total[1m])` with the ~2.5 TFLOP/s prefill
-ceiling and `rate(vllm:estimated_read_bytes_per_gpu_total[1m])` with the
-45-48 GB/s read ceiling measured on the Ryzen 9 7900 (compatibility.md,
-Performance Profile). The estimates were not checked against measured counts,
-including on Hybrid-PA layers.
+**Multimodal cache.** Sending the same image twice raised
+`mm_cache_queries_total` by 1 each time and `mm_cache_hits_total` by 1 on the
+second request, whose TTFT fell from 0.127 s to 0.029 s. The counters are in
+items (images), not tokens.
 
-**Multimodal cache.** `mm_cache_*` counts vLLM's multimodal processor cache in
-the APIServer. The runner's vision-embedding cache (README, Vision-embedding
-cache) has no metric; a hit there shows only as a shorter TTFT.
+**Counters in PromQL.** `increase()` extrapolates to the window edges, so it
+returns fractional counts (411.5 and 2.1 in the table below); round it for
+display.
 
-## Compared with vLLM on GPU
+## PromQL
 
-Reference: the same Qwen3.5-0.8B served by stock vLLM on one NVIDIA GPU
-(KServe, Red Hat AI Inference Server image, vLLM `0.24.0+rhaiv.9`,
-`--max-model-len 8192`, `--max-num-batched-tokens 1280`). Both servers got
-the same load: 4 concurrent 1892-token prompts with 300 output tokens each
-(`ignore_eos`, greedy), then one of the prompts again with 8 output tokens,
-scraping `/metrics` every 0.5 s. The CPU side ran Hybrid-PA on 8 CPUs of a
-host also running the cluster's VMs, so its latencies are slower than in the
-README and only show how the metrics behave.
+Run against the reference Prometheus during the soak; `S` stands for
+`namespace="<ns>",model_name="<isvc>"`. Values are from that run.
 
-| | GPU (stock vLLM) | CPU (Hybrid-PA) |
+| Question | Query | Soak value |
 |---|---|---|
-| First scrape with `num_requests_running > 0` | 0.5 s | 27 s |
-| Peak `kv_cache_usage_perc` | 2.62% (32 of 1224 blocks) | 3.70% (36 of 975 blocks) |
-| Blocks per request at the end | 8 | 9 |
-| `prefix_cache_queries/hits_total`, repeated prompt | 0 / 0 | 1892 / 1792 |
-| TTFT mean, burst / repeated prompt | 0.46 s / 0.13 s | 54 s / 0.48 s |
-| `inter_token_latency_seconds` mean | 7.2 ms | 100 ms |
-| `iteration_tokens_total` count | 304 | 303 |
-| `estimated_flops_per_gpu_total` | 0 (MFU metrics off) | 1.06e13 |
+| Output tokens/s | `sum(rate(vllm:generation_tokens_total{S}[2m]))` | 859 |
+| Prompt tokens/s | `sum(rate(vllm:prompt_tokens_total{S}[2m]))` | 3808 |
+| TTFT p95 | `histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{S}[2m])))` | 0.24 s |
+| Inter-token latency p95 | `histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{S}[2m])))` | 0.048 s |
+| End-to-end p95 | `histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{S}[2m])))` | 9.1 s |
+| Queue time p95 | `histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{S}[5m])))` | 0.29 s |
+| Peak running / waiting | `max_over_time(vllm:num_requests_running{S}[3m])`, same for `num_requests_waiting` | 16 / 7 |
+| Peak KV usage | `max_over_time(vllm:kv_cache_usage_perc{S}[3m])` | 0.087 |
+| Results by reason | `sum by (finished_reason) (increase(vllm:request_success_total{S}[3m]))` | `length` 411.5, `stop` 2.1 |
+| GPU utilization | `max_over_time(DCGM_FI_DEV_GPU_UTIL{exported_namespace="<ns>",exported_pod=~"<isvc>-predictor-.*"}[3m])` | 100 |
+| GPU memory fraction | `DCGM_FI_DEV_FB_USED{exported_pod=~"<isvc>-predictor-.*"} / (DCGM_FI_DEV_FB_USED{...} + DCGM_FI_DEV_FB_FREE{...})` | 0.85 |
 
-Token counters (`prompt_tokens_total` 7568, `generation_tokens_total` 1200)
-and `request_success_total{finished_reason="length"}` (4, then 1) matched.
+## Reference Measurements
 
-- **Same metric set.** Every `vllm:*` metric on the GPU server also exists on
-  this plugin. The CPU server additionally has `admission_rejections_total`,
-  `prompt_tokens_cached_by_source_total` and `request_num_preemptions`, which
-  are newer than 0.24, and `spec_decode_*`, which appear only when speculative
-  decoding is configured. vLLM has no GPU-specific `vllm:*` metric: GPU
-  utilization and memory come from the DCGM exporter, as CPU memory comes from
-  the cgroup here.
-- **Hybrid-model blocks differ, so the KV numbers are not comparable.** On GPU
-  vLLM puts the attention KV and the Mamba state in pages of equal size:
-  `block_size="544"` (raised so the attention page covers the Mamba page,
-  which is padded 2.64%), `mamba_cache_mode="none"` and
-  `enable_prefix_caching="False"`, giving `num_gpu_blocks="1224"` and
-  `kv_cache_size_tokens="527737"`. Hybrid-PA uses 256-token scheduler blocks
-  that each carry a conv/SSM checkpoint and keeps prefix caching on
-  (975 blocks, 249,600 tokens in a 10.7 GB pool at `--max-model-len 4096`).
-  Under load a 2192-token request held 9 CPU blocks (2192 / 256, rounded up)
-  and 8 GPU blocks, where its attention KV fills only 5 blocks of 544
-  tokens; the other 3 match one Mamba-state block for each of the model's
-  three linear-attention layer groups. The same `kv_cache_usage_perc`
-  therefore means a different number of tokens on each.
-- **Prefix caching shows up only on the plugin.** With prefix caching off the
-  GPU server records neither queries nor hits, so a repeated prompt leaves
-  both at 0. On Hybrid-PA the repeated 1892-token prompt hit 1792 tokens, 7
-  whole 256-token blocks.
-- **Long CPU steps move the latency histograms too.** `request_queue_time`
-  and TTFT include the time behind a long prefill step, and decode tokens
-  emitted after such a step count it in `inter_token_latency_seconds`. The CPU
-  burst had decode steps of about 46 ms but a 100 ms mean ITL, because
-  prefill steps of 19-22 s ran between decode steps. The `max` field of
-  `[OV-RUNNER]` shows those steps.
-- **GPU-named labels.** On GPU `num_gpu_blocks`, `gpu_memory_utilization` and
-  the `per_gpu` MFU counters mean what they say; on this plugin they refer to
-  the CPU pool and the engine (see above).
+Burst: 4 concurrent 1892-token prompts with 300 output tokens each
+(`ignore_eos`, greedy), then one of them again with 8 output tokens.
 
-## Log Lines
-
-Both lines are written every `VLLM_LOG_STATS_INTERVAL` seconds (default 10);
-the `[OV-RUNNER]` line skips windows with no steps.
-
-APIServer, from vLLM:
-
-```
-Engine 000: Avg prompt throughput: 378.4 tokens/s, Avg generation throughput: 38.3 tokens/s, Running: 4 reqs, Waiting: 0 reqs, CPU KV cache usage: 3.3%, Prefix cache hit rate: 10.5%
-```
-
-EngineCore, from the plugin runner:
-
-```
-[OV-RUNNER] 10.0s: 217 steps, 86.8 scheduled tokens/s, step avg 45.6 ms (prep 0.2, infer 42.2, other forward 0.7, sample 2.5), max 77.2 ms
-```
-
-| Field | Meaning |
+| | Value |
 |---|---|
-| `steps`, `scheduled tokens/s` | Engine steps and scheduled tokens (prefill + decode + drafts) in the window |
-| `prep` | Input preparation in the runner |
-| `infer` | The OpenVINO `infer` call |
-| `other forward` | The rest of the forward: logits handling and the vision encoder |
-| `sample` | Grammar bitmask, sampling, draft verification and proposal |
-| `max` | Longest step in the window; a long prefill step shows up here |
+| Wall time | 2.6 s |
+| TTFT mean, burst / repeated prompt | 0.46 s / 0.13 s |
+| `inter_token_latency_seconds` mean | 7.2 ms |
+| `request_queue_time_seconds` mean | 0.067 s |
+| Peak `kv_cache_usage_perc` | 0.026 (32 blocks) |
+| `iteration_tokens_total` count | 304 steps |
 
-`/metrics` has no infer/sample split; this line is where to look when the step
-time, not the scheduler, is the question.
+Soak: 16 clients for 90 s, prompts of 50-600 words, 64-512 output tokens
+(`ignore_eos`); 387 requests completed. Results are in the PromQL table.

@@ -230,7 +230,7 @@ To measure throughput/latency improvements, use the provided benchmark script:
 
 The script runs a warmed-up benchmark against the local OpenAI-compatible endpoint and reports tokens/sec.
 
-For monitoring a running server, `docs/metrics.md` lists which `/metrics` values are populated on this backend and how to read them on CPU.
+`docs/metrics.md` covers collecting and reading vLLM's `/metrics` for a stock vLLM GPU deployment under KServe.
 
 `./scripts/socket-experiment.sh <model_name> [seconds]` runs the same guidellm workload against containers bound to different CPU sets (single socket vs split across sockets) and prints the comparison behind the multi-socket numbers above.
 
