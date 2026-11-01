@@ -536,6 +536,32 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   up to N=4 (29 / 99 tok/s) but flattens at 318 tok/s against 532 once the
   batch is large enough to become compute-bound (N=16: 253 vs 327). Use 4
   CPUs for a single-user or few-user deployment and more for batch serving.
+- **AVX2-only CPUs (emulated).** `OV_CPU_MAX_ISA=AVX2` caps the OpenVINO CPU
+  plugin at AVX2 (`ONEDNN_MAX_CPU_ISA` has no effect): inference precision
+  drops from `bf16` to `f32` and kernels become `jit_avx2_f32`. This removes
+  AVX-512, bf16 and VNNI but keeps Zen 4's caches, memory bandwidth and FMA
+  width, so it approximates the ISA of Haswell/Zen 2-3, not their speed.
+  Qwen3-1.7B, 8-CPU quota, host shared with VMs (the native row is slower
+  than the figures above for that reason; compare rows with each other):
+
+  | | prefill 0.9k / 3.7k (tok/s) | decode c=1 (ms/tok) | c=8 / c=32 (tok/s) |
+  |---|---|---|---|
+  | int4, native (bf16) | 719 / 627 | 42.7 | 153 / 402 |
+  | int4, AVX2 | 307-312 / 285 | 41.7-42.5 | 96-99 / 198 |
+  | int4, AVX2, `DYNAMIC_QUANTIZATION_GROUP_SIZE` 0 / 128 | 306 / 305 | 42.9 / 40.5 | 99 / 98 at c=8 |
+  | int8, AVX2 | 304 / 279 | 56.6 | 86 / 189 |
+  | fp16, AVX2 | 295 / 273 | 111.3 | 58 / 154 |
+
+  Single-stream decode stays memory-bound and does not change; prefill is
+  2.2-2.3x and batched decode 1.6-2x slower, all from f32 matmul throughput.
+  Prefill is the same for every weight format, so weight decompression is not
+  the bottleneck, and int4 is the fastest format everywhere because it reads
+  the fewest bytes. Dynamic activation quantization has no measurable effect
+  at any group size. N-gram speculation (copy-heavy prompt, 256 tokens) still
+  helps a single stream: 44.4 -> 33.5 ms/tok at `num_speculative_tokens` 2 and
+  31.1 at 4 (native: 44.8 -> 32.9 / 27.2). At 8 concurrent requests per-request
+  decode latency changed by -10% to +6% (92.7 / 98.4 / 83.1 ms/tok), within
+  noise.
 
 ## Known Limitations
 

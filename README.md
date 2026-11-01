@@ -142,9 +142,7 @@ VLLM_OPENVINO_KV_CACHE_PRECISION=u8 \
 
 ### CPU Tuning (AVX2)
 
-On AVX2-only CPUs, int4 models usually show a larger throughput gap vs AVX-512/VNNI capable CPUs due to lower effective low-precision compute throughput. In practice, CPU scheduling knobs (threads, affinity, streams) are often the main software lever for improving throughput stability.
-
-For older AVX2 systems, fp16 or int8 models are often a better latency/throughput trade-off than int4.
+On AVX2-only CPUs OpenVINO runs matmuls in `f32`. Emulated with `OV_CPU_MAX_ISA=AVX2` on the Ryzen 9 7900 (Qwen3-1.7B, 8 CPUs), single-stream decode was unchanged because it is memory-bound, while prefill was 2.2-2.3x slower and batched decode 1.6-2x slower. int4 IR stayed the fastest format: int8 and fp16 had the same prefill and slower decode (42 / 57 / 111 ms per token). `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` had no effect there. N-gram speculation (`num_speculative_tokens` 4) still cut single-stream decode on copy-heavy output by 30%. Details in `docs/compatibility.md` ("AVX2-only CPUs"). Beyond that, the levers are CPU placement (below) and `--max-num-batched-tokens 512`, because the slower prefill makes decode stalls longer.
 
 | Variable | Type | Values | Effect |
 |----------|------|--------|--------|
