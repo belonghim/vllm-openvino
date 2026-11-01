@@ -97,6 +97,34 @@ including on Hybrid-PA layers.
 the APIServer. The runner's vision-embedding cache (README, Vision-embedding
 cache) has no metric; a hit there shows only as a shorter TTFT.
 
+## Compared with vLLM on GPU
+
+Reference: the same Qwen3.5-0.8B served by stock vLLM on one NVIDIA GPU
+(KServe, Red Hat AI Inference Server image, vLLM `0.24.0+rhaiv.9`,
+`--max-model-len 8192`). Only names and config labels were compared; that
+deployment had no traffic since its last restart, so its counters were 0.
+
+- **Same metric set.** Every `vllm:*` metric on the GPU server also exists on
+  this plugin. The CPU server additionally has `admission_rejections_total`,
+  `prompt_tokens_cached_by_source_total` and `request_num_preemptions`, which
+  are newer than 0.24, and `spec_decode_*`, which appear only when speculative
+  decoding is configured. vLLM has no GPU-specific `vllm:*` metric: GPU
+  utilization and memory come from the DCGM exporter, as CPU memory comes from
+  the cgroup here.
+- **Hybrid-model blocks differ, so the KV numbers are not comparable.** On GPU
+  vLLM puts the attention KV and the Mamba state in pages of equal size:
+  `block_size="544"` (raised so the attention page covers the Mamba page,
+  which is padded 2.64%), `mamba_cache_mode="none"` and
+  `enable_prefix_caching="False"`, giving `num_gpu_blocks="1224"` and
+  `kv_cache_size_tokens="527737"`. Hybrid-PA uses 256-token scheduler blocks
+  that each carry a conv/SSM checkpoint and keeps prefix caching on
+  (975 blocks, 249,600 tokens in a 10.7 GB pool at `--max-model-len 4096`).
+  The same `kv_cache_usage_perc` therefore means a different number of tokens
+  on each, and prefix-cache counters stay 0 on the GPU server.
+- **GPU-named labels.** On GPU `num_gpu_blocks`, `gpu_memory_utilization` and
+  the `per_gpu` MFU counters mean what they say; on this plugin they refer to
+  the CPU pool and the engine (see above).
+
 ## Log Lines
 
 Both lines are written every `VLLM_LOG_STATS_INTERVAL` seconds (default 10);
