@@ -37,7 +37,9 @@ every step's output, so `num_requests_running` and `kv_cache_usage_perc` keep
 the previous step's value until the current step finishes. CPU prefill steps
 can take seconds: on Qwen3.5-0.8B four ~2.4k-token prompts arriving together
 gave a 16.5 s step, and scrapes kept reading the idle values (0 running, 0%)
-for about 21 s. A Prometheus scrape inside a long prefill sees stale gauges;
+for about 21 s. In the GPU comparison below, the CPU gauges read 0 for the
+first 27 s of a 4-request burst, while the GPU server showed all 4 running at
+the first 0.5 s scrape. A Prometheus scrape inside a long prefill sees stale gauges;
 counters and histograms catch up when the step ends.
 `--max-num-batched-tokens 512` shortens the steps (README, Chunked Prefill
 Size).
@@ -101,8 +103,26 @@ cache) has no metric; a hit there shows only as a shorter TTFT.
 
 Reference: the same Qwen3.5-0.8B served by stock vLLM on one NVIDIA GPU
 (KServe, Red Hat AI Inference Server image, vLLM `0.24.0+rhaiv.9`,
-`--max-model-len 8192`). Only names and config labels were compared; that
-deployment had no traffic since its last restart, so its counters were 0.
+`--max-model-len 8192`, `--max-num-batched-tokens 1280`). Both servers got
+the same load: 4 concurrent 1892-token prompts with 300 output tokens each
+(`ignore_eos`, greedy), then one of the prompts again with 8 output tokens,
+scraping `/metrics` every 0.5 s. The CPU side ran Hybrid-PA on 8 CPUs of a
+host also running the cluster's VMs, so its latencies are slower than in the
+README and only show how the metrics behave.
+
+| | GPU (stock vLLM) | CPU (Hybrid-PA) |
+|---|---|---|
+| First scrape with `num_requests_running > 0` | 0.5 s | 27 s |
+| Peak `kv_cache_usage_perc` | 2.62% (32 of 1224 blocks) | 3.70% (36 of 975 blocks) |
+| Blocks per request at the end | 8 | 9 |
+| `prefix_cache_queries/hits_total`, repeated prompt | 0 / 0 | 1892 / 1792 |
+| TTFT mean, burst / repeated prompt | 0.46 s / 0.13 s | 54 s / 0.48 s |
+| `inter_token_latency_seconds` mean | 7.2 ms | 100 ms |
+| `iteration_tokens_total` count | 304 | 303 |
+| `estimated_flops_per_gpu_total` | 0 (MFU metrics off) | 1.06e13 |
+
+Token counters (`prompt_tokens_total` 7568, `generation_tokens_total` 1200)
+and `request_success_total{finished_reason="length"}` (4, then 1) matched.
 
 - **Same metric set.** Every `vllm:*` metric on the GPU server also exists on
   this plugin. The CPU server additionally has `admission_rejections_total`,
@@ -119,8 +139,21 @@ deployment had no traffic since its last restart, so its counters were 0.
   `kv_cache_size_tokens="527737"`. Hybrid-PA uses 256-token scheduler blocks
   that each carry a conv/SSM checkpoint and keeps prefix caching on
   (975 blocks, 249,600 tokens in a 10.7 GB pool at `--max-model-len 4096`).
-  The same `kv_cache_usage_perc` therefore means a different number of tokens
-  on each, and prefix-cache counters stay 0 on the GPU server.
+  Under load a 2192-token request held 9 CPU blocks (2192 / 256, rounded up)
+  and 8 GPU blocks, where its attention KV fills only 5 blocks of 544
+  tokens; the other 3 match one Mamba-state block for each of the model's
+  three linear-attention layer groups. The same `kv_cache_usage_perc`
+  therefore means a different number of tokens on each.
+- **Prefix caching shows up only on the plugin.** With prefix caching off the
+  GPU server records neither queries nor hits, so a repeated prompt leaves
+  both at 0. On Hybrid-PA the repeated 1892-token prompt hit 1792 tokens, 7
+  whole 256-token blocks.
+- **Long CPU steps move the latency histograms too.** `request_queue_time`
+  and TTFT include the time behind a long prefill step, and decode tokens
+  emitted after such a step count it in `inter_token_latency_seconds`. The CPU
+  burst had decode steps of about 46 ms but a 100 ms mean ITL, because
+  prefill steps of 19-22 s ran between decode steps. The `max` field of
+  `[OV-RUNNER]` shows those steps.
 - **GPU-named labels.** On GPU `num_gpu_blocks`, `gpu_memory_utilization` and
   the `per_gpu` MFU counters mean what they say; on this plugin they refer to
   the CPU pool and the engine (see above).
