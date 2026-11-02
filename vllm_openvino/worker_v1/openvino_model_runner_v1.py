@@ -34,24 +34,26 @@ def apply_grammar_bitmask(logits: torch.Tensor, req_ids: list[str],
                           grammar_output) -> None:
     """Mask the logits rows of structured-output requests in place.
 
-    Bitmask rows come in `structured_output_request_ids` order, one per
-    logits row of the request (1 + its drafts). Tokens past the bitmask width
-    stay unmasked, as in xgrammar.
+    Each request in `structured_output_request_ids` owns a fixed block of
+    `mask_stride` bitmask rows (1 + max drafts); the first 1 + its drafts map
+    to its logits rows. Tokens past the bitmask width stay unmasked, as in
+    xgrammar.
     """
     logit_start = {}
     row = 0
     for req_id in req_ids:
         logit_start[req_id] = row
         row += 1 + len(spec_tokens.get(req_id, ()))
+    req_ids_masked = grammar_output.structured_output_request_ids
+    mask_stride = grammar_output.grammar_bitmask.shape[0] // len(req_ids_masked)
     bitmask_rows, logit_rows = [], []
-    bitmask_row = 0
-    for req_id in grammar_output.structured_output_request_ids:
+    for i, req_id in enumerate(req_ids_masked):
         num_rows = 1 + len(spec_tokens.get(req_id, ()))
         start = logit_start.get(req_id)
         if start is not None:
+            bitmask_row = i * mask_stride
             bitmask_rows.extend(range(bitmask_row, bitmask_row + num_rows))
             logit_rows.extend(range(start, start + num_rows))
-        bitmask_row += num_rows
     if not logit_rows:
         return
 

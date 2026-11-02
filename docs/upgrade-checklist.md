@@ -45,7 +45,10 @@ Verify every overridden or consumed symbol in:
 `sampler.py`, `worker_v1/input_batch.py` and `worker_v1/ngram_proposer.py` are
 copies of vLLM 0.32's V1 sampler, `InputBatch` and `NgramProposer`. They do
 not break when vLLM changes, but compare them with the new release's sampling
-semantics (new `SamplingParams` fields, changed defaults).
+semantics (new `SamplingParams` fields, changed defaults). The runner's
+`apply_grammar_bitmask` reads the row layout produced by
+`StructuredOutputManager.grammar_bitmask`; diff it against vLLM's
+`apply_grammar_bitmask` (0.33 moved to a fixed stride per request).
 
 Pay particular attention to `WorkerBase`, `ModelRunnerOutput`,
 `SchedulerOutput`, `AttentionMetadata`, `KVCacheSpec`,

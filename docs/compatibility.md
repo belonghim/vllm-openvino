@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- vLLM `0.32.0`
+- vLLM `0.33.0`
 - OpenVINO `>= 2026.4.1`; the image pins nightly `2026.5.0.dev20261030`, which
   has the MoE prefill fix (#39086) and reads IRs exported with 2026.5 (LFM3)
 - Linux x86-64 with AVX2 or newer
@@ -15,19 +15,16 @@ the OpenVINO execution path.
 
 ## Upstream vLLM Compatibility
 
-The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.32.0
+The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.33.0
 selects MRV2 only when `HAS_TRITON` is true. With the PyPI `vllm` wheel it is
 false on CPU hosts even if Triton is installed, because vLLM requires exactly
 one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
 (`+cpu`) ships triton-cpu
 ([#58140](https://github.com/vllm-project/vllm/pull/58140)) and would select
-MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set `VLLM_USE_V2_MODEL_RUNNER=0` in
-those setups. vLLM marks MRV1 deprecated since 0.29.0; the 0.29.0 notes target
-removal for 0.32, but 0.32.0 and main still ship it. vLLM's own CPU runner
-(`CPUModelRunner`) still subclasses the MRV1 `GPUModelRunner`, so MRV1 removal
-waits on CPU MRV2 without Triton
-([#61995](https://github.com/vllm-project/vllm/pull/61995), merged, but only
-for non-x86 CPUs).
+MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set
+`VLLM_USE_V2_MODEL_RUNNER=0` in those setups. vLLM marks MRV1 deprecated since
+0.29.0; 0.33.0 still ships it (`gpu_input_batch.py`, `cpu_model_runner.py`,
+the V1 `Sampler`).
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
 not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
@@ -40,12 +37,12 @@ that configuration.
 Tracked upstream:
 
 - [vllm-project/vllm#62576](https://github.com/vllm-project/vllm/pull/62576)
-  (merged after 0.32.0) moves the MRV2 Triton check from config validation to
+  (in 0.33.0) moves the MRV2 Triton check from config validation to
   `gpu_worker.Worker`. It keeps the MRV1 fallback for every platform except
   the unspecified one, and the plugin's worker does not derive from
   `gpu_worker.Worker`, so it does not affect the plugin.
 - [vllm-project/vllm#61995](https://github.com/vllm-project/vllm/pull/61995)
-  (merged 2026-10-30, after 0.32.0; main only) adds `StandaloneCPUModelRunner`
+  (merged 2026-10-30, not in 0.33.0) adds `StandaloneCPUModelRunner`
   (`vllm/v1/worker/cpu/standalone_model_runner.py`), an MRV2 runner with no
   dependency on `vllm/v1/worker/gpu`. It is selected when
   `Platform.uses_standalone_cpu_model_runner()` is true:
@@ -62,11 +59,12 @@ Tracked upstream:
   Gumbel sample, logit bias) are missing from the `VLLM_TARGET_DEVICE=empty`
   wheel, like the `greedy_argmax` kernel of the V1 sampler. Not supported: speculative decoding
   (n-gram included), prompt embeddings, custom logits processors, decode and
-  prefill context parallelism, LoRA tower/connector.
+  prefill context parallelism, LoRA tower/connector. Extending it to x86 was
+  suggested on #57684; it would still not run the plugin's OpenVINO runner.
 - [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
-  (open draft, no milestone) removes MRV1: `gpu_input_batch.py`,
+  (open, not in 0.33.0) removes MRV1: `gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
-  "vLLM on CPU without Triton". The plugin imports none of what the draft
+  "vLLM on CPU without Triton". The plugin imports none of what it
   removes: it keeps its own trimmed copies of the MRV1 pieces it used, which
   give the same output as vLLM 0.32's (`sampler.py` for the V1 `Sampler` and
   `SamplingMetadata`, `worker_v1/input_batch.py` for `InputBatch` and
@@ -78,12 +76,18 @@ Tracked upstream:
   neither is a drop-in. What the plugin still takes from `vllm.v1` is
   `WorkerBase`/`CompilationTimes`, `bind_kv_cache`, `SchedulerOutput`,
   `ModelRunnerOutput`/`SamplerOutput`/`LogprobsTensors`/`DraftTokenIds`, the
-  KV-cache specs and the attention backend interfaces; the draft leaves them
+  KV-cache specs and the attention backend interfaces; #63373 leaves them
   in place.
 
 vLLM offers no upstream runner for an x86 plugin that cannot use Triton
 (#61995 is non-x86 only), so the plugin keeps its own; the support question
 (#57684) is closed on that basis.
+
+The copies track vLLM-side formats the plugin consumes. Since 0.33.0 the
+grammar bitmask gives each structured-output request a fixed block of
+`num_speculative_tokens + 1` rows, and `apply_grammar_bitmask` indexes it that
+way; the 0.32 packed layout made structured-output requests return HTTP 500
+on 0.33.0 when n-gram speculation was on and several were batched.
 
 The plugin samples with its own `sampler.py`, which follows vLLM 0.32's V1
 `Sampler` and needs no `torch.ops._C` kernel: vLLM's CPU path calls
@@ -167,7 +171,7 @@ Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV
 cache, not SSM/conv state.
 
 LFM3 (conv width 7, full and 256-token sliding-window attention layers) is
-not in vLLM 0.32 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM`
+not in vLLM 0.33 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM`
 as a `vllm.general_plugins` entry so the config passes validation, and the
 model needs `--trust-remote-code` for its `configuration_lfm3.py`. Its IR is
 exported with OpenVINO 2026.5. On LFM3-1.7B-int4-ov a 1746-token prompt gave
