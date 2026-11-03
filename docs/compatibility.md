@@ -78,6 +78,21 @@ Tracked upstream:
   `ModelRunnerOutput`/`SamplerOutput`/`LogprobsTensors`/`DraftTokenIds`, the
   KV-cache specs and the attention backend interfaces; #63373 leaves them
   in place.
+- [vllm-project/vllm#61452](https://github.com/vllm-project/vllm/pull/61452)
+  (open, not in 0.33.0) moves allocation policy from `KVCacheSpec` onto the KV
+  cache managers. It breaks the plugin's worker: `FullAttentionSpec` is
+  removed (layouts become `AttentionSpec`/`MambaSpec`/...), and
+  `WorkerBase.get_kv_cache_spec()` becomes `get_kv_cache_layer_configs()`,
+  returning a `KVCacheLayerConfig` (manager config + spec) per layer.
+  `page_size_padded` stays on `AttentionSpec`, so Hybrid-PA can keep its
+  conv/SSM checkpoints in the attention pages. `initialize_from_config` reads
+  only `num_blocks` and is unaffected by the `KVCacheGroupSpec` ->
+  `KVCacheGroup` rename.
+- [vllm-project/vllm#53558](https://github.com/vllm-project/vllm/pull/53558)
+  (in 0.33.0, experimental) lets a platform supply a `KVCacheConfigBuilder`
+  for grouping and placement. The plugin keeps the default: Hybrid-PA exposes
+  only attention specs and allocates the conv/SSM pool itself, so core
+  grouping has nothing to decide.
 
 vLLM offers no upstream runner for an x86 plugin that cannot use Triton
 (#61995 is non-x86 only), so the plugin keeps its own; the support question
