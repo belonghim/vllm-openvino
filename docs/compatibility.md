@@ -108,6 +108,14 @@ The plugin samples with its own `sampler.py`, which follows vLLM 0.32's V1
 `Sampler` and needs no `torch.ops._C` kernel: vLLM's CPU path calls
 `greedy_argmax` and `fused_gumbel_argmax`, which the PyPI-style wheel lacks.
 
+`/v1/decisions` (on by default since 0.33.0) reads label probabilities from
+one greedy token with `logprob_token_ids`, not `prompt_logprobs`, so it works
+on the plugin. Qwen3-1.7B-int4-ov answered predicate, choice and score
+questions with HTTP 200, and eight concurrent predicate requests returned the
+same probabilities as sequential ones. Wrong answers on that model (e.g.
+P(true)=0.03 for "Two plus two is four.") come from the model: the stateful
+IR run directly in OpenVINO on the same prompt gave 0.011.
+
 ## Serving Paths
 
 The plugin selects a path from the model IR:
