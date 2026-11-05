@@ -603,13 +603,11 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   test image the two arrangements returned the same flag list and the same text
   answer, and one-sentence descriptions that differ in wording (both plausible);
   no quality delta beyond that was demonstrated.
-- MoE prefill is slow on CPUs without AMX: LFM2.5-8B-A1B ~108 tok/s,
-  Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), with `GatherMatmulCompressed`
-  taking 80-90% of the time. The OpenVINO CPU plugin batches routed rows per
-  expert into a GEMM only on bf16+AMX; elsewhere it runs one GEMV per routed
-  row. Fixed by openvinotoolkit/openvino#39086 (milestone 2026.5), which the
-  image's nightly contains: a 6259-token LFM2.5-8B-A1B prompt has the same
-  TTFT (11.7 s) as the patched 2026.4.1 plugin the image shipped before.
+- On OpenVINO 2026.4.x, MoE prefill is slow on CPUs without AMX:
+  LFM2.5-8B-A1B ~108 tok/s, Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), because
+  the CPU plugin batches routed rows per expert into a GEMM only on bf16+AMX
+  and otherwise runs one GEMV per routed row. openvinotoolkit/openvino#39086
+  fixes it in 2026.5; the image's nightly contains it.
 - `VLLM_USE_RUST_FRONTEND=1` starts with the bundled `vllm-rs` binary but gave
   no throughput change (Qwen3-1.7B, 1/8/16 concurrent, within run-to-run
   noise): decode runs at 20-300 tok/s, so the frontend is not the bottleneck.

@@ -19,7 +19,7 @@ REGRESSION_THRESHOLD_PCT=10
 
 API_URL="http://127.0.0.1:8080"
 CONTAINER_NAME="vllm-smoke"
-IMAGE="quay.io/joopark/vllm-openvino"
+IMAGE="${IMAGE:-quay.io/joopark/vllm-openvino}"
 MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
 # "<model dir> [ENV=VALUE | --serve-arg]..."
