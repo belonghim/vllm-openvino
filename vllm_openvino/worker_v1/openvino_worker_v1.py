@@ -938,12 +938,15 @@ class OpenVINOWorkerV1(WorkerBase):
         finally:
             self.cache_config.openvino_kvcache_space_bytes = original_space_bytes
         if self._is_model_stateful():
+            # OpenVINO keeps the KV in the model's state and no pool tensors
+            # are allocated, so the blocks are scheduler bookkeeping only and
+            # do not depend on the pool size.
             blocks_per_seq = math.ceil(
                 self.model_config.max_model_len / self.cache_config.block_size)
             max_needed = blocks_per_seq * self.scheduler_config.max_num_seqs + 1
-            if num_device_blocks > max_needed:
+            if num_device_blocks != max_needed:
                 logger.info(
-                    "[OV-WORKER] Capping stateful num_blocks %d -> %d",
+                    "[OV-WORKER] Stateful num_blocks %d -> %d",
                     num_device_blocks, max_needed)
                 num_device_blocks = max_needed
         logger.info(
@@ -952,12 +955,14 @@ class OpenVINOWorkerV1(WorkerBase):
             num_device_blocks, num_swap_blocks,
         )
         self.num_swap_blocks = num_swap_blocks
-        self._warn_if_pool_cannot_serve_one_request(num_device_blocks,
-                                                    cache_block_size)
+        self._warn_if_pool_cannot_serve_one_request(
+            num_device_blocks, cache_block_size, original_space_bytes,
+            conv_reservation)
         return num_device_blocks * cache_block_size
 
     def _warn_if_pool_cannot_serve_one_request(
-            self, num_device_blocks: int, cache_block_size: int) -> None:
+            self, num_device_blocks: int, cache_block_size: int,
+            pool_bytes: int, conv_reservation: int) -> None:
         """Explain an undersized pool before vLLM rejects the engine.
 
         vLLM raises its own ValueError when the pool cannot hold one
@@ -977,6 +982,23 @@ class OpenVINOWorkerV1(WorkerBase):
             apiserver_overhead_bytes)
         api_overhead = apiserver_overhead_bytes(self.model_config)
         remedies = []
+        if conv_reservation:
+            from vllm_openvino.worker_v1.openvino_model_runner_v1 import (  # noqa: PLC0415
+                num_state_slots)
+            cause = (
+                "The %s pool first reserves %s for %d conv/SSM state slots "
+                "(one per --max-num-seqs request, %d)"
+                % (format_memory_size(pool_bytes),
+                   format_memory_size(conv_reservation),
+                   num_state_slots(self.vllm_config),
+                   self.scheduler_config.max_num_seqs))
+            remedies.append("lower --max-num-seqs")
+        else:
+            cause = (
+                "The memory limit leaves nothing above the runtime baseline, "
+                "the %s APIServer budget and the %s headroom"
+                % (format_memory_size(api_overhead),
+                   format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES)))
         if self._la_state_bytes and self._kv_blocks_per_block > 1:
             remedies.append(
                 "set VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER=0 to coarsen "
@@ -995,15 +1017,12 @@ class OpenVINOWorkerV1(WorkerBase):
         logger.warning(
             "[OV-WORKER] KV pool holds %d blocks of %s (%s) but one request at "
             "--max-model-len %d needs %d blocks (%s); vLLM will refuse to "
-            "start. The memory limit leaves nothing above the runtime "
-            "baseline, the %s APIServer budget and the %s headroom. Try: %s.",
+            "start. %s. Try: %s.",
             num_device_blocks, format_memory_size(cache_block_size),
             format_memory_size(num_device_blocks * cache_block_size),
             self.model_config.max_model_len, blocks_per_request,
             format_memory_size(blocks_per_request * cache_block_size),
-            format_memory_size(api_overhead),
-            format_memory_size(KV_CACHE_MEMORY_MARGIN_BYTES),
-            "; ".join(remedies))
+            cause, "; ".join(remedies))
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate OpenVINO KV cache with the specified kv_cache_config."""

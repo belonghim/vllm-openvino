@@ -293,6 +293,16 @@ text because of prefill vs decode numerics.
   `--no-enable-prefix-caching` keeps the resident set at the working set
   (measured: anon flat at ~477 MiB after warm-up vs +62 MiB over 8 rounds
   with prefix caching on).
+- Hybrid-PA without prefix caching takes the conv/SSM state slots out of the
+  KV pool first: one per `--max-num-seqs` request plus one, and `1 + k` more
+  per request with `k` speculative tokens. On Qwen3.6-35B-A3B a slot is about
+  64 MiB, so the default 128 requests reserve 8 GiB and a 2 GiB pool is left with no KV
+  blocks; lower `--max-num-seqs` (4 served it in the same pool). The startup
+  warning reports the reservation.
+- Stateful models keep the KV cache in the OpenVINO state and allocate no pool
+  tensors; the scheduler gets the blocks for one `--max-model-len` request
+  whatever `VLLM_OPENVINO_KVCACHE_SPACE` is (before, gemma-4-26B with a 2 GiB
+  pool got 148 f32-sized blocks and vLLM refused `--max-model-len 8192`).
 - Prefix caching is disabled automatically for stateful models, and for
   Hybrid-PA models with speculative decoding: their recurrent/internal state
   is not checkpointed per vLLM block, so a prefix hit would skip tokens
