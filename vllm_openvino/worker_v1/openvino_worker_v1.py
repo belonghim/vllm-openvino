@@ -1094,8 +1094,10 @@ class OpenVINOWorkerV1(WorkerBase):
                                 for ids, _ in warmup_prompts)
         tmp_cache_config.num_gpu_blocks = math.ceil(
             max_warmup_tokens / self.cache_config.block_size) + 1
+        # Without checkpoints the warmup request holds slot 0 only (it
+        # schedules no drafts), so one slot suffices.
         num_state = (tmp_cache_config.num_gpu_blocks if self._la_state_bytes
-                     else num_state_slots(self.vllm_config))
+                     else 1)
         engine = OpenVINOCacheEngine(
             tmp_cache_config,
             self.key_cache_config,

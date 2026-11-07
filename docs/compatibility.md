@@ -431,7 +431,9 @@ Hybrid-PA: a draft request runs with `la.cache_interval=1` and
 conv/SSM state lands in temporary slot t. After verification the slot of the
 last accepted token becomes the committed slot and the rest return to the pool.
 With speculation the pool holds `max_num_seqs * (k + 2) + 1` slots, so lower
-`--max-num-seqs` when enabling it on a large-state model.
+`--max-num-seqs` when enabling it: on Qwen3.5-0.8B (about 19.7 MiB per slot),
+k=4 and the default 128 requests reserve 14.8 GiB and do not start in a 16 GiB
+container; `--max-num-seqs 16` does.
 
 Measured (8 CPUs, k=4, `prompt_lookup_min=5`, `prompt_lookup_max=8`,
 tok/s, baseline -> spec; copy-heavy / free-form output):
