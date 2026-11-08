@@ -84,13 +84,19 @@ Tracked upstream:
   is resumed through `scheduled_new_reqs` with `prefill_token_ids` holding the
   prompt and its generated tokens. The runner restores the generated tokens
   into `output_token_ids`, so the re-prefill input, penalties and n-gram
-  lookups see them. Verified on a 0.33.0 image with the wheel of the merge
-  commit (`aac1b2a4f`) installed: Qwen3-1.7B with a 2,080-token pool (8
+  lookups see them, and keeps the request's `torch.Generator`, so a seeded
+  request continues its random sequence. With the variable gone from vLLM's
+  list, the platform's `validate_environ` rejects
+  `VLLM_USE_V2_MODEL_RUNNER` values other than `1` as upstream does.
+  Verified on a 0.33.0 image with the wheel of the merge
+  commit (`aac1b2a4f`) installed: Qwen3-1.7B with a pool of about 2k tokens (8
   concurrent greedy requests, half with `repetition_penalty`, 4 preemptions)
   returned the same text as 0.33.0 under the same preemptions, while dropping
   the restore changed all 4 preempted requests; Qwen3.5-0.8B (Hybrid-PA, 6
   preemptions), an image request, structured output and sequential requests
-  ran without errors. Hybrid-PA output under preemption differs from run to
+  ran without errors. Seeded sampling (`temperature=0.8`, 8 seeds, 3
+  preemptions) matched 0.33.0 on all 8 requests; with a fresh generator on
+  resume the 3 preempted requests diverged. Hybrid-PA output under preemption differs from run to
   run on 0.33.0 itself, so it was not compared token for token. The new
   `encoder_input_updates` only release or restore the worker's copy of
   multimodal payloads; the runner keeps its own `mm_features` and ignores them.
@@ -289,6 +295,14 @@ text because of prefill vs decode numerics.
   10 rounds while its size stayed fixed; cgroup total 1.6 -> 2.5 GB).
   Size containers for `baseline + VLLM_OPENVINO_KVCACHE_SPACE`, not for the
   pool alone.
+- vLLM plans the block count from each layer's `FullAttentionSpec` page, so
+  that page must be the OpenVINO block's real size. u8 keys keep their
+  per-channel scale and zero point as extra rows (`[heads, 32 + 8, head]`),
+  which a `block_size x head_size` page leaves out; `get_kv_cache_spec` pads
+  such layers (`page_size_padded`) to the real size, as Hybrid-PA already does.
+  Without the padding vLLM planned 8.8% more blocks than the budget on
+  Qwen3-1.7B (183,424 tokens for 5,268 budgeted blocks of 32), and the pool
+  was allocated that much over the budget.
 - On CPU the pool is sized from a memory ceiling: the cgroup memory limit when
   one is set, otherwise host MemAvailable. Before model load (estimate):
   ceiling - model weights (`openvino_*.bin`) - 1.5 GiB runtime baseline -

@@ -184,6 +184,64 @@ with open(results_file, "w") as f:
 PYEOF
 }
 
+# Preempt-and-resume: a pool of about 2.4k tokens with 8 concurrent 400-token
+# requests forces vLLM to preempt and later resume requests.
+run_preemption_check() {
+  local model_dir="$MODEL_BASE/Qwen3-1.7B-int4-ov"
+  [[ -d "$model_dir" ]] || { echo "  SKIP: model dir not found: $model_dir"; return 0; }
+  echo ""
+  echo "=== Preemption (Qwen3-1.7B-int4-ov, VLLM_OPENVINO_KVCACHE_SPACE=0.15) ==="
+  cleanup_container
+  podman run --replace -d --name "$CONTAINER_NAME" \
+    -p 8080:8080 --cpus=8 --memory=16g \
+    -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino:Z" \
+    -v "$model_dir:/models:Z" \
+    -e VLLM_OPENVINO_KVCACHE_SPACE=0.15 \
+    "$IMAGE" --port=8080 --model /models --max-model-len 2048 >/dev/null
+  local ready=false
+  for _ in $(seq 1 60); do
+    curl -sf "$API_URL/v1/models" >/dev/null 2>&1 && { ready=true; break; }
+    sleep 5
+  done
+  if [[ "$ready" != true ]]; then
+    echo "  FAIL: container startup timeout"
+    podman logs "$CONTAINER_NAME" 2>&1 | tail -10
+    cleanup_container
+    return 1
+  fi
+  python3 - "$API_URL" <<'PYEOF'
+import concurrent.futures as cf, json, re, sys, urllib.request
+url = sys.argv[1]
+def preemptions():
+    text = urllib.request.urlopen(url + "/metrics").read().decode()
+    m = re.search(r"^vllm:num_preemptions_total\{[^}]*\} (\S+)", text, re.M)
+    return float(m.group(1)) if m else 0.0
+def run(i):
+    body = {"model": "/models", "prompt": f"Write a long essay, part {i}.\n\n",
+            "max_tokens": 400, "temperature": 0, "ignore_eos": True}
+    if i % 2:
+        body["repetition_penalty"] = 1.3
+    req = urllib.request.Request(url + "/v1/completions", json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=1800) as r:
+        return json.load(r)["usage"]["completion_tokens"]
+before = preemptions()
+with cf.ThreadPoolExecutor(8) as ex:
+    tokens = list(ex.map(run, range(8)))
+count = preemptions() - before
+print(f"  preemptions={count:.0f} completion_tokens={tokens}")
+sys.exit(0 if count > 0 and tokens == [400] * 8 else 1)
+PYEOF
+  local rc=$?
+  if podman logs "$CONTAINER_NAME" 2>&1 | grep -q Traceback; then
+    echo "  FAIL: Traceback in server log"
+    rc=1
+  fi
+  cleanup_container
+  (( rc == 0 )) && echo "  Preemption: OK" || echo "  FAIL: preemption check"
+  return $rc
+}
+
 main() {
   echo "=== vllm-openvino Performance Smoke Test ==="
   printf 'Models:'; printf ' [%s]' "${MODELS[@]}"; echo
@@ -199,6 +257,7 @@ main() {
       any_failed=true
     fi
   done
+  run_preemption_check || any_failed=true
 
   echo ""
   echo "Results saved: $RESULTS_FILE"

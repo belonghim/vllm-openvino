@@ -264,7 +264,20 @@ class OpenVinoPlatform(Platform):
     def validate_environ(cls, hard_fail: bool) -> None:
         from vllm import envs as vllm_envs
 
-        for env in os.environ:
+        for env, value in os.environ.items():
+            if (env == "VLLM_USE_V2_MODEL_RUNNER"
+                    and env not in vllm_envs.environment_variables):
+                # Removed with MRV1 (vllm#63373); mirror upstream's check,
+                # which this override replaces.
+                if value != "1":
+                    raise ValueError(
+                        f"VLLM_USE_V2_MODEL_RUNNER={value} is no longer "
+                        "supported: Model Runner V1 has been removed. Unset "
+                        "this variable.")
+                logger.warning(
+                    "VLLM_USE_V2_MODEL_RUNNER=1 is redundant and can be unset: "
+                    "Model Runner V1 has been removed.")
+                continue
             if (env.startswith("VLLM_") and env not in vllm_envs.environment_variables
                     and env not in envs.environment_variables):
                 if hard_fail:

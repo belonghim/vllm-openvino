@@ -449,8 +449,11 @@ class OpenVINOModelRunnerV1:
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
-            generator = None
-            if (sampling_params is not None
+            # A request resumed after preemption keeps its generator, so a
+            # seeded request does not redraw the numbers it already used.
+            prev_state = self.requests.get(req_id)
+            generator = prev_state.generator if prev_state is not None else None
+            if (generator is None and sampling_params is not None
                     and sampling_params.sampling_type == SamplingType.RANDOM_SEED):
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
