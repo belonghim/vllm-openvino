@@ -11,8 +11,9 @@ the supported vLLM version changes.
    KV-cache interface signatures.
 4. Check platform registration and worker selection.
 5. The plugin runs its own runner and keeps its own copies of the MRV1 pieces
-   it used, so MRV1 removal (#63373) does not affect it; see "Upstream vLLM
-   Compatibility" in `compatibility.md`. The plugin consumes
+   it used; the runner and worker accept both 0.33.0's scheduler output and
+   the MRV2 one that MRV1 removal (#63373) leaves (see "Upstream vLLM
+   Compatibility" in `compatibility.md`). The plugin consumes
    `WorkerBase`, `bind_kv_cache`, `SchedulerOutput`, `ModelRunnerOutput` and
    other `vllm.v1.*` symbols without running the built-in runner; check them
    against the new wheel before bumping:

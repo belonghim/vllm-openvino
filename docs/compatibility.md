@@ -24,7 +24,8 @@ one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
 MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set
 `VLLM_USE_V2_MODEL_RUNNER=0` in those setups. vLLM marks MRV1 deprecated since
 0.29.0; 0.33.0 still ships it (`gpu_input_batch.py`, `cpu_model_runner.py`,
-the V1 `Sampler`).
+the V1 `Sampler`). Releases with #63373 (below) remove the variable; leave it
+unset there.
 
 Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
 not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
@@ -62,22 +63,37 @@ Tracked upstream:
   prefill context parallelism, LoRA tower/connector. Extending it to x86 was
   suggested on #57684; it would still not run the plugin's OpenVINO runner.
 - [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
-  (open, not in 0.33.0) removes MRV1: `gpu_input_batch.py`,
-  `cpu_model_runner.py`, the V1 `Sampler` and `use_v2_model_runner`, and drops
-  "vLLM on CPU without Triton". The plugin imports none of what it
-  removes: it keeps its own trimmed copies of the MRV1 pieces it used, which
-  give the same output as vLLM 0.32's (`sampler.py` for the V1 `Sampler` and
-  `SamplingMetadata`, `worker_v1/input_batch.py` for `InputBatch` and
+  (merged 2026-11-07, not in 0.33.0) removes MRV1: `gpu_input_batch.py`,
+  `cpu_model_runner.py`, the V1 `Sampler`, `VLLM_USE_V2_MODEL_RUNNER` and
+  `use_v2_model_runner`, and makes `CpuPlatform` refuse x86 without Triton
+  (the plugin's platform is not `CpuPlatform`). The plugin imports none of the
+  removed modules: it keeps its own trimmed copies of the MRV1 pieces it used,
+  which give the same output as vLLM 0.32's (`sampler.py` for the V1 `Sampler`
+  and `SamplingMetadata`, `worker_v1/input_batch.py` for `InputBatch` and
   `CachedRequestState`, `worker_v1/ngram_proposer.py`, and
   `apply_grammar_bitmask` in the runner, about 3x faster than vLLM's xgrammar
   call on CPU). The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`,
   `block_table.py`, `sample/gumbel.py`, ...) are Triton kernels, and #61995's
   CPU runner needs the C++ ops above and a different runner state design, so
-  neither is a drop-in. What the plugin still takes from `vllm.v1` is
-  `WorkerBase`/`CompilationTimes`, `bind_kv_cache`, `SchedulerOutput`,
-  `ModelRunnerOutput`/`SamplerOutput`/`LogprobsTensors`/`DraftTokenIds`, the
-  KV-cache specs and the attention backend interfaces; #63373 leaves them
-  in place.
+  neither is a drop-in.
+  It also changes the scheduler-worker interface to MRV2's, which the runner
+  and worker accept alongside 0.33.0's: `CachedRequestData` loses
+  `resumed_req_ids` and `all_token_ids`, `ModelRunnerOutput` loses
+  `req_id_to_index` (the scheduler indexes by `req_ids` order),
+  `NewRequestData.prefill_token_ids` becomes required, and a preempted request
+  is resumed through `scheduled_new_reqs` with `prefill_token_ids` holding the
+  prompt and its generated tokens. The runner restores the generated tokens
+  into `output_token_ids`, so the re-prefill input, penalties and n-gram
+  lookups see them. Verified on a 0.33.0 image with the wheel of the merge
+  commit (`aac1b2a4f`) installed: Qwen3-1.7B with a 2,080-token pool (8
+  concurrent greedy requests, half with `repetition_penalty`, 4 preemptions)
+  returned the same text as 0.33.0 under the same preemptions, while dropping
+  the restore changed all 4 preempted requests; Qwen3.5-0.8B (Hybrid-PA, 6
+  preemptions), an image request, structured output and sequential requests
+  ran without errors. Hybrid-PA output under preemption differs from run to
+  run on 0.33.0 itself, so it was not compared token for token. The new
+  `encoder_input_updates` only release or restore the worker's copy of
+  multimodal payloads; the runner keeps its own `mm_features` and ignores them.
 - [vllm-project/vllm#61452](https://github.com/vllm-project/vllm/pull/61452)
   (open, not in 0.33.0) moves allocation policy from `KVCacheSpec` onto the KV
   cache managers. It breaks the plugin's worker: `FullAttentionSpec` is

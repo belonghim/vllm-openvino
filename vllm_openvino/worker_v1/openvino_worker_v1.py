@@ -32,7 +32,7 @@ from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 
 import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import (
-    OpenVINOModelRunnerV1, num_state_slots)
+    OpenVINOModelRunnerV1, make_model_runner_output, num_state_slots)
 from vllm_openvino.kv_cache import OpenVINOCacheEngine, str_to_ov_type
 from vllm_openvino.utils import (
     canonical_vllm_cache_dtype,
@@ -497,9 +497,9 @@ class OpenVINOWorkerV1(WorkerBase):
             if hasattr(self.model_runner, 'release_finished_conv_slots'):
                 self.model_runner.release_finished_conv_slots(scheduler_output)
             self.model_runner.free_encoder_cache(scheduler_output)
-            return ModelRunnerOutput(
+            return make_model_runner_output(
+                {},
                 req_ids=[],
-                req_id_to_index={},
                 sampled_token_ids=[],
                 logprobs=None,
                 prompt_logprobs_dict={},
@@ -639,9 +639,11 @@ class OpenVINOWorkerV1(WorkerBase):
 
                 block_table = list(range(num_blocks, num_blocks + seq_num_blocks))
                 num_blocks += seq_num_blocks
+                prompt_token_ids = list(dummy_data.seq_data.prompt_token_ids)
                 reqs.append(NewRequestData(
                     req_id=str(group_id),
-                    prompt_token_ids=list(dummy_data.seq_data.prompt_token_ids),
+                    prompt_token_ids=prompt_token_ids,
+                    prefill_token_ids=prompt_token_ids,
                     mm_features=[],
                     sampling_params=sampling_params,
                     pooling_params=None,
@@ -1180,6 +1182,7 @@ class OpenVINOWorkerV1(WorkerBase):
             new_req = NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=prompt_token_ids,
+                prefill_token_ids=prompt_token_ids,
                 mm_features=features,
                 sampling_params=params,
                 pooling_params=None,

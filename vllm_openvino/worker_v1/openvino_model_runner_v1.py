@@ -29,6 +29,14 @@ from vllm.v1.core.sched.output import SchedulerOutput
 logger = init_logger(__name__)
 
 
+def make_model_runner_output(req_id_to_index: dict[str, int],
+                             **kwargs) -> ModelRunnerOutput:
+    # vllm#63373 drops req_id_to_index; the scheduler indexes by req_ids order.
+    if "req_id_to_index" in ModelRunnerOutput.__dataclass_fields__:
+        kwargs["req_id_to_index"] = req_id_to_index
+    return ModelRunnerOutput(**kwargs)
+
+
 def apply_grammar_bitmask(logits: torch.Tensor, req_ids: list[str],
                           spec_tokens: dict[str, list[int]],
                           grammar_output) -> None:
@@ -425,10 +433,16 @@ class OpenVINOModelRunnerV1:
                 self._conv_slot_free.append(slot)
 
         # Remove unscheduled requests from batch (but keep cached state)
+        # vLLM 0.33 sends resumed requests as cached requests listed in
+        # resumed_req_ids; after vllm#63373 they arrive in scheduled_new_reqs
+        # with prefill_token_ids (prompt + generated tokens).
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
-        resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        resumed_req_ids = getattr(
+            scheduler_output.scheduled_cached_reqs, "resumed_req_ids", ())
+        new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
         for req_id in list(self.input_batch.req_id_to_index):
-            if req_id not in scheduled_req_ids or req_id in resumed_req_ids:
+            if (req_id not in scheduled_req_ids or req_id in resumed_req_ids
+                    or req_id in new_req_ids):
                 self.input_batch.remove_request(req_id)
 
         # Add new requests
@@ -440,9 +454,14 @@ class OpenVINOModelRunnerV1:
                     and sampling_params.sampling_type == SamplingType.RANDOM_SEED):
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
+            prompt_token_ids = new_req_data.prompt_token_ids
+            prefill_token_ids = new_req_data.prefill_token_ids
             req_state = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_token_ids=prompt_token_ids,
+                output_token_ids=(
+                    list(prefill_token_ids[len(prompt_token_ids):])
+                    if prefill_token_ids is not None else []),
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 generator=generator,
@@ -468,7 +487,7 @@ class OpenVINOModelRunnerV1:
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             if new_block_ids is not None:
-                if req_id in req_data.resumed_req_ids:
+                if req_id in resumed_req_ids:
                     req_state.block_ids = new_block_ids
                 else:
                     req_state.block_ids = tuple(
@@ -1014,9 +1033,9 @@ class OpenVINOModelRunnerV1:
         # Snapshot (not a live reference): with async scheduling, a later
         # step can mutate self.input_batch before the scheduler consumes
         # this step's output, corrupting it if it aliased the live dicts.
-        return ModelRunnerOutput(
+        return make_model_runner_output(
+            dict(self.input_batch.req_id_to_index),
             req_ids=list(self.input_batch.req_ids),
-            req_id_to_index=dict(self.input_batch.req_id_to_index),
             sampled_token_ids=sampled_tokens,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
