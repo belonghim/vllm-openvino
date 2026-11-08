@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import dataclasses
 import math
 import re
 import time
@@ -771,12 +772,23 @@ class OpenVINOWorkerV1(WorkerBase):
             page_size_padded = -(-self.get_cache_block_size_bytes()
                                  // len(key_cache_config))
         for idx, (key_cache_shape, value_cache_shape) in enumerate(zip(key_cache_config, value_cache_config)):
-            kv_cache_spec[str(idx)] = FullAttentionSpec(
+            spec = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=max(key_cache_shape[1].get_length(), value_cache_shape[1].get_length()),
                 head_size=max(key_cache_shape[3].get_length(), value_cache_shape[3].get_length()),
                 dtype=str_to_torch_type[cache_type],
                 page_size_padded=page_size_padded)
+            if page_size_padded is None:
+                # u8 keys carry their per-channel scale/zero-point as extra
+                # rows ([heads, block + 8, head]), which the spec's
+                # block x head page does not count; vLLM would then plan more
+                # blocks than the pool budget holds.
+                layer_bytes = OpenVINOCacheEngine.get_cache_block_size(
+                    cache_type, [key_cache_shape], [value_cache_shape],
+                    block_size=block_size)
+                if layer_bytes > spec.page_size_bytes:
+                    spec = dataclasses.replace(spec, page_size_padded=layer_bytes)
+            kv_cache_spec[str(idx)] = spec
 
         # Hybrid-PA models (PA-transformed) manage conv/SSM state via a
         # private slot pool in the model runner, bypassing vLLM's MambaSpec
@@ -980,9 +992,12 @@ class OpenVINOWorkerV1(WorkerBase):
             return
         from vllm_openvino.utils import format_memory_size  # noqa: PLC0415
         from vllm_openvino.platform import (  # noqa: PLC0415
-            APISERVER_OVERHEAD_BYTES, KV_CACHE_MEMORY_MARGIN_BYTES,
+            APISERVER_OVERHEAD_BYTES, GIB_BYTES, KV_CACHE_MEMORY_MARGIN_BYTES,
             apiserver_overhead_bytes)
         api_overhead = apiserver_overhead_bytes(self.model_config)
+        explicit_space = (
+            envs.VLLM_OPENVINO_KVCACHE_SPACE > 0
+            and pool_bytes >= int(envs.VLLM_OPENVINO_KVCACHE_SPACE * GIB_BYTES))
         remedies = []
         if conv_reservation:
             from vllm_openvino.worker_v1.openvino_model_runner_v1 import (  # noqa: PLC0415
@@ -995,6 +1010,10 @@ class OpenVINOWorkerV1(WorkerBase):
                    num_state_slots(self.vllm_config),
                    self.scheduler_config.max_num_seqs))
             remedies.append("lower --max-num-seqs")
+        elif explicit_space:
+            cause = ("VLLM_OPENVINO_KVCACHE_SPACE=%g sets the pool to %s"
+                     % (envs.VLLM_OPENVINO_KVCACHE_SPACE,
+                        format_memory_size(pool_bytes)))
         else:
             cause = (
                 "The memory limit leaves nothing above the runtime baseline, "
@@ -1014,6 +1033,8 @@ class OpenVINOWorkerV1(WorkerBase):
                 "--limit-mm-per-prompt '{\"image\":0,\"video\":0}' to drop the "
                 "vision APIServer budget (image requests then fail with HTTP 400)")
         remedies.append(
+            "lower --max-model-len or raise VLLM_OPENVINO_KVCACHE_SPACE"
+            if explicit_space else
             "lower --max-model-len, raise the container memory limit, or set "
             "VLLM_OPENVINO_KVCACHE_SPACE explicitly")
         logger.warning(
