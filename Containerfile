@@ -4,9 +4,11 @@ RUN dnf install -y python3 && \
 ENV VIRTUAL_ENV=/opt/vllm-env
 RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+# Pre-release check: --build-arg VLLM_SPEC=<wheel URL from wheels.vllm.ai/<commit>/vllm/>
+ARG VLLM_SPEC="vllm==0.33.0"
 RUN pip install -U pip setuptools wheel && \
     PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/nightly" \
-    pip install --no-cache-dir "torch==2.14.0+cpu" "torchvision==0.29.0+cpu" "openvino==2026.5.0.dev20261030" "transformers==5.18.0" "vllm==0.33.0" && \
+    pip install --no-cache-dir "torch==2.14.0+cpu" "torchvision==0.29.0+cpu" "openvino==2026.5.0.dev20261030" "transformers==5.18.0" "$VLLM_SPEC" && \
     pip uninstall -y \
         triton \
         flashinfer-cubin flashinfer-python \

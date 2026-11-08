@@ -97,7 +97,11 @@ Tracked upstream:
   ran without errors. Seeded sampling (`temperature=0.8`, 8 seeds, 3
   preemptions) matched 0.33.0 on all 8 requests; with a fresh generator on
   resume the 3 preempted requests diverged. Hybrid-PA output under preemption differs from run to
-  run on 0.33.0 itself, so it was not compared token for token. The new
+  run on 0.33.0 itself, so it was not compared token for token. An image
+  built with `--build-arg VLLM_SPEC=<merge-commit wheel>` (dependencies
+  resolved, torch `2.14.0+cpu`) passed `scripts/smoke-test.sh` on every
+  serving path and the preemption check, at the same throughput as 0.33.0 on
+  the same host. The new
   `encoder_input_updates` only release or restore the worker's copy of
   multimodal payloads; the runner keeps its own `mm_features` and ignores them.
 - [vllm-project/vllm#61452](https://github.com/vllm-project/vllm/pull/61452)
@@ -147,7 +151,12 @@ The plugin selects a path from the model IR:
 | No `ReadValue`, with SDPA | PagedAttention | External KV cache and concurrent batching |
 | `ReadValue` with `ssm`/`conv` variable IDs | Hybrid-PA | External attention/state cache and concurrent batching |
 | Other `ReadValue` models with SDPA (incl. Gemma-4) | PagedAttention (`VLLM_OPENVINO_STATEFUL_PA=1`) | External KV cache and concurrent batching |
-| Stateful models without SDPA, or `VLLM_OPENVINO_STATEFUL_PA=0` | Stateful | OpenVINO internal state and `max_num_seqs=1` |
+| Stateful models without SDPA, or `VLLM_OPENVINO_STATEFUL_PA=0` | Stateful (deprecated) | OpenVINO internal state and `max_num_seqs=1` |
+
+The stateful path is deprecated and logs a warning when selected: none of
+the tested models need it (every one has SDPA and takes PagedAttention or
+Hybrid-PA), it serves one request at a time, and it has no n-gram speculation
+or prefix caching. It will be removed together with `VLLM_OPENVINO_STATEFUL_PA`.
 
 Stateful plain-attention models (optimum-intel default exports, e.g.
 Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time
@@ -167,7 +176,7 @@ on Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B and Phi-3.5-mini (int4
 IR): concurrency-8 aggregate throughput was 4.9-7.0x the stateful path,
 single-stream -7.8% to +4%. Sliding-window models take the same path: the
 PagedAttention op applies the window itself. Stateful models without SDPA
-ops stay on the stateful path.
+ops stay on the (deprecated) stateful path.
 
 Gemma-4 E2B (sliding window 512, 15 KV pairs after KV sharing, per-layer
 embeddings) was verified on the PA path with OpenVINO 2026.4.1: greedy output

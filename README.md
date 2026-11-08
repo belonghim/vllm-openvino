@@ -86,7 +86,7 @@ multimodal ones). Export a HuggingFace checkpoint with
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true`, `false`, or `auto` | `auto` |
 | `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` | CPU only. Group size of the dynamic int8 activation quantization in compressed-weight matmuls: `0` disables it, `64`/`128` speed up prefill by ~17% / ~23-32% (decode unchanged) at an accuracy cost that is small but not ruled out (see CPU Tuning). Unset = OpenVINO default (32) | unset |
 | `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER` | Hybrid-PA prefix caching: scheduler block (and conv/SSM checkpoint interval) in 32-token KV blocks (default 8 = 256 tokens). `0` = auto, `max(8, checkpoint bytes / KV block bytes)` as in OpenVINO GenAI (LFM2.5: 256 tokens, Qwen3.5/MiniCPM-V: 1504 tokens). Smaller values give finer prefix hits and use more memory per token; `1` matches the 32-token PA block. See [Serving Modes](#serving-modes). | `8` |
-| `VLLM_OPENVINO_STATEFUL_PA` | PagedAttention transformation for plain-attention stateful models (optimum-intel default exports), enabling concurrent batching (sliding-window models such as Gemma-4 included). Models without SDPA ops fall back to the sequential stateful path. Set to `0` to force the sequential stateful path. See [Serving Modes](#serving-modes). | `1` |
+| `VLLM_OPENVINO_STATEFUL_PA` | PagedAttention transformation for plain-attention stateful models (optimum-intel default exports), enabling concurrent batching (sliding-window models such as Gemma-4 included). Models without SDPA ops fall back to the sequential stateful path. Set to `0` to force the sequential stateful path (deprecated, as is the variable). See [Serving Modes](#serving-modes). | `1` |
 | `VLLM_OPENVINO_CACHE_DIR` | Directory for OpenVINO's compiled-model disk cache. Skips recompiling the model on process restart if a matching cached blob exists. When unset, the plugin uses `~/.cache/vllm-openvino` if it can be created, otherwise caching is disabled (an INFO log records which path is in use, if any). | auto |
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | CPU only. Scheduling core type on hybrid P-core/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
 | `VLLM_OPENVINO_FAST_SAMPLER` | CPU only. Use partial/sparse top-k/top-p and repetition-penalty routines instead of the full-vocabulary sort and dense penalty tensors of vLLM's V1 sampler (up to ~2× end-to-end on small models with default `top_k`/`top_p`/`repetition_penalty`). Set to `0` to use the full-sort/dense routines. See [Sampling Parameters](#sampling-parameters-large-vocab-models) for seed behavior. | `1` |
@@ -243,7 +243,9 @@ Models with `ScaledDotProductAttention` ops and no state are transformed to use 
 - External KV cache management
 - Full vLLM scheduler features
 
-### Stateful Path
+### Stateful Path (deprecated)
+
+Deprecated: it logs a warning when selected and will be removed. Every model tested with this plugin has SDPA ops and runs on the PagedAttention or Hybrid-PA path; re-export a model with SDPA rather than relying on this path.
 
 Models without `ScaledDotProductAttention` ops, or any stateful model with `VLLM_OPENVINO_STATEFUL_PA=0`, run via OpenVINO's internal state management (`ReadValue`/`Assign`). Characteristics:
 - Sequential request processing (`max_num_seqs=1`)
@@ -278,6 +280,6 @@ The following vLLM features are compatible with the OpenVINO backend:
 - `thinking_token_budget` is rejected with HTTP 400, and custom logits processors (`--logits-processors`) fail at startup; the sampler applies only vLLM's builtin `min_p`, `logit_bias` and `min_tokens`.
 - Tensor/pipeline parallelism is not supported. Threads are scheduled across all visible cores, but multi-socket scaling is poor; see [CPU Tuning](#cpu-tuning-avx2).
 - vLLM V1 engine only.
-- Stateful-path models (no SDPA ops, or `VLLM_OPENVINO_STATEFUL_PA=0`) do not support concurrent request execution (`max_num_seqs=1`).
+- Stateful-path models (no SDPA ops, or `VLLM_OPENVINO_STATEFUL_PA=0`) do not support concurrent request execution (`max_num_seqs=1`); the stateful path is deprecated.
 
 See `docs/compatibility.md` for the current support matrix.

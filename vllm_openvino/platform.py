@@ -397,6 +397,13 @@ class OpenVinoPlatform(Platform):
                         "Overriding max_num_seqs from %d to 1.",
                         scheduler_config.max_num_seqs)
                     scheduler_config.max_num_seqs = 1
+            if keeps_external_state and not hybrid_pa:
+                logger.warning(
+                    "[OV-PLATFORM] The stateful serving path (models without "
+                    "SDPA ops, or VLLM_OPENVINO_STATEFUL_PA=0) is deprecated "
+                    "and will be removed in a future release. Export the model "
+                    "with SDPA so it runs on the PagedAttention or Hybrid-PA "
+                    "path.")
 
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:

@@ -12,14 +12,14 @@
 
 ### 설계 원칙
 
-1. **upstream 패턴 추종** — vLLM 구현 패턴을 정확히 따른다. upstream과 다른 아키텍처는 버전 업그레이드 시 호환성을 깨뜨린다.
+1. **upstream 계약 추종** — vLLM이 워커에 넘기고 받는 계약(`SchedulerOutput`, `ModelRunnerOutput`, KV cache spec, `WorkerBase`)을 정확히 따르고, 요청 수명주기(신규·재개·선점·종료)와 encoder 입력 처리는 MRV2와 standalone CPU 러너(`vllm/v1/worker/cpu/`)의 의미에 맞춘다. MRV1은 upstream에서 제거됐으므로 기준이 아니다. 러너·샘플러·`InputBatch`는 플러그인 소유 코드이고, upstream과 계약이 어긋나면 버전 업그레이드 시 호환성이 깨진다.
 2. **플러그인 경계 준수** — vLLM core를 수정하거나, core의 동작을 가정하지 않는다. vLLM이 제공하는 플러그인 인터페이스만 사용한다.
 3. **규모에 맞는 최소주의** — 현재 규모를 초과하는 복잡도와 추상화, 별도 테스트 인프라를 추가하지 않는다.
 4. **현재 문제만 해결** — 실제 사용자 수요가 없거나 vLLM 아키텍처 제약으로 구현 불가능한 기능은 추가하지 않는다.
 
 **원칙 충돌 시 우선순위**: upstream 호환성 > 플러그인 경계 > 최소주의
 
-Stateful 경로는 유지보수 대상으로만 유지하고, hybrid 모델의 확장은 Hybrid-PA 경로에서 한다.
+Stateful 경로(SDPA 없는 모델, `VLLM_OPENVINO_STATEFUL_PA=0`)는 폐기 예정이다. 사용 중인 모델이 없어 기능을 추가하지 않고, 선택되면 경고를 낸다. 다음 정리 때 제거한다. hybrid 모델의 확장은 Hybrid-PA 경로에서 한다.
 
 ### 문서 유지 원칙
 
@@ -47,7 +47,8 @@ Stateful 경로는 유지보수 대상으로만 유지하고, hybrid 모델의 �
 - 코드를 수정하면 먼저 `python3 -m py_compile`을 실행한다.
 - 런타임 변경은 빌드 없이 podman 소스 마운트로 검증한다. `pyproject.toml`이나 `Containerfile`을 바꾸면 `podman build`까지 돌린다.
 - 단일·연속·동시 요청을 실제 API로 확인한다. 요청은 `localhost`가 아니라 `127.0.0.1`로 보낸다(IPv6로 풀리면 연결이 끊긴다).
-- 성능 비교는 `--cpus=8 --memory=16g`로 CPU 수와 메모리를 고정한다.
+- 성능 비교는 `--cpus=8 --memory=16g`로 CPU 수와 메모리를 고정한다. 호스트 부하가 처리량을 움직이므로, 회귀 판정은 같은 호스트에서 직전 커밋과 번갈아 측정해 비교한다.
+- upstream의 깨지는 변경은 릴리스 전에 잡는다. 관련 PR이 머지되면 `--build-arg VLLM_SPEC=<per-commit 휠>`로 이미지를 빌드해 smoke-test를 돌린다(`docs/upgrade-checklist.md`).
 - 상세 절차는 `docs/podman-testing.md`를 따른다.
 
 ```bash
@@ -68,7 +69,8 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **`import openvino` 실패를 import 시점에 raise하지 않는다** — vLLM 플러그인 디스커버리가 다른 플랫폼을 검사하다 깨진다.
 - **`_allocate_kv_cache()`에 `.fill(0)`을 넣지 않는다** — OpenVINO가 초기화하며, 추가하면 OOM. SSM/conv 캐시(`_allocate_state_cache()`)의 zero-fill은 유지한다.
 - **bf16은 numpy 변환 전에 float32로** (`_as_numpy_no_copy()`) — OpenVINO는 bf16 numpy를 받지 않는다.
-- **`execute_model`과 `sample_tokens`를 합치지 않는다** — `execute_model`은 logits까지만 계산하고, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream MRV1 패턴). 구조화 출력이 이 경계에 의존한다.
+- **`execute_model`과 `sample_tokens`를 합치지 않는다** — `execute_model`은 logits까지만 계산하고, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream 워커 계약). 구조화 출력이 이 경계에 의존한다.
+- **KV spec의 page 크기는 OpenVINO cache shape에서 계산한다** — vLLM은 spec의 page 크기로 블록 수를 정하고, 플러그인은 그 수만큼 실제 크기 블록을 할당한다. u8 key의 scale/zero-point 행처럼 spec이 모르는 바이트는 `page_size_padded`로 넣는다. 어긋나면 풀이 예산보다 조용히 커진다.
 - **PA 전용 변환·입력은 stateful 모델에 주지 않는다** — `paged_attention_transformation()`, gather-before-matmul, PA 입력. gather 때문에 `prompt_logprobs`는 미지원이며 `validate_request`가 400으로 거부한다.
 - **서빙 경로는 IR로 판정한다** — `ReadValue`의 `variable_id`에 `ssm`/`conv`가 있으면 Hybrid-PA, 그 외 SDPA 모델은 PA(Gemma-4 포함), SDPA가 없으면 stateful. 단순한 `ReadValue`+SDPA 조합으로 판정하지 않는다.
 - **KV 풀은 VmRSS가 아니라 EngineCore anon RSS로 산정한다** — VmRSS에는 회수 가능한 mmap 가중치가 들어 있다. 측정 전 warmup이 실제 최대 prefill(+더미 이미지)을 돌려야 baseline이 맞다. warmup을 줄이면 풀이 커져 가득 찼을 때 OOM이 난다.

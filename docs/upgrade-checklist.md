@@ -5,6 +5,17 @@ the supported vLLM version changes.
 
 ## Before Upgrading
 
+Catch breaking upstream changes before the release: when a PR that touches the
+interfaces below is merged, build an image from that commit's wheel (listed at
+`https://wheels.vllm.ai/<commit>/vllm/`) and run `scripts/smoke-test.sh`
+against it:
+
+```bash
+podman build -f Containerfile -t vllm-openvino:next \
+  --build-arg VLLM_SPEC="https://wheels.vllm.ai/<commit>/vllm-<version>-cp38-abi3-manylinux_2_28_x86_64.whl" .
+IMAGE=vllm-openvino:next ./scripts/smoke-test.sh
+```
+
 1. Read the vLLM release notes.
 2. Compare the imported `vllm.v1.*` modules and public configuration APIs.
 3. Check worker, model runner, scheduler output, attention metadata, and
@@ -60,7 +71,7 @@ Pay particular attention to `WorkerBase`, `ModelRunnerOutput`,
 Update every place that names a version:
 
 - `pyproject.toml`: `version`, `vllm`, `transformers`, `openvino`
-- `Containerfile`: the vLLM wheel URL, `torch`, `torchvision`, `openvino`,
+- `Containerfile`: the `VLLM_SPEC` default, `torch`, `torchvision`, `openvino`,
   and `transformers`
 - `AGENTS.md` and `CONTRIBUTING.md`: vLLM and OpenVINO versions
 - `docs/compatibility.md`: Requirements and the version-specific notes
