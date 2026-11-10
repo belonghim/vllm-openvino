@@ -7,8 +7,9 @@ the supported vLLM version changes.
 
 Catch breaking upstream changes before the release: when a PR that touches the
 interfaces below is merged, build an image from that commit's wheel (listed at
-`https://wheels.vllm.ai/<commit>/vllm/`) and run `scripts/smoke-test.sh`
-against it:
+`https://wheels.vllm.ai/<commit>/vllm/`, which links to the wheel one level
+up; wheels appear about an hour after the merge) and run
+`scripts/smoke-test.sh` against it:
 
 ```bash
 podman build -f Containerfile -t vllm-openvino:next \
@@ -63,8 +64,8 @@ semantics (new `SamplingParams` fields, changed defaults). The runner's
 `apply_grammar_bitmask` (0.33 moved to a fixed stride per request).
 
 Pay particular attention to `WorkerBase`, `ModelRunnerOutput`,
-`SchedulerOutput`, `AttentionMetadata`, `KVCacheSpec`,
-`MambaSpec`, `bind_kv_cache`, and `CompilationTimes`.
+`SchedulerOutput`, `AttentionMetadata`, `KVCacheSpec`, `FullAttentionSpec`,
+`bind_kv_cache`, and `CompilationTimes`.
 
 ## Version Pins
 

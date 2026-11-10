@@ -4,7 +4,7 @@ RUN dnf install -y python3 && \
 ENV VIRTUAL_ENV=/opt/vllm-env
 RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-# Pre-release check: --build-arg VLLM_SPEC=<wheel URL from wheels.vllm.ai/<commit>/vllm/>
+# Pre-release check: --build-arg VLLM_SPEC=<wheel URL linked from wheels.vllm.ai/<commit>/vllm/>
 ARG VLLM_SPEC="vllm==0.33.0"
 RUN pip install -U pip setuptools wheel && \
     PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/nightly" \
@@ -23,7 +23,7 @@ RUN pip install -U pip setuptools wheel && \
     pip cache purge && \
     SP=/opt/vllm-env/lib/python3.12/site-packages && \
     rm -rf $SP/vllm/vllm_flash_attn $SP/vllm/third_party/deep_gemm $SP/vllm/_flashkda_C.abi3.so $SP/nccl && \
-    find /opt/vllm-env -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    { find /opt/vllm-env -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true; }
 WORKDIR /opt/vllm
 COPY pyproject.toml ./
 RUN pip install --no-deps --no-cache-dir .

@@ -120,6 +120,11 @@ Tracked upstream:
   only attention specs and allocates the conv/SSM pool itself, so core
   grouping has nothing to decide.
 
+vLLM main at `4e3463c87` (0.34.0rc1.dev156, 2026-11-10) passes: an image
+built with that wheel passed `scripts/check-vllm-imports.py` and
+`scripts/smoke-test.sh` on every serving path and the preemption check, within
+2% of 0.33.0's throughput on the same host.
+
 vLLM offers no upstream runner for an x86 plugin that cannot use Triton
 (#61995 is non-x86 only), so the plugin keeps its own; the support question
 (#57684) is closed on that basis.
