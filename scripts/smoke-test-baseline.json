@@ -1,30 +1,30 @@
 {
   "_meta": {
-    "git_sha": "92e5096"
+    "git_sha": "9d7977f"
   },
   "Qwen3-1.7B-int4-ov": {
-    "total_ms": 48879,
+    "total_ms": 61980,
     "total_tokens": 1280,
-    "avg_tps": 26.19
+    "avg_tps": 20.65
   },
   "gemma-4-E2B-it-int4-ov": {
-    "total_ms": 50443,
+    "total_ms": 64612,
     "total_tokens": 1127,
-    "avg_tps": 22.34
+    "avg_tps": 17.44
   },
   "LFM3-1.7B-int4-ov (--trust-remote-code)": {
-    "total_ms": 45435,
+    "total_ms": 55714,
     "total_tokens": 1280,
-    "avg_tps": 28.17
+    "avg_tps": 22.97
   },
   "Qwen3.5-0.8B-int4-ov": {
-    "total_ms": 23858,
+    "total_ms": 28970,
     "total_tokens": 979,
-    "avg_tps": 41.03
+    "avg_tps": 33.79
   },
-  "Qwen2.5-Coder-0.5B-Instruct-int4-ov (VLLM_OPENVINO_STATEFUL_PA=0)": {
-    "total_ms": 15725,
-    "total_tokens": 953,
-    "avg_tps": 60.6
+  "Qwen2.5-Coder-0.5B-Instruct-int4-ov": {
+    "total_ms": 14925,
+    "total_tokens": 735,
+    "avg_tps": 49.25
   }
 }
