@@ -129,82 +129,35 @@ def _find_model_ir_path(model_path: str) -> "Path | None":
     return ir_path
 
 
-def _scan_ir_for_patterns(ir_path, patterns: list[bytes]) -> list[bool]:
-    """Scan an IR XML file for byte patterns in one pass.
-
-    Keeps a small overlap between chunks so a pattern isn't missed when
-    split across a chunk boundary.
-    """
-    found = [False] * len(patterns)
-    max_pattern_len = max(len(p) for p in patterns)
-    overlap = max_pattern_len - 1
-    carry = b''
-    with open(ir_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            window = carry + chunk
-            for i, pattern in enumerate(patterns):
-                if not found[i] and pattern in window:
-                    found[i] = True
-            carry = window[-overlap:] if overlap > 0 else b''
-    return found
-
-
-def _is_stateful_model(model_path: str) -> bool:
-    ir_path = _find_model_ir_path(model_path)
-    if ir_path is None:
-        return False
-    try:
-        (has_readvalue,) = _scan_ir_for_patterns(ir_path, [b'type="ReadValue"'])
-        return has_readvalue
-    except (IOError, OSError) as e:
-        logger.warning("_is_stateful_model: could not read %s: %s", ir_path, e)
-        return False
-
-
 _VARIABLE_ID_RE = re.compile(rb'variable_id="([^"]*)"')
 
 
-def _is_stateful_pa_candidate(model_path: str) -> bool:
-    """Plain-attention stateful model eligible for PA transformation.
+def _ir_serving_traits(model_path: str) -> tuple[bool, bool, bool]:
+    """(stateful, has SDPA, hybrid) from one read of the IR XML.
 
-    Requires SDPA ops (transform is a no-op otherwise and would leave a
-    multi-request scheduler on the single-request-only stateful path).
+    Hybrid is deliberately narrower than "has ReadValue + SDPA": Gemma-4 also
+    matches that (KV cache via ReadValue) but has no ssm/conv state and belongs
+    on the plain PagedAttention path — so ssm/conv must appear inside
+    variable_id, not anywhere in the file (gemma-4's IR has 278 unrelated
+    "conv" hits from `type="Convert"` ops). SDPA is required for any PA
+    transformation (it is a no-op otherwise and would leave a multi-request
+    scheduler on the single-request-only stateful path).
     """
     ir_path = _find_model_ir_path(model_path)
     if ir_path is None:
-        return False
+        return False, False, False
     try:
         with open(ir_path, 'rb') as f:
             data = f.read()
-        return b'ScaledDotProductAttention' in data
     except (IOError, OSError) as e:
-        logger.warning("_is_stateful_pa_candidate: could not read %s: %s",
-                       ir_path, e)
-        return False
-
-
-def _is_hybrid_pa_candidate(model_path: str) -> bool:
-    """Hybrid Mamba/attention model eligible for the Hybrid-PA path.
-
-    Deliberately narrower than "has ReadValue + SDPA": Gemma-4 also matches
-    that (KV cache via ReadValue) but has no ssm/conv state and belongs on the
-    plain PagedAttention path — so we require ssm/conv specifically inside
-    variable_id, not a whole-file byte scan (gemma-4's IR has 278 unrelated
-    "conv" hits from `type="Convert"` ops).
-    """
-    ir_path = _find_model_ir_path(model_path)
-    if ir_path is None:
-        return False
-    try:
-        with open(ir_path, 'rb') as f:
-            data = f.read()
-        if b'ScaledDotProductAttention' not in data:
-            return False
-        return any(b'ssm' in vid or b'conv' in vid
-                   for vid in _VARIABLE_ID_RE.findall(data))
-    except (IOError, OSError) as e:
-        logger.warning("_is_hybrid_pa_candidate: could not read %s: %s", ir_path, e)
-        return False
+        logger.warning("Could not read %s: %s", ir_path, e)
+        return False, False, False
+    stateful = b'type="ReadValue"' in data
+    has_sdpa = b'ScaledDotProductAttention' in data
+    hybrid = stateful and has_sdpa and any(
+        b'ssm' in vid or b'conv' in vid
+        for vid in _VARIABLE_ID_RE.findall(data))
+    return stateful, has_sdpa, hybrid
 
 
 # Constants for memory and block size configuration
@@ -372,10 +325,11 @@ class OpenVinoPlatform(Platform):
         cache_config = vllm_config.cache_config
         keeps_external_state = False
         hybrid_pa = False
-        if _is_stateful_model(model_config.model):
-            hybrid_pa = _is_hybrid_pa_candidate(model_config.model)
+        stateful, has_sdpa, hybrid = _ir_serving_traits(model_config.model)
+        if stateful:
+            hybrid_pa = hybrid
             stateful_pa = (not hybrid_pa and envs.VLLM_OPENVINO_STATEFUL_PA
-                           and _is_stateful_pa_candidate(model_config.model))
+                           and has_sdpa)
             keeps_external_state = not stateful_pa
             if scheduler_config and scheduler_config.max_num_seqs != 1:
                 if hybrid_pa:

@@ -495,9 +495,9 @@ class OpenVINOWorkerV1(WorkerBase):
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput | None:
         if scheduler_output.total_num_scheduled_tokens == 0:
-            if hasattr(self.model_runner, 'release_finished_conv_slots'):
-                self.model_runner.release_finished_conv_slots(scheduler_output)
-            self.model_runner.free_encoder_cache(scheduler_output)
+            # The step after the last request finishes schedules nothing but
+            # carries finished_req_ids once; update states as upstream does.
+            self.model_runner._update_states(scheduler_output)
             return make_model_runner_output(
                 {},
                 req_ids=[],
@@ -567,6 +567,8 @@ class OpenVINOWorkerV1(WorkerBase):
             ssm_cache_config,
             conv_cache_config,
             self.cache_config.block_size,
+            self.ssm_cache_dtypes,
+            self.conv_cache_dtypes,
         )
 
     def profile_run(self) -> int:
@@ -1266,7 +1268,9 @@ class OpenVINOWorkerV1(WorkerBase):
         per_slot_bytes = OpenVINOCacheEngine.get_cache_block_size(
             self._kv_cache_dtype(),
             [], [],
-            self.ssm_cache_config, self.conv_cache_config)
+            self.ssm_cache_config, self.conv_cache_config,
+            ssm_cache_dtypes=self.ssm_cache_dtypes,
+            conv_cache_dtypes=self.conv_cache_dtypes)
         return per_slot_bytes * num_conv_slots
 
     def get_supported_tasks(self) -> tuple[str, ...]:

@@ -290,19 +290,6 @@ class OpenVINOModelRunnerV1:
     def _slice_tensor(base_tensor: ov.Tensor, length: int) -> ov.Tensor:
         return ov.Tensor(base_tensor, ov.Coordinate([0]), ov.Coordinate([length]))
 
-    def release_finished_conv_slots(self, scheduler_output: SchedulerOutput) -> None:
-        """Release conv slots for finished requests.
-
-        Called unconditionally (even on zero-scheduled-token steps) because
-        async scheduling can report a request as finished in a step that
-        schedules no new tokens for anyone, which would otherwise bypass
-        _update_states() and starve the small (max_num_seqs+1) slot pool.
-        """
-        for req_id in scheduler_output.finished_req_ids:
-            slot = self._conv_slot_by_req.pop(req_id, None)
-            if slot is not None:
-                self._conv_slot_free.append(slot)
-
     def _get_conv_slot(self, req_id: str, num_computed: int) -> int:
         slot = self._conv_slot_by_req.get(req_id)
         if slot is None:
@@ -428,6 +415,14 @@ class OpenVINOModelRunnerV1:
             self.input_batch.remove_request(req_id)
             self._mm_req_ids.discard(req_id)
             self._mrope_by_req.pop(req_id, None)
+            slot = self._conv_slot_by_req.pop(req_id, None)
+            if slot is not None:
+                self._conv_slot_free.append(slot)
+
+        # A preempted request recomputes its state when it resumes, so its
+        # conv/SSM slot is freed as upstream frees a preempted request; the
+        # cached state stays for its generator.
+        for req_id in scheduler_output.preempted_req_ids or ():
             slot = self._conv_slot_by_req.pop(req_id, None)
             if slot is not None:
                 self._conv_slot_free.append(slot)

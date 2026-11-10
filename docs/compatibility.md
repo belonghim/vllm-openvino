@@ -278,11 +278,15 @@ effect chunked prefill already has. Hit TTFT: LFM2.5 2.1k-token prompt 0.74 s
 unchanged (LFM2.5 410 vs 403 tok/s, Qwen3.5 133 vs 134 tok/s).
 
 The slot pool (prefix caching off) is intentionally separate
-from vLLM scheduler blocks. Slots are released when a request finishes and are
-reset on a fresh or re-prefilled start (`num_computed == 0`). A preempted
-request keeps its slot, so the pool of `max_num_seqs + 1` is never exhausted
-under FCFS scheduling. This was verified on Qwen3.5-0.8B with forced
-preemption (`--num-gpu-blocks-override`, 7 preemptions at `max_num_seqs=2`).
+from vLLM scheduler blocks. Slots are released when a request finishes
+(including the zero-token step that follows the last finish) or is preempted
+(`preempted_req_ids`, as upstream's MRV2 frees a preempted request), and are
+reset on a fresh or re-prefilled start (`num_computed == 0`). The preempted
+request's cached state stays, so a seeded request keeps its generator. Holding
+only running requests, the pool of `max_num_seqs + 1` cannot be exhausted under
+any scheduling policy. Verified on Qwen3.5-0.8B (`max_num_seqs=4`, 0.08 GiB
+pool, 8 concurrent 1.3k-token requests): 2 preemptions, all requests complete,
+the pool returned to 5 free slots.
 A recomputed request can diverge from its uninterrupted output late in the
 text because of prefill vs decode numerics.
 

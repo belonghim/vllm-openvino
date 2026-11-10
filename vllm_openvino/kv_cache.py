@@ -21,7 +21,6 @@ str_to_ov_type: dict[str, ov.Type] = {
     "f32": ov.Type.f32,
 } if ov is not None else {}
 
-FP32_BYTES = 4
 
 class OpenVINOCacheEngine:
     """Manages the KV cache for OpenVINO backend, implementing the V1 KVCache interface.
@@ -202,6 +201,8 @@ class OpenVINOCacheEngine:
         ssm_cache_config: list[ov.PartialShape] | None = None,
         conv_cache_config: list[ov.PartialShape] | None = None,
         block_size: int = 1,
+        ssm_cache_dtypes: list[str] | None = None,
+        conv_cache_dtypes: list[str] | None = None,
     ) -> int:
         normalized = envs.KV_CACHE_PRECISION_MAP.get(cache_dtype, cache_dtype)
 
@@ -220,15 +221,20 @@ class OpenVINOCacheEngine:
         kv_type_size = str_to_ov_type[normalized].size
         total_bytes = kv_type_size * total_elements
 
-        # SSM/conv state is always fp32 in OV IR.
-        for state_cache in (ssm_cache_config, conv_cache_config):
+        # The PA transformation can store SSM/conv state as bf16; sized with
+        # the element types _allocate_state_cache() allocates (f32 if unknown).
+        for state_cache, dtypes in ((ssm_cache_config, ssm_cache_dtypes),
+                                    (conv_cache_config, conv_cache_dtypes)):
             if not state_cache:
                 continue
-            for state_shape in state_cache:
+            dtypes = dtypes or []
+            for idx, state_shape in enumerate(state_cache):
                 elements = 1
                 for dim_idx, dim in enumerate(state_shape[1:], start=1):
                     elements *= _dim_len(dim, dim_idx)
-                total_bytes += elements * FP32_BYTES
+                dtype = dtypes[idx] if idx < len(dtypes) else "f32"
+                total_bytes += elements * str_to_ov_type.get(
+                    dtype, ov.Type.f32).size
 
         return total_bytes
 

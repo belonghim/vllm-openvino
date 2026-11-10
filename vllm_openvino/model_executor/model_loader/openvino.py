@@ -1065,6 +1065,10 @@ class OpenVINOCausalLM(nn.Module):
             if (hasattr(self, 'per_layer_emb_request')
                     and self.per_layer_emb_request is not None):
                 self.per_layer_emb_request = None
+            if getattr(self, 'vision_merger_request', None) is not None:
+                self.vision_merger_request = None
+            if getattr(self, 'vision_pos_request', None) is not None:
+                self.vision_pos_request = None
 
             if hasattr(self, 'ov_compiled') and self.ov_compiled is not None:
                 self.ov_compiled.release_memory()
@@ -1077,6 +1081,9 @@ class OpenVINOCausalLM(nn.Module):
                     and self.ov_vision_emb_compiled is not None):
                 self.ov_vision_emb_compiled.release_memory()
                 self.ov_vision_emb_compiled = None
+            if getattr(self, 'ov_vision_merger_compiled', None) is not None:
+                self.ov_vision_merger_compiled.release_memory()
+                self.ov_vision_merger_compiled = None
             if (hasattr(self, 'ov_per_layer_emb_compiled')
                     and self.ov_per_layer_emb_compiled is not None):
                 self.ov_per_layer_emb_compiled.release_memory()
