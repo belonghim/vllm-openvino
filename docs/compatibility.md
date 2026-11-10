@@ -32,7 +32,7 @@ not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
 `"cpu" in version("vllm")`, so the probe still reports no active driver,
 `HAS_TRITON` stays false and MRV1 is selected. With the version string faked to
 `+cpu` (MRV2 selected by config), the plugin's own worker still served
-Qwen3-1.7B on the PagedAttention path. Hybrid-PA, stateful, multimodal, n-gram speculation and structured output were not tested under
+Qwen3-1.7B on the PagedAttention path. Hybrid-PA, multimodal, n-gram speculation and structured output were not tested under
 that configuration.
 
 Tracked upstream:
@@ -148,20 +148,19 @@ The plugin selects a path from the model IR:
 
 | Model shape | Path | Behavior |
 |---|---|---|
-| No `ReadValue`, with SDPA | PagedAttention | External KV cache and concurrent batching |
-| `ReadValue` with `ssm`/`conv` variable IDs | Hybrid-PA | External attention/state cache and concurrent batching |
-| Other `ReadValue` models with SDPA (incl. Gemma-4) | PagedAttention (`VLLM_OPENVINO_STATEFUL_PA=1`) | External KV cache and concurrent batching |
-| Stateful models without SDPA, or `VLLM_OPENVINO_STATEFUL_PA=0` | Stateful (deprecated) | OpenVINO internal state and `max_num_seqs=1` |
+| `ReadValue` with `ssm`/`conv` variable IDs, with SDPA | Hybrid-PA | External attention/state cache and concurrent batching |
+| Any other model with SDPA (stateful KV exports and Gemma-4 included) | PagedAttention | External KV cache and concurrent batching |
+| No SDPA | Rejected at startup | — |
 
-The stateful path is deprecated and logs a warning when selected: none of
-the tested models need it (every one has SDPA and takes PagedAttention or
-Hybrid-PA), it serves one request at a time, and it has no n-gram speculation
-or prefix caching. It will be removed together with `VLLM_OPENVINO_STATEFUL_PA`.
+Without SDPA ops the IR cannot be transformed to PagedAttention, and the
+sequential stateful path that served such models was removed: none of the
+tested models needed it. `VLLM_OPENVINO_STATEFUL_PA=0` is rejected at startup
+and `=1` only logs that the variable is redundant.
 
 Stateful plain-attention models (optimum-intel default exports, e.g.
-Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time
-by default (`VLLM_OPENVINO_STATEFUL_PA=1`): `max_num_seqs` keeps its default
-128 and the KV cache moves to the external paged cache (u8 default, which
+Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time:
+`max_num_seqs` keeps its default 128 and the KV cache moves to the external
+paged cache (u8 default, which
 is the OpenVINO CPU plugin's own default on x86_64/ARM64 - the variable is
 unset by default and the loader then passes no `KV_CACHE_PRECISION`;
 verified on Qwen3-1.7B, Gemma-4-E2B, LFM2.5-350M (Hybrid-PA) and
@@ -173,20 +172,19 @@ precision is bf16 the plugin replaces `f16` with `bf16` (`scaled_attn.cpp`
 as `key_cache.0` port type and worker `cache_dtype` both `bf16` — `f32`/`i8` are rejected by
 CPU PagedAttention and fall back to the default with a warning). Validated
 on Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B and Phi-3.5-mini (int4
-IR): concurrency-8 aggregate throughput was 4.9-7.0x the stateful path,
-single-stream -7.8% to +4%. Sliding-window models take the same path: the
-PagedAttention op applies the window itself. Stateful models without SDPA
-ops stay on the (deprecated) stateful path.
+IR): concurrency-8 aggregate throughput was 4.9-7.0x the removed sequential
+stateful path, single-stream -7.8% to +4%. Sliding-window models take the
+same path: the PagedAttention op applies the window itself.
 
 Gemma-4 E2B (sliding window 512, 15 KV pairs after KV sharing, per-layer
 embeddings) was verified on the PA path with OpenVINO 2026.4.1: greedy output
 on 2.3k-token prompts and on image prompts was byte-identical to the stateful
-path, concurrent and prefix-cache-hit requests matched single requests, and
+IR, concurrent and prefix-cache-hit requests matched single requests, and
 n-gram speculation produced the same output. 128-token decode (8 CPUs, u8 KV):
 concurrency 1 18.6 -> 19.5 tok/s, concurrency 8 18.7 -> 125.2 tok/s (6.7x);
 a repeated 2.3k-token prompt went from 7.5 s to 1.2 s through prefix caching.
 Gemma-4 26B-A4B (MoE, sliding window 1024, 30 KV pairs, `token_type_ids`
-input, 14.3 GB weights) gave the same text answer as the stateful path and the
+input, 14.3 GB weights) gave the same text answer as the stateful IR and the
 same extraction of a text-heavy image; concurrency 1 9.8 -> 10.2 tok/s,
 concurrency 8 9.8 -> 30.9 tok/s (3.2x). With the automatic pool the PA path
 needs a 32 GiB container: post-warmup anonymous RSS is 19.8 GB, the pool
@@ -212,15 +210,14 @@ tokens stay causal. Without `per_layer_inputs` the first infer failed in a
 sliding-window layer's residual add (`Eltwise shape infer ... dim index: 0
 mismatch`).
 
-Greedy output matched the stateful path on TinyLlama-1.1B and
+Greedy output matched the stateful IR on TinyLlama-1.1B and
 differed on Qwen-family models; u8 and bf16 caches produced
 byte-identical output on those short checks, so the difference comes from
 the transformed attention computation, not cache precision (long-context
-`u8` vs `bf16` differences are in the Performance Profile). Set
-`VLLM_OPENVINO_STATEFUL_PA=0` to force the stateful path.
+`u8` vs `bf16` differences are in the Performance Profile).
 
 Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
-Qwen3.5, LFM2.5 and LFM3. Hybrid models without SDPA ops keep the stateful path.
+Qwen3.5, LFM2.5 and LFM3.
 Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV
 cache, not SSM/conv state.
 
@@ -229,7 +226,7 @@ not in vLLM 0.33 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM`
 as a `vllm.general_plugins` entry so the config passes validation, and the
 model needs `--trust-remote-code` for its `configuration_lfm3.py`. Its IR is
 exported with OpenVINO 2026.5. On LFM3-1.7B-int4-ov a 1746-token prompt gave
-byte-identical 400-token greedy output on Hybrid-PA and the stateful path.
+byte-identical 400-token greedy output on Hybrid-PA and the stateful IR.
 
 Hybrid-PA uses standard PagedAttention for attention layers. Conv/SSM state
 storage depends on prefix caching:
@@ -342,12 +339,8 @@ text because of prefill vs decode numerics.
   64 MiB, so the default 128 requests reserve 8 GiB and a 2 GiB pool is left with no KV
   blocks; lower `--max-num-seqs` (4 served it in the same pool). The startup
   warning reports the reservation.
-- Stateful models keep the KV cache in the OpenVINO state and allocate no pool
-  tensors; the scheduler gets the blocks for one `--max-model-len` request
-  whatever `VLLM_OPENVINO_KVCACHE_SPACE` is (before, gemma-4-26B with a 2 GiB
-  pool got 148 f32-sized blocks and vLLM refused `--max-model-len 8192`).
-- Prefix caching is disabled automatically for stateful models, and for
-  Hybrid-PA models with speculative decoding: their recurrent/internal state
+- Prefix caching is disabled automatically for Hybrid-PA models with
+  speculative decoding: their recurrent state
   is not checkpointed per vLLM block, so a prefix hit would skip tokens
   without restoring that state (repeated long prompts gave different, wrong
   answers). Pure-attention PA models and Hybrid-PA models without
@@ -385,8 +378,7 @@ text because of prefill vs decode numerics.
   and the pool OOM-killed under full residency; with the full-step text and
   image warmup it is 19.8 GB and the same loads pass. The startup cost is
   26 s on the 26B and 11 s on E2B. Hybrid-PA prefix caching needs one
-  conv/SSM checkpoint per warmup block in the throwaway cache. Stateful models keep their own
-  warm-up in `load_model`.
+  conv/SSM checkpoint per warmup block in the throwaway cache.
 - SSM/conv state caches are zero-filled; attention KV caches are not.
 - The worker zero-fills scheduler-reported `new_block_ids_to_zero` blocks each
   step. Removing it changed nothing measurable (Qwen3-1.7B-int4, 8-CPU quota,
@@ -396,8 +388,8 @@ text because of prefill vs decode numerics.
 - bf16 tensors must be converted to float32 before NumPy conversion because
   OpenVINO does not accept bf16 NumPy arrays.
 - Pin memory and LoRA serving are unsupported.
-- `paged_attention_transformation()` and gather-before-matmul are applied
-  only to PA paths. Stateful models must not receive PA-only inputs.
+- `paged_attention_transformation()` and gather-before-matmul are applied to
+  every model; an IR without SDPA fails at startup instead.
 - OpenVINO import failure must remain deferred until configuration validation
   so plugin discovery can inspect other platforms safely.
 
@@ -460,8 +452,7 @@ the plugin.
 ## N-gram Speculative Decoding
 
 Only `method=ngram` is accepted, on PagedAttention and Hybrid-PA models
-(`check_and_update_config` raises otherwise; a model that falls back to the
-stateful path fails at load). `execute_model` computes logits for the 1+k query
+(`check_and_update_config` raises otherwise). `execute_model` computes logits for the 1+k query
 positions of each draft request, and `sample_tokens` accepts drafts while they
 match the argmax (the stock rejection sampler needs Triton). Drafts are
 proposed only for greedy requests without penalties, `logit_bias`,
@@ -501,14 +492,6 @@ on Hybrid-PA at 8, where verification is not free. Keep `prompt_lookup_min`
 high: with 2, spurious matches cost 7-11% on free-form output for Qwen3-1.7B.
 Output can diverge from non-spec runs at near-tie tokens because kernel
 numerics vary with query length.
-
-Stateful-path models are not supported. Rolling back rejected tokens
-by trimming every KV state on the sequence axis (`get_state`/`set_state`) is
-exact, sliding-window layers included (Gemma-4 E2B, 700-token context,
-logits identical to the untrimmed run), but the trim copies all states at
-10-33 ms for 700-4000 tokens of context against a 53-130 ms decode step, and
-the stateful path serves one request at a time and is maintenance-only.
-Gemma-4 runs n-gram speculation on the PA path.
 
 ## Performance Profile
 
@@ -647,17 +630,11 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
 
 ## Known Limitations
 
-- Stateful models do not support concurrent request execution.
+- Models without SDPA ops are not supported.
 - LoRA, pin memory, and multi-socket execution are not supported.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation
   computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
   rejects such requests with HTTP 400. Output-token `logprobs` work.
-- Gemma-4 image prompts on the stateful path pass `token_type_ids` as zeros, so
-  image tokens do not attend to each other bidirectionally there; the
-  PagedAttention path feeds the sequence's real token types. On a text-heavy
-  test image the two arrangements returned the same flag list and the same text
-  answer, and one-sentence descriptions that differ in wording (both plausible);
-  no quality delta beyond that was demonstrated.
 - On OpenVINO 2026.4.x, MoE prefill is slow on CPUs without AMX:
   LFM2.5-8B-A1B ~108 tok/s, Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), because
   the CPU plugin batches routed rows per expert into a GEMM only on bf16+AMX

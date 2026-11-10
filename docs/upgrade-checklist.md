@@ -93,7 +93,7 @@ prefill TTFT and that vLLM still lacks LFM3 before keeping `register_models`.
 5. Compare logs for import errors, signature errors, cache allocation errors,
    and unexpected path selection.
 6. Run `scripts/smoke-test.sh`. It starts each serving path (PagedAttention,
-   Hybrid-PA, stateful) and checks sequential throughput against the baseline
+   Hybrid-PA) and checks sequential throughput against the baseline
    and a concurrent burst, then forces preemption with a small pool and checks
    that every resumed request completes. Set `IMAGE=<candidate-image>` to run
    it against an image built for the new version. Throughput moves with host

@@ -132,32 +132,29 @@ def _find_model_ir_path(model_path: str) -> "Path | None":
 _VARIABLE_ID_RE = re.compile(rb'variable_id="([^"]*)"')
 
 
-def _ir_serving_traits(model_path: str) -> tuple[bool, bool, bool]:
-    """(stateful, has SDPA, hybrid) from one read of the IR XML.
+def _ir_serving_traits(model_path: str) -> tuple[bool, bool] | None:
+    """(has SDPA, hybrid) from one read of the IR XML; None without an IR.
 
     Hybrid is deliberately narrower than "has ReadValue + SDPA": Gemma-4 also
     matches that (KV cache via ReadValue) but has no ssm/conv state and belongs
     on the plain PagedAttention path — so ssm/conv must appear inside
     variable_id, not anywhere in the file (gemma-4's IR has 278 unrelated
-    "conv" hits from `type="Convert"` ops). SDPA is required for any PA
-    transformation (it is a no-op otherwise and would leave a multi-request
-    scheduler on the single-request-only stateful path).
+    "conv" hits from `type="Convert"` ops).
     """
     ir_path = _find_model_ir_path(model_path)
     if ir_path is None:
-        return False, False, False
+        return None
     try:
         with open(ir_path, 'rb') as f:
             data = f.read()
     except (IOError, OSError) as e:
         logger.warning("Could not read %s: %s", ir_path, e)
-        return False, False, False
-    stateful = b'type="ReadValue"' in data
+        return None
     has_sdpa = b'ScaledDotProductAttention' in data
-    hybrid = stateful and has_sdpa and any(
+    hybrid = has_sdpa and any(
         b'ssm' in vid or b'conv' in vid
         for vid in _VARIABLE_ID_RE.findall(data))
-    return stateful, has_sdpa, hybrid
+    return has_sdpa, hybrid
 
 
 # Constants for memory and block size configuration
@@ -230,6 +227,16 @@ class OpenVinoPlatform(Platform):
                 logger.warning(
                     "VLLM_USE_V2_MODEL_RUNNER=1 is redundant and can be unset: "
                     "Model Runner V1 has been removed.")
+                continue
+            if env == "VLLM_OPENVINO_STATEFUL_PA":
+                if value.strip().lower() not in envs.TRUE_VALUES:
+                    raise ValueError(
+                        f"VLLM_OPENVINO_STATEFUL_PA={value} is no longer "
+                        "supported: the sequential stateful path has been "
+                        "removed. Unset this variable.")
+                logger.warning(
+                    "VLLM_OPENVINO_STATEFUL_PA is redundant and can be unset: "
+                    "every model runs on the PagedAttention or Hybrid-PA path.")
                 continue
             if (env.startswith("VLLM_") and env not in vllm_envs.environment_variables
                     and env not in envs.environment_variables):
@@ -321,68 +328,41 @@ class OpenVinoPlatform(Platform):
                 "fallback to the eager mode.")
             model_config.enforce_eager = True
 
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
         cache_config = vllm_config.cache_config
-        keeps_external_state = False
         hybrid_pa = False
-        stateful, has_sdpa, hybrid = _ir_serving_traits(model_config.model)
-        if stateful:
-            hybrid_pa = hybrid
-            stateful_pa = (not hybrid_pa and envs.VLLM_OPENVINO_STATEFUL_PA
-                           and has_sdpa)
-            keeps_external_state = not stateful_pa
-            if scheduler_config and scheduler_config.max_num_seqs != 1:
-                if hybrid_pa:
-                    logger.info(
-                        "[OV-PLATFORM] Hybrid Mamba/attention model detected: "
-                        "attempting Hybrid-PA transformation, keeping "
-                        "max_num_seqs=%d.",
-                        scheduler_config.max_num_seqs)
-                elif stateful_pa:
-                    logger.info(
-                        "[OV-PLATFORM] PagedAttention transformation for "
-                        "stateful model (VLLM_OPENVINO_STATEFUL_PA), keeping "
-                        "max_num_seqs=%d. Set VLLM_OPENVINO_STATEFUL_PA=0 to "
-                        "force the sequential stateful path instead.",
-                        scheduler_config.max_num_seqs)
-                else:
-                    logger.warning(
-                        "[OV-PLATFORM] Stateful OpenVINO model detected. "
-                        "Overriding max_num_seqs from %d to 1.",
-                        scheduler_config.max_num_seqs)
-                    scheduler_config.max_num_seqs = 1
-            if keeps_external_state and not hybrid_pa:
-                logger.warning(
-                    "[OV-PLATFORM] The stateful serving path (models without "
-                    "SDPA ops, or VLLM_OPENVINO_STATEFUL_PA=0) is deprecated "
-                    "and will be removed in a future release. Export the model "
-                    "with SDPA so it runs on the PagedAttention or Hybrid-PA "
-                    "path.")
+        traits = _ir_serving_traits(model_config.model)
+        if traits is not None:
+            has_sdpa, hybrid_pa = traits
+            if not has_sdpa:
+                raise ValueError(
+                    f"The OpenVINO IR in {model_config.model} has no "
+                    "ScaledDotProductAttention ops, so it cannot run on the "
+                    "PagedAttention or Hybrid-PA path (the sequential stateful "
+                    "path was removed). Re-export the model with SDPA.")
+            if hybrid_pa:
+                logger.info(
+                    "[OV-PLATFORM] Hybrid Mamba/attention model detected: "
+                    "using the Hybrid-PA path.")
 
         speculative_config = vllm_config.speculative_config
-        if speculative_config is not None:
-            if speculative_config.method != "ngram":
-                raise ValueError(
-                    "OpenVINO only supports ngram speculative decoding, got "
-                    f"method={speculative_config.method!r}.")
-            if keeps_external_state and not hybrid_pa:
-                raise ValueError(
-                    "ngram speculative decoding requires a PagedAttention "
-                    "or Hybrid-PA model; this model keeps internal state "
-                    "outside vLLM KV blocks.")
+        if (speculative_config is not None
+                and speculative_config.method != "ngram"):
+            raise ValueError(
+                "OpenVINO only supports ngram speculative decoding, got "
+                f"method={speculative_config.method!r}.")
 
-        # Recurrent/internal state is not stored in vLLM blocks, so a prefix-cache
-        # hit would skip tokens whose state is never restored. Hybrid-PA keeps
-        # a conv/SSM checkpoint per scheduler block instead (see the model runner),
-        # except with drafts, whose per-token state slots are not checkpointed.
-        restores_state = hybrid_pa and speculative_config is None
-        if (keeps_external_state and not restores_state and cache_config
+        # Recurrent state is not stored in vLLM blocks, so a prefix-cache hit
+        # would skip tokens whose state is never restored. Hybrid-PA keeps a
+        # conv/SSM checkpoint per scheduler block instead (see the model
+        # runner), except with drafts, whose per-token state slots are not
+        # checkpointed.
+        if (hybrid_pa and speculative_config is not None and cache_config
                 and cache_config.enable_prefix_caching):
             logger.warning(
-                "[OV-PLATFORM] Disabling prefix caching: this model keeps "
-                "recurrent or internal state outside vLLM KV blocks.")
+                "[OV-PLATFORM] Disabling prefix caching: Hybrid-PA conv/SSM "
+                "checkpoints do not cover speculative decoding.")
             cache_config.enable_prefix_caching = False
-        if keeps_external_state and hasattr(cache_config, "mamba_cache_mode"):
+        if hybrid_pa and hasattr(cache_config, "mamba_cache_mode"):
             cache_config.mamba_cache_mode = "none"
             cache_config.mamba_block_size = None
 

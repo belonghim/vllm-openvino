@@ -19,7 +19,7 @@
 
 **원칙 충돌 시 우선순위**: upstream 호환성 > 플러그인 경계 > 최소주의
 
-Stateful 경로(SDPA 없는 모델, `VLLM_OPENVINO_STATEFUL_PA=0`)는 폐기 예정이다. 사용 중인 모델이 없어 기능을 추가하지 않고, 선택되면 경고를 낸다. 다음 정리 때 제거한다. hybrid 모델의 확장은 Hybrid-PA 경로에서 한다.
+서빙 경로는 PA와 Hybrid-PA 둘뿐이다. 순차 stateful 경로는 사용하는 모델이 없어 제거했고, SDPA 없는 IR은 시작 시 거부한다. hybrid 모델의 확장은 Hybrid-PA 경로에서 한다.
 
 ### 문서 유지 원칙
 
@@ -71,8 +71,8 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **bf16은 numpy 변환 전에 float32로** (`_as_numpy_no_copy()`) — OpenVINO는 bf16 numpy를 받지 않는다.
 - **`execute_model`과 `sample_tokens`를 합치지 않는다** — `execute_model`은 logits까지만 계산하고, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream 워커 계약). 구조화 출력이 이 경계에 의존한다.
 - **KV spec의 page 크기는 OpenVINO cache shape에서 계산한다** — vLLM은 spec의 page 크기로 블록 수를 정하고, 플러그인은 그 수만큼 실제 크기 블록을 할당한다. u8 key의 scale/zero-point 행처럼 spec이 모르는 바이트는 `page_size_padded`로 넣는다. 어긋나면 풀이 예산보다 조용히 커진다.
-- **PA 전용 변환·입력은 stateful 모델에 주지 않는다** — `paged_attention_transformation()`, gather-before-matmul, PA 입력. gather 때문에 `prompt_logprobs`는 미지원이며 `validate_request`가 400으로 거부한다.
-- **서빙 경로는 IR로 판정한다** — `ReadValue`의 `variable_id`에 `ssm`/`conv`가 있으면 Hybrid-PA, 그 외 SDPA 모델은 PA(Gemma-4 포함), SDPA가 없으면 stateful. 단순한 `ReadValue`+SDPA 조합으로 판정하지 않는다.
+- **gather-before-matmul 때문에 `prompt_logprobs`는 미지원이다** — logits는 샘플링 위치에서만 계산되므로 `validate_request`가 400으로 거부한다.
+- **서빙 경로는 IR로 판정한다** — `ReadValue`의 `variable_id`에 `ssm`/`conv`가 있으면 Hybrid-PA, 그 외 SDPA 모델은 PA(stateful KV export와 Gemma-4 포함), SDPA가 없으면 거부. 단순한 `ReadValue`+SDPA 조합으로 판정하지 않는다.
 - **KV 풀은 VmRSS가 아니라 EngineCore anon RSS로 산정한다** — VmRSS에는 회수 가능한 mmap 가중치가 들어 있다. 측정 전 warmup이 실제 최대 prefill(+더미 이미지)을 돌려야 baseline이 맞다. warmup을 줄이면 풀이 커져 가득 찼을 때 OOM이 난다.
 - **Gemma-4 PA 입력은 rank를 유지해 넣는다** — `per_layer_inputs` `[tokens, 1, layers, hidden]`, `token_type_ids` `[tokens, 1]`. 빠지면 sliding-window 레이어에서 `Eltwise ... dim index: 0 mismatch`.
 - **비전 merger에는 `hidden_states`, `attention_mask`, `rotary_pos_emb` 세 입력을 모두 넘긴다** — 하나만 넘기면 SDPA shape 불일치.

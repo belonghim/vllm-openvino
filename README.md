@@ -86,7 +86,6 @@ multimodal ones). Export a HuggingFace checkpoint with
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | CPU only. Enable/disable CPU core pinning: `true`, `false`, or `auto` | `auto` |
 | `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` | CPU only. Group size of the dynamic int8 activation quantization in compressed-weight matmuls: `0` disables it, `64`/`128` speed up prefill by ~17% / ~23-32% (decode unchanged) at an accuracy cost that is small but not ruled out (see CPU Tuning). Unset = OpenVINO default (32) | unset |
 | `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER` | Hybrid-PA prefix caching: scheduler block (and conv/SSM checkpoint interval) in 32-token KV blocks (default 8 = 256 tokens). `0` = auto, `max(8, checkpoint bytes / KV block bytes)` as in OpenVINO GenAI (LFM2.5: 256 tokens, Qwen3.5/MiniCPM-V: 1504 tokens). Smaller values give finer prefix hits and use more memory per token; `1` matches the 32-token PA block. See [Serving Modes](#serving-modes). | `8` |
-| `VLLM_OPENVINO_STATEFUL_PA` | PagedAttention transformation for plain-attention stateful models (optimum-intel default exports), enabling concurrent batching (sliding-window models such as Gemma-4 included). Models without SDPA ops fall back to the sequential stateful path. Set to `0` to force the sequential stateful path (deprecated, as is the variable). See [Serving Modes](#serving-modes). | `1` |
 | `VLLM_OPENVINO_CACHE_DIR` | Directory for OpenVINO's compiled-model disk cache. Skips recompiling the model on process restart if a matching cached blob exists. When unset, the plugin uses `~/.cache/vllm-openvino` if it can be created, otherwise caching is disabled (an INFO log records which path is in use, if any). | auto |
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | CPU only. Scheduling core type on hybrid P-core/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
 | `VLLM_OPENVINO_FAST_SAMPLER` | CPU only. Use partial/sparse top-k/top-p and repetition-penalty routines instead of the full-vocabulary sort and dense penalty tensors of vLLM's V1 sampler (up to ~2× end-to-end on small models with default `top_k`/`top_p`/`repetition_penalty`). Set to `0` to use the full-sort/dense routines. See [Sampling Parameters](#sampling-parameters-large-vocab-models) for seed behavior. | `1` |
@@ -156,7 +155,7 @@ On AVX2-only CPUs OpenVINO runs matmuls in `f32`. Emulated with `OV_CPU_MAX_ISA=
 
 **cgroup-aware auto-detection**: container runtimes (podman/docker `--cpus`, Kubernetes CPU limits) throttle via cgroup CFS quota, but `os.cpu_count()` inside the container still reports the host's full core count. With `VLLM_OPENVINO_CPU_THREADS_NUM=0` (default), the plugin detects the quota and caps both the OpenVINO inference threads and the Torch/OMP thread pools to it when the quota is tighter than the visible core count; an explicit `OMP_NUM_THREADS` is left untouched. On an 8-quota/24-visible-core host, a 32-request burst went from 4.5s wall / 35.6s CPU with 3.1s of CFS throttling to 3.6s wall / 26.6s CPU with none, and the engine process dropped from 147 to 126 threads (earlier OpenVINO-only measurement: 45s/~355% CPU uncapped vs 34s/~300% capped for a 4-request burst). Set `VLLM_OPENVINO_CPU_THREADS_NUM` explicitly to override this detection.
 
-`PERFORMANCE_MODE` defaults to `THROUGHPUT` because vLLM is used for serving. Measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY (and +28% single-stream on the stateful path), at a higher first-token latency (25 ms → 34 ms). Set `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` for interactive first-token response instead.
+`PERFORMANCE_MODE` defaults to `THROUGHPUT` because vLLM is used for serving. Measured on Qwen2.5-Coder-0.5B-int4-ov (8-CPU quota): THROUGHPUT gave +28–31% single-stream and +10% concurrency-8 aggregate decode throughput on the PagedAttention path over LATENCY, at a higher first-token latency (25 ms → 34 ms). Set `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` for interactive first-token response instead.
 
 Other CPU compile properties were measured on Qwen3-1.7B-int4-ov (8-CPU quota, Ryzen 9 7900, OpenVINO 2026.4.1; concurrency 1/8, 128 tokens) and left at OpenVINO's defaults, which are already the best or equal within ~5% noise: `INFERENCE_PRECISION` (default is already bf16 here; `bf16`/`f32` change nothing), `ENABLE_CPU_PINNING` (default already on), and `DYNAMIC_QUANTIZATION_GROUP_SIZE` (default 32; decode is equal at 64/128, disabling it or per-token costs 15%; prefill is 17-18% faster at 64 and 23-32% at 128 with next-token KL against unquantized activations within noise of the default's, see `docs/compatibility.md`; set `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` to opt in). Forcing `ENABLE_HYPER_THREADING=false` cost 13% at concurrency 8. `KEY/VALUE_CACHE_GROUP_SIZE=64` did not help.
 
@@ -234,29 +233,20 @@ The script runs a warmed-up benchmark against the local OpenAI-compatible endpoi
 
 ## Serving Modes
 
-The plugin supports three serving paths depending on the model architecture:
+The plugin supports two serving paths, chosen from the model IR. Both need `ScaledDotProductAttention` ops; an IR without them is rejected at startup (the sequential stateful path was removed, and `VLLM_OPENVINO_STATEFUL_PA=0` is rejected).
 
 ### PagedAttention (default)
 
-Models with `ScaledDotProductAttention` ops and no state are transformed to use vLLM's PagedAttention mechanism. This enables:
+Models with `ScaledDotProductAttention` ops and no SSM/conv state are transformed to use vLLM's PagedAttention mechanism. This enables:
 - Concurrent request batching
 - External KV cache management
 - Full vLLM scheduler features
 
-### Stateful Path (deprecated)
-
-Deprecated: it logs a warning when selected and will be removed. Every model tested with this plugin has SDPA ops and runs on the PagedAttention or Hybrid-PA path; re-export a model with SDPA rather than relying on this path.
-
-Models without `ScaledDotProductAttention` ops, or any stateful model with `VLLM_OPENVINO_STATEFUL_PA=0`, run via OpenVINO's internal state management (`ReadValue`/`Assign`). Characteristics:
-- Sequential request processing (`max_num_seqs=1`)
-- Internal KV cache managed by OpenVINO runtime
-- Automatic detection and configuration — no manual flags needed
-
-Other `ReadValue`-based stateful models (optimum-intel's default exports such as Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time by default (`VLLM_OPENVINO_STATEFUL_PA=1`), keeping `max_num_seqs` at its default 128. Validated on four dense architectures (Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B, Phi-3.5-mini; int4 IR): concurrency-8 aggregate throughput was 4.9–7.0x the stateful path, with a single-stream delta of -7.8% to +4%. Sliding-window models use the same path: Gemma-4-E2B-it-int4-ov and gemma-4-26b-a4b-it-int4-ov (text and image) gave the same greedy output as the stateful path and 6.7x / 3.2x its concurrency-8 throughput (18.7 -> 125.2 and 9.8 -> 30.9 tok/s). The transformed model's KV cache defaults to u8; `VLLM_OPENVINO_KV_CACHE_PRECISION` is honored for `u8`/`f16`/`bf16` (`f32`/`i8` are unsupported by CPU PagedAttention and fall back to the default with a warning). Greedy output was unchanged on TinyLlama-1.1B but can differ from the stateful path on Qwen-family models — a property of the PagedAttention-transformed attention computation, not of cache precision (u8 and bf16 produced identical output). Set `VLLM_OPENVINO_STATEFUL_PA=0` to force the sequential stateful path.
+`ReadValue`-based stateful exports (optimum-intel's defaults such as Qwen2.5-Coder-int4-ov) take this path too, keeping `max_num_seqs` at its default 128. Validated on four dense architectures (Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B, Phi-3.5-mini; int4 IR): concurrency-8 aggregate throughput was 4.9–7.0x the removed sequential stateful path, with a single-stream delta of -7.8% to +4%. Sliding-window models use the same path: Gemma-4-E2B-it-int4-ov and gemma-4-26b-a4b-it-int4-ov (text and image) gave the same greedy output as their stateful IR and 6.7x / 3.2x its concurrency-8 throughput (18.7 -> 125.2 and 9.8 -> 30.9 tok/s). The transformed model's KV cache defaults to u8; `VLLM_OPENVINO_KV_CACHE_PRECISION` is honored for `u8`/`f16`/`bf16` (`f32`/`i8` are unsupported by CPU PagedAttention and fall back to the default with a warning). Greedy output was unchanged on TinyLlama-1.1B but can differ from the stateful IR on Qwen-family models — a property of the PagedAttention-transformed attention computation, not of cache precision (u8 and bf16 produced identical output).
 
 ### Hybrid-PA (default for hybrid Mamba/attention models)
 
-For hybrid Mamba/attention models (Qwen3.5, LFM2.5), this converts attention layers to real PagedAttention and conv/SSM layers to a separate linear-attention paged-state mechanism, enabling concurrent request batching (`max_num_seqs > 1`) instead of the sequential stateful path. Verified on LFM2.5 (conv-only) and Qwen3.5 (conv + GatedDeltaNet SSM) with byte-exact output vs. the stateful path. Gemma-4 has no SSM/conv state, so it takes the plain PagedAttention path instead.
+For hybrid Mamba/attention models (Qwen3.5, LFM2.5), this converts attention layers to real PagedAttention and conv/SSM layers to a separate linear-attention paged-state mechanism, enabling concurrent request batching (`max_num_seqs > 1`). Verified on LFM2.5 (conv-only) and Qwen3.5 (conv + GatedDeltaNet SSM) with byte-exact output vs. their stateful IR. Gemma-4 has no SSM/conv state, so it takes the plain PagedAttention path instead.
 
 Prefix caching works on Hybrid-PA (not with speculative decoding): every scheduler block keeps a conv/SSM state checkpoint, so a hit restores the state at the last hit block. Hits land on the checkpoint interval (see `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`). Measured hit TTFT: LFM2.5-350M 2.1k-token prompt 0.74 s -> 0.06 s; Qwen3.5-0.8B 2.4k-token prompt 8.2 s -> 0.20 s with the default 256-token interval; its 10.3 MB checkpoints leave about 90k tokens in the 4 GiB pool (280k with the automatic 1504-token interval, `0`, where the same prompt hits in 2.9 s). Details in `docs/compatibility.md`.
 
@@ -266,7 +256,7 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - Chunked prefill (`--enable-chunked-prefill`)
 - Structured outputs (`structured_outputs`, `response_format`, forced tool calls) via the grammar bitmask
-- N-gram speculative decoding (`--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":5,"prompt_lookup_max":8}'`) on PagedAttention and Hybrid-PA models; drafts are verified greedily and only for greedy requests without penalties, logprobs, or structured output. Stateful-path models reject it. It speeds up copy-heavy output (code edits, quoting, RAG); see `docs/compatibility.md`
+- N-gram speculative decoding (`--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":5,"prompt_lookup_max":8}'`) on PagedAttention and Hybrid-PA models; drafts are verified greedily and only for greedy requests without penalties, logprobs, or structured output. It speeds up copy-heavy output (code edits, quoting, RAG); see `docs/compatibility.md`
 - Gemma 3 and Gemma 4 text and multimodal (text + image)
 - Qwen3.5 and LFM2.5 (hybrid Mamba/attention architecture, via Hybrid-PA)
 - LFM3 (Hybrid-PA); pass `--trust-remote-code` and use OpenVINO 2026.5 (the image's nightly), see `docs/compatibility.md`. Its `generation_config.json` sets `repetition_penalty: 1.1`, which disables n-gram drafts; send `"repetition_penalty": 1.0` to use them
@@ -280,6 +270,6 @@ The following vLLM features are compatible with the OpenVINO backend:
 - `thinking_token_budget` is rejected with HTTP 400, and custom logits processors (`--logits-processors`) fail at startup; the sampler applies only vLLM's builtin `min_p`, `logit_bias` and `min_tokens`.
 - Tensor/pipeline parallelism is not supported. Threads are scheduled across all visible cores, but multi-socket scaling is poor; see [CPU Tuning](#cpu-tuning-avx2).
 - vLLM V1 engine only.
-- Stateful-path models (no SDPA ops, or `VLLM_OPENVINO_STATEFUL_PA=0`) do not support concurrent request execution (`max_num_seqs=1`); the stateful path is deprecated.
+- Models without `ScaledDotProductAttention` ops are rejected at startup; re-export them with SDPA.
 
 See `docs/compatibility.md` for the current support matrix.

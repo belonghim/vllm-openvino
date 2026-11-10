@@ -89,9 +89,8 @@ class OpenVINOCacheEngine:
             self.num_device_blocks, ov_core,
             ov_device)
 
-        # Initialize SSM/conv state caches (for hybrid models like Mamba).
-        # SSM states are managed internally by OpenVINO infer request; physical
-        # slots only need to cover active sequences, not the full block budget.
+        # Hybrid-PA conv/SSM state: one slot per running sequence, or one
+        # checkpoint per scheduler block with prefix caching.
         ssm_blocks = num_ssm_blocks if num_ssm_blocks is not None else 0
         self.ssm_cache: list[ov.Tensor] = self._allocate_ssm_cache(
             ssm_blocks, ov_core, ov_device)

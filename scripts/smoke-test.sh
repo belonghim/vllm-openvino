@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # smoke-test.sh — Performance regression smoke test
-# Runs every serving path (PagedAttention, Hybrid-PA, stateful) with 5 fixed questions and
+# Runs every serving path (PagedAttention, Hybrid-PA) with 5 fixed questions and
 # a concurrent burst, tracks tok/s.
 # Compares against ./scripts/smoke-test-baseline.json if present.
 
@@ -28,7 +28,7 @@ MODELS=(
   "gemma-4-E2B-it-int4-ov"
   "LFM3-1.7B-int4-ov --trust-remote-code"
   "Qwen3.5-0.8B-int4-ov"
-  "Qwen2.5-Coder-0.5B-Instruct-int4-ov VLLM_OPENVINO_STATEFUL_PA=0"
+  "Qwen2.5-Coder-0.5B-Instruct-int4-ov"
 )
 CONCURRENT_REQUESTS=4
 

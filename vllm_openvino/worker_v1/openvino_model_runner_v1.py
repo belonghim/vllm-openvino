@@ -216,7 +216,6 @@ class OpenVINOModelRunnerV1:
         # what is encoded (scheduled_encoder_inputs) and when it is dropped
         # (free_encoder_mm_hashes), as in upstream's GPU model runner.
         self.encoder_cache: dict[str, np.ndarray] = {}
-        self._new_req_ids: set[str] = set()
         self._step_stats = StepStatsLogger()
 
         # Hybrid-PA prefix caching (set by configure_la_prefix_cache): a
@@ -368,11 +367,6 @@ class OpenVINOModelRunnerV1:
             preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
             preloaded_ov_model=preloaded_ov_model,
         )
-        if (self.drafter is not None
-                and not getattr(self.model, '_has_kv_cache_inputs', True)):
-            raise ValueError(
-                "ngram speculative decoding requires a PagedAttention or "
-                "Hybrid-PA model; this model runs on the stateful path.")
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -468,7 +462,6 @@ class OpenVINOModelRunnerV1:
             )
             self.requests[req_id] = req_state
             self.input_batch.add_request(req_state)
-            self._new_req_ids.add(req_id)
             if req_state.mm_features:
                 self._mm_req_ids.add(req_id)
                 if self._mrope_fn is not None:
@@ -798,24 +791,6 @@ class OpenVINOModelRunnerV1:
 
         self.input_batch.condense()
         self.input_batch.refresh_metadata()
-        new_req_ids = self.input_batch.req_ids
-
-        if self.model is not None and not getattr(self.model, '_has_kv_cache_inputs', True):
-            has_running = has_new = False
-            for req_id in new_req_ids:
-                if req_id is None:
-                    continue
-                if req_id in self._new_req_ids:
-                    has_new = True
-                else:
-                    has_running = True
-                if has_running and has_new:
-                    break
-            if has_new and not has_running and hasattr(self.model, 'recreate_infer_request'):
-                logger.info("[OV-RUNNER] All slots are new requests, recreating infer request")
-                self.model.recreate_infer_request()
-
-        self._new_req_ids.clear()
 
         if scheduler_output.scheduled_encoder_inputs:
             encoder_start = time.perf_counter()

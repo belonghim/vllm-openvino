@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ruff: noqa: SIM117
-import logging
 import os
 import time
 from collections import OrderedDict
@@ -32,23 +31,6 @@ from vllm_openvino.utils import (cpu_thread_limit, format_memory_size,
 logger = init_logger(__name__)
 
 
-def _flatten_inputs(inputs):
-    """
-    Helper function for making nested inputs flattens
-    """
-    flatten_inputs = []
-    for input_data in inputs:
-        if input_data is None:
-            continue
-        if isinstance(input_data, (list, tuple)):
-            flatten_inputs.extend(_flatten_inputs(input_data))
-        elif isinstance(input_data, dict):
-            flatten_inputs.extend(_flatten_inputs(list(input_data.values())))
-        else:
-            flatten_inputs.append(input_data)
-    return flatten_inputs
-
-
 def has_op_with_type(function: ov.Model, type_name: str):
     for op in function.get_ops():
         if op.get_type_name() == type_name:
@@ -58,134 +40,56 @@ def has_op_with_type(function: ov.Model, type_name: str):
 
 ATTENTION_ONLY = "attention_only"
 HYBRID_MAMBA = "hybrid_mamba"
-STATEFUL = "stateful"
 
 
 def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, list]]:
-    """Single-pass detection of model type and SSM/conv state shapes.
+    """Model type and SSM/conv state shapes from ReadValue variable IDs.
 
-    Classification by ReadValue variable IDs (validated on known models):
-      - 'ssm' in var_id            → HYBRID_MAMBA (SSM recurrent state, e.g. Qwen3.5)
-      - 'conv' in var_id           → HYBRID_MAMBA (conv state, e.g. Qwen3.5)
-      - 'past_key_values' in var_id → STATEFUL (transformer KV via ReadValue, e.g. Gemma-4)
-      - empty var_id               → STATEFUL
-      - other non-empty var_id     → STATEFUL; shape logged for diagnostics
-      - no ReadValue at all        → ATTENTION_ONLY (PA path candidate)
-
-    Note: OpenVINO GenAI uses output shape rank (3D=SSM, 4D=KV) as an alternative
-    heuristic (PR #3359), but this is unreliable for our model format — Qwen3.5
-    SSM states export as 4D (not 3D), same rank as KV cache states. var_id name
-    matching is more robust.
+    'ssm' or 'conv' in a var_id marks HYBRID_MAMBA (Qwen3.5, LFM2.5); any
+    other model, stateful KV exports included (e.g. Gemma-4), is
+    ATTENTION_ONLY. OpenVINO GenAI uses the state rank (3D=SSM, 4D=KV)
+    instead (PR #3359), but Qwen3.5 SSM states export as 4D, so the name is
+    more robust.
     """
     ssm_shapes = []
     conv_shapes = []
-    has_non_ssm_readvalue = False
     for op in ov_model.get_ops():
         if op.get_type_name() != "ReadValue":
             continue
         var_id = op.get_variable_id()
-        if not var_id:
-            has_non_ssm_readvalue = True
-            continue
         if "ssm" in var_id:
             ssm_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
         elif "conv" in var_id:
             conv_shapes.append((op.output(0).get_partial_shape(), op.get_element_type().to_string()))
-        elif "past_key_values" in var_id:
-            # Known transformer KV-cache pattern (e.g. Gemma-4). Classify as stateful.
-            has_non_ssm_readvalue = True
-        else:
-            pshape = op.output(0).get_partial_shape()
-            logger.debug(
-                "ReadValue '%s': unrecognized var_id pattern (shape=%s, rank=%d); "
-                "treating as stateful. If this is an SSM/conv state, ensure "
-                "'ssm' or 'conv' appears in the variable_id.",
-                var_id, pshape, len(pshape),
-            )
-            has_non_ssm_readvalue = True
-
-    if ssm_shapes or conv_shapes:
-        model_type = HYBRID_MAMBA
-    elif has_non_ssm_readvalue:
-        model_type = STATEFUL
-    else:
-        model_type = ATTENTION_ONLY
-
+    model_type = HYBRID_MAMBA if ssm_shapes or conv_shapes else ATTENTION_ONLY
     return model_type, {"ssm": ssm_shapes, "conv": conv_shapes}
 
 
-def _has_sdpa_ops(model: ov.Model) -> bool:
-    """Check if model has ScaledDotProductAttention operations."""
-    for op in model.get_ops():
-        if op.get_type_name() == "ScaledDotProductAttention":
-            return True
-    return False
-
-
-def apply_selective_paged_attention_transformation(
-    model: ov.Model, model_type: str,
-) -> None:
-    """Apply PA transformation selectively based on model type.
-
-    For HYBRID_MAMBA models with SDPA ops: the transform emits a linear-attention
-    paged-state mechanism (la.*/conv_state_table.*, and la.*/gated_delta_state_table.* for
-    true SSM state) alongside real PagedAttention for the attention layers. Without SDPA
-    ops they keep the stateful path.
-    For ATTENTION_ONLY models: apply PA transformation only if SDPA ops exist.
-    For STATEFUL models: skip PA transformation; model manages KV cache via ReadValue/Assign.
-    """
-    if model_type == ATTENTION_ONLY:
-        if not _has_sdpa_ops(model):
-            logger.warning(
-                "Model does not have ScaledDotProductAttention operations. "
-                "Skipping PagedAttention transformation. "
-                "The model will run with internal KV cache."
-            )
-            return
-        paged_attention_transformation(
-            model,
-            allow_adaptive_rkv=False,
-            allow_cache_rotation=False,
-        )
-        return
-
-    if model_type == STATEFUL:
-        logger.info(
-            "Stateful model detected (ReadValue/Assign ops). "
-            "Skipping PagedAttention transformation."
-        )
-        return
-
-    if _has_sdpa_ops(model):
-        # platform.py already relaxed max_num_seqs based on this same
-        # eligibility check, so a silent fallback here would leave a
-        # multi-request scheduler pointed at the (single-request-only)
-        # stateful path. Fail loudly instead.
-        paged_attention_transformation(
-            model,
-            allow_adaptive_rkv=False,
-            allow_cache_rotation=False,
-        )
+def apply_paged_attention_transformation(model: ov.Model, model_type: str) -> None:
+    """Attention layers become PagedAttention; on HYBRID_MAMBA models the
+    conv/SSM layers become a linear-attention paged state (la.* with
+    conv_state_table.* and, for true SSM state, gated_delta_state_table.*)."""
+    if not has_op_with_type(model, "ScaledDotProductAttention"):
+        raise ValueError(
+            "The model has no ScaledDotProductAttention ops, so it cannot be "
+            "transformed to PagedAttention. Re-export the model with SDPA.")
+    paged_attention_transformation(
+        model,
+        allow_adaptive_rkv=False,
+        allow_cache_rotation=False,
+    )
+    if model_type == HYBRID_MAMBA:
         logger.info(
             "Hybrid model: applied PagedAttention transformation "
             "(attention layers -> PagedAttention, conv/SSM layers -> "
-            "linear attention paged state)."
-        )
-        return
-
-    logger.warning(
-        "Hybrid Mamba model has no ScaledDotProductAttention operations. "
-        "Skipping PagedAttention transformation; the model will run with "
-        "internal state."
-    )
+            "linear attention paged state).")
 
 
 def find_llm_matmul(model: ov.Model):
     last_node = model.output(0).get_node().input_value(0).get_node()
 
-    # in case of PA all tokens are moved to batch dimension and we have to slice / gather accordingly
-    pa_based_model = has_op_with_type(model, "PagedAttentionExtension")
-    slice_gather_dim = 0 if pa_based_model else 1
+    # PagedAttention moves all tokens to the batch dimension.
+    slice_gather_dim = 0
     last_node_type = last_node.get_type_name()
     matmul = last_node
     if last_node_type == "MatMul":
@@ -355,32 +259,8 @@ class OpenVINOCausalLM(nn.Module):
             self.model_type = preloaded_model_type if preloaded_model_type is not None else detected_type
             self.ssm_state_shapes = preloaded_ssm_state_shapes if preloaded_ssm_state_shapes is not None else detected_shapes
 
-        if self.model_type == STATEFUL and envs.VLLM_OPENVINO_STATEFUL_PA:
-            if not _has_sdpa_ops(ov_model):
-                logger.warning(
-                    "[OV-LOADER] Stateful model without ScaledDotProduct"
-                    "Attention ops keeps the sequential stateful path. "
-                    "Set VLLM_OPENVINO_STATEFUL_PA=0 to silence this.")
-            else:
-                self.model_type = ATTENTION_ONLY
-
-        apply_selective_paged_attention_transformation(ov_model, self.model_type)
-        if has_op_with_type(ov_model, "PagedAttentionExtension"):
-            apply_gather_before_matmul_transformation(ov_model)
-        else:
-            # Stateful models compute the LM head over the whole input
-            # sequence and only the last token is used (_extract_logits);
-            # slicing before the matmul avoids that wasted compute. Best
-            # effort: an unrecognized output pattern must not block model
-            # load, since the plugin already runs correctly without it.
-            try:
-                apply_gather_before_matmul_transformation(ov_model)
-            except Exception as e:
-                logger.warning(
-                    "[OV-LOADER] gather-before-matmul not applied to "
-                    "stateful model output, falling back to full-sequence "
-                    "logits: %s", e)
-        # OpenVINO version guard removed: 2026.0+ no longer requires manual KV cache patching
+        apply_paged_attention_transformation(ov_model, self.model_type)
+        apply_gather_before_matmul_transformation(ov_model)
         ov_model.validate_nodes_and_infer_types()
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
@@ -440,7 +320,7 @@ class OpenVINOCausalLM(nn.Module):
                         core_type)
 
             kv_prec_key = (envs.VLLM_OPENVINO_KV_CACHE_PRECISION or "").lower()
-            if kv_prec_key and has_op_with_type(ov_model, "PagedAttentionExtension"):
+            if kv_prec_key:
                 paged_attention_kv_precision = {
                     "u8": ov.Type.u8,
                     "f16": ov.Type.f16,
@@ -463,14 +343,8 @@ class OpenVINOCausalLM(nn.Module):
         compile_s = time.perf_counter() - compile_start
         self.ov_compiled = ov_compiled
         self.ov_request = ov_compiled.create_infer_request()
-        self._flat_kv_caches_template: list[ov.Tensor] | None = None
         self._input_builder: OpenVINOInputBuilder | None = None
 
-        # Detect if model has external KV cache inputs (PA-transformed)
-        self._has_kv_cache_inputs = any(
-            inp.get_any_name().startswith(("key_cache.", "value_cache."))
-            for inp in ov_compiled.inputs
-        )
         # Hybrid PA models additionally expose a linear-attention paged-state
         # mechanism for conv layers (conv_state_table.*) and/or true SSM
         # state, e.g. GatedDeltaNet (gated_delta_state_table.*), sharing one
@@ -481,38 +355,27 @@ class OpenVINOCausalLM(nn.Module):
         )
         self._position_input_name: str | None = None
         self._position_input_channels = 1
-        if self._has_kv_cache_inputs:
-            known_names = {"input_ids", "inputs_embeds", "max_context_len",
-                           "past_lens", "subsequence_begins", "block_indices",
-                           "block_indices_begins", "sampled_tokens_indices",
-                           "token_type_ids", "per_layer_inputs"}
-            known_prefixes = ("key_cache.", "value_cache.",
-                               "conv_state_table.", "gated_delta_state_table.",
-                               "la.")
-            for inp in ov_compiled.inputs:
-                name = inp.get_any_name()
-                if name in known_names or name.startswith(known_prefixes):
-                    continue
-                self._position_input_name = name
-                pshape = inp.get_partial_shape()
-                # Multi-channel position_ids (e.g. M-RoPE [4, seq]): the
-                # runner passes M-RoPE models 2D positions; otherwise only the
-                # first channel is filled.
-                if pshape.rank.get_length() == 2 and pshape[0].is_static:
-                    self._position_input_channels = pshape[0].get_length()
-                break
+        known_names = {"input_ids", "inputs_embeds", "max_context_len",
+                       "past_lens", "subsequence_begins", "block_indices",
+                       "block_indices_begins", "sampled_tokens_indices",
+                       "token_type_ids", "per_layer_inputs"}
+        known_prefixes = ("key_cache.", "value_cache.",
+                           "conv_state_table.", "gated_delta_state_table.",
+                           "la.")
+        for inp in ov_compiled.inputs:
+            name = inp.get_any_name()
+            if name in known_names or name.startswith(known_prefixes):
+                continue
+            self._position_input_name = name
+            pshape = inp.get_partial_shape()
+            # Multi-channel position_ids (e.g. M-RoPE [4, seq]): the
+            # runner passes M-RoPE models 2D positions; otherwise only the
+            # first channel is filled.
+            if pshape.rank.get_length() == 2 and pshape[0].is_static:
+                self._position_input_channels = pshape[0].get_length()
+            break
 
-        if not self._has_kv_cache_inputs:
-            states = self.ov_request.query_state()
-            logger.info("[OV-STATE] Model has %d state tensors", len(states))
-            for i, state in enumerate(states[:5]):
-                logger.info("[OV-STATE] State %d: name=%s, shape=%s, dtype=%s",
-                            i, state.name, state.state.shape,
-                            state.state.get_element_type())
-        logger.info(
-            "OpenVINO model loaded: type=%s, has_kv_cache=%s",
-            self.model_type, self._has_kv_cache_inputs,
-        )
+        logger.info("OpenVINO model loaded: type=%s", self.model_type)
 
         # Load text embeddings model for multimodal OV models (e.g. Gemma 3)
         self.ov_text_emb_compiled = None
@@ -588,99 +451,6 @@ class OpenVINOCausalLM(nn.Module):
             "(compile %.2f s on %s)",
             format_memory_size(model_weights_bytes(str(model_dir))),
             time.perf_counter() - load_start, compile_s, ov_device)
-
-    def warmup(self) -> None:
-        if self._has_kv_cache_inputs:
-            return
-        try:
-            dummy_ids = np.zeros((1, 1), dtype=np.int64)
-            if hasattr(self, 'text_emb_request') and self.text_emb_request is not None:
-                self.text_emb_request.infer([dummy_ids])
-
-            # per_layer_emb num_layers dim is fixed (e.g. 35/42) but appears dynamic
-            # in main model's per_layer_inputs [-1,-1,-1,256]; must use actual output.
-            per_layer_out = None
-            if hasattr(self, 'per_layer_emb_request') and self.per_layer_emb_request is not None:
-                self.per_layer_emb_request.infer([dummy_ids])
-                ple = self.per_layer_emb_request.get_output_tensor(0)
-                per_layer_out = ple.data.reshape(1, 1, ple.shape[2], ple.shape[3])
-
-            _ov_dtype = {
-                ov.Type.i64: np.int64, ov.Type.i32: np.int32,
-                ov.Type.f32: np.float32, ov.Type.f16: np.float16,
-            }
-            if hasattr(self, 'vision_emb_request') and self.vision_emb_request is not None:
-                vis_inputs = []
-                for inp in self.ov_vision_emb_compiled.inputs:
-                    shape = [1 if d.is_dynamic else d.get_length()
-                             for d in inp.get_partial_shape()]
-                    vis_inputs.append(
-                        np.zeros(shape, dtype=_ov_dtype.get(inp.get_element_type(), np.float32)))
-                self.vision_emb_request.infer(vis_inputs)
-                if hasattr(self, 'vision_merger_request') and self.vision_merger_request is not None:
-                    vis_out = self.vision_emb_request.get_output_tensor(0)
-                    vis_hidden = vis_out.data.reshape(-1, vis_out.shape[-1])
-                    n_patches = vis_hidden.shape[0]
-                    merger_inputs = {}
-                    for inp in self.ov_vision_merger_compiled.inputs:
-                        inp_name = inp.get_any_name()
-                        shape = [1 if d.is_dynamic else d.get_length()
-                                 for d in inp.get_partial_shape()]
-                        dtype = _ov_dtype.get(inp.get_element_type(), np.float32)
-                        if inp_name == "hidden_states":
-                            merger_inputs[inp_name] = vis_hidden
-                        elif inp_name == "attention_mask":
-                            merger_inputs[inp_name] = np.ones(shape, dtype=dtype)
-                        else:
-                            merger_inputs[inp_name] = np.zeros(shape, dtype=dtype)
-                    self.vision_merger_request.infer(merger_inputs)
-
-            compiled = self.ov_request.get_compiled_model()
-            inputs = {}
-            for inp in compiled.inputs:
-                name = inp.get_any_name()
-                shape = [1 if d.is_dynamic else d.get_length()
-                         for d in inp.get_partial_shape()]
-                dtype = _ov_dtype.get(inp.get_element_type(), np.float32)
-                if name in ("input_ids", "inputs_embeds"):
-                    inputs[name] = np.zeros(shape, dtype=dtype)
-                elif name == "attention_mask":
-                    inputs[name] = np.ones(shape, dtype=dtype)
-                elif name == "position_ids":
-                    inputs[name] = np.zeros(shape, dtype=dtype)
-                elif name == "token_type_ids":
-                    inputs[name] = np.zeros(shape, dtype=dtype)
-                elif name == "beam_idx":
-                    inputs[name] = np.zeros(shape, dtype=dtype)
-                elif name == "sampled_tokens_indices":
-                    inputs[name] = np.zeros(shape, dtype=dtype)
-                elif name == "per_layer_inputs":
-                    inputs[name] = per_layer_out if per_layer_out is not None else np.zeros(shape, dtype=dtype)
-            self.ov_request.infer(inputs)
-            self.recreate_infer_request()
-            logger.info("[OV-WARMUP] Stateful model warmup completed")
-        except Exception as e:
-            logger.warning(
-                "[OV-WARMUP] Stateful warmup failed (%s); the first request "
-                "runs the first infer, so the post-load memory measurement "
-                "may miss the CPU plugin's weight repack.", e)
-            try:
-                self.recreate_infer_request()
-            except Exception as recreate_error:
-                logger.warning(
-                    "[OV-WARMUP] recreate_infer_request failed after warmup failure: %s",
-                    recreate_error,
-                )
-
-    def _get_flat_kv_caches_template(
-        self,
-        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
-    ) -> list[ov.Tensor]:
-        if self._flat_kv_caches_template is None:
-            self._flat_kv_caches_template = _flatten_inputs(kv_caches)
-        if self.model_type == ATTENTION_ONLY:
-            return self._flat_kv_caches_template
-        return list(self._flat_kv_caches_template)
 
     @staticmethod
     def _as_numpy_no_copy(tensor_like: np.ndarray | ov.Tensor | torch.Tensor) -> np.ndarray:
@@ -937,19 +707,10 @@ class OpenVINOCausalLM(nn.Module):
         return inputs_embeds_2d
 
     def _get_input_builder(self) -> OpenVINOInputBuilder:
-        """Factory method that returns the appropriate input builder.
-
-        Routes based on compiled model capabilities:
-        - PA-transformed models (have KV cache inputs) -> PAInputBuilder
-        - Stateful models (no KV cache inputs) -> StatefulInputBuilder
-        """
         if self._input_builder is None:
-            if self._has_linear_attention_inputs:
-                self._input_builder = HybridPAInputBuilder(self)
-            elif self._has_kv_cache_inputs:
-                self._input_builder = PAInputBuilder(self)
-            else:
-                self._input_builder = StatefulInputBuilder(self)
+            self._input_builder = (HybridPAInputBuilder(self)
+                                   if self._has_linear_attention_inputs
+                                   else PAInputBuilder(self))
         return self._input_builder
 
     def forward(
@@ -964,10 +725,6 @@ class OpenVINOCausalLM(nn.Module):
         num_requests: int | None = None,
         token_type_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
-        if not self._has_kv_cache_inputs and num_requests is not None and num_requests > 1:
-            raise RuntimeError(
-                "Stateful OpenVINO models do not support batched inference. "
-                "Please set max_num_seqs=1 when using stateful models.")
         builder = self._get_input_builder()
         inputs = builder.build_inputs(
             input_ids=input_ids,
@@ -980,68 +737,16 @@ class OpenVINOCausalLM(nn.Module):
             num_requests=num_requests,
             token_type_ids=token_type_ids,
         )
-        if not self._has_kv_cache_inputs and logger.isEnabledFor(logging.DEBUG):
-            if isinstance(inputs, dict):
-                for k, v in inputs.items():
-                    logger.debug("[OV-INPUT] %s: shape=%s, dtype=%s",
-                                 k, getattr(v, 'shape', 'N/A'),
-                                 getattr(v, 'dtype', 'N/A'))
-            else:
-                for i, v in enumerate(inputs):
-                    logger.debug("[OV-INPUT] [%d]: shape=%s, dtype=%s",
-                                 i, getattr(v, 'shape', 'N/A'),
-                                 getattr(v, 'dtype', 'N/A'))
         infer_start = time.perf_counter()
         self.ov_request.infer(inputs)
         self.last_infer_s = time.perf_counter() - infer_start
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
-        return self._extract_logits(logits, num_requests)
+        return logits[:, -1, :] if logits.dim() == 3 else logits
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        if not self._has_kv_cache_inputs:
-            return hidden_states
         logits = self.logits_processor(None, hidden_states, sampling_metadata)
         return logits
-
-    def _extract_logits(
-        self,
-        logits: torch.Tensor,
-        num_requests: int | None = None,
-    ) -> torch.Tensor:
-        if logits.dim() == 3:
-            last_token_logits = logits[:, -1, :]
-            if (not self._has_kv_cache_inputs and num_requests is not None
-                    and num_requests < last_token_logits.shape[0]):
-                return last_token_logits[:num_requests]
-            return last_token_logits
-        return logits
-
-
-    def recreate_infer_request(self) -> None:
-        if self._has_kv_cache_inputs:
-            return
-        # Only the main LM request carries ReadValue/Assign state; the
-        # text/vision embedding and merger requests are stateless and have
-        # nothing to reset, so recreating them is unnecessary work.
-        # _text_emb_cache entries are exact-match keyed and detached copies
-        # (see _prepare_embeddings), so they stay valid across requests and
-        # don't need clearing here.
-        # reset_state() zeroes the ReadValue/Assign state without discarding
-        # the infer request, avoiding create_infer_request() overhead. Fall
-        # back to a fresh infer request if a given OpenVINO build/model
-        # rejects it (observed as strict stride checks on state resize on
-        # OpenVINO 2026.1.0).
-        try:
-            self.ov_request.reset_state()
-            logger.info("[OV-STATE] Reset infer request state")
-        except Exception as e:
-            logger.warning(
-                "[OV-STATE] reset_state() failed (%s), recreating infer "
-                "request instead", e)
-            self.ov_request = None
-            self.ov_request = self.ov_compiled.create_infer_request()
-            logger.info("[OV-STATE] Recreated infer request")
 
     @torch._dynamo.disable
     def sample(
@@ -1133,8 +838,6 @@ class PAInputBuilder(OpenVINOInputBuilder):
         exports), so inputs are fed by name instead of by position.
         """
         model = self.model
-        state_tensors = model._get_flat_kv_caches_template(kv_caches)
-
         attn_metadata = get_forward_context().attn_metadata
         named: dict[str, object] = {}
         if model.use_text_embeddings_model:
@@ -1293,162 +996,6 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
             inputs[f"gated_delta_state_table.{i}"] = ssm_cache
 
         return inputs
-
-
-class StatefulInputBuilder(OpenVINOInputBuilder):
-    """Builds dict-based inputs for stateful OpenVINO models.
-
-    Stateful models use OpenVINO's internal state management (ReadValue/Assign
-    ops) rather than explicit KV cache tensors passed as inputs.
-    """
-
-    def __init__(self, model: "OpenVINOCausalLM") -> None:
-        self.model = model
-        compiled_model = model.ov_request.get_compiled_model()
-        self.input_shapes: dict[str, list] = {}
-        for inp in compiled_model.inputs:
-            name = inp.get_any_name()
-            shape = []
-            for dim in inp.get_partial_shape():
-                if dim.is_dynamic:
-                    shape.append(None)
-                else:
-                    shape.append(dim.get_length())
-            self.input_shapes[name] = shape
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("StatefulInputBuilder shape registry: %s",
-                         self.input_shapes)
-
-        max_seq = model.model_config.max_model_len
-        self._max_seq = max_seq
-        self._attention_mask_buf = np.ones((1, max_seq), dtype=np.int64)
-        self._token_type_ids_buf = np.zeros((1, max_seq), dtype=np.int64)
-        self._beam_idx_buf = np.zeros(1, dtype=np.int32)
-        self._sampled_idx_buf = np.zeros(1, dtype=np.int64)
-        self._pos_3d_buf: np.ndarray | None = None
-        self._pos_3d_channels: int = 0
-        self._inputs_dict: dict = {}
-        if "position_ids" in self.input_shapes:
-            pos_shape = self.input_shapes["position_ids"]
-            if len(pos_shape) == 3:
-                self._pos_3d_channels = (
-                    pos_shape[0] if pos_shape[0] is not None else 1)
-
-    def build_inputs(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
-        ssm_caches: list[ov.Tensor] | None = None,
-        conv_caches: list[ov.Tensor] | None = None,
-        mm_embeds: list[np.ndarray] | None = None,
-        image_position_ids: torch.Tensor | None = None,
-        num_requests: int | None = None,
-        token_type_ids: np.ndarray | None = None,
-    ) -> dict:
-        model = self.model
-        inputs_dict = self._inputs_dict
-        inputs_dict.clear()
-        input_ids_np = model._as_numpy_no_copy(input_ids)
-        batch_size = (num_requests if num_requests is not None
-                      else max(1, input_ids_np.shape[0]
-                               if input_ids_np.ndim > 0 else 1))
-        # lazily converted once, shared by position_ids and attention_mask branches
-        positions_np: np.ndarray | None = None
-
-        if model.use_text_embeddings_model:
-            inputs_embeds_2d = model._prepare_embeddings(
-                input_ids, mm_embeds, image_position_ids)
-            seq_len = inputs_embeds_2d.shape[0]
-        else:
-            seq_len = input_ids_np.shape[0] if input_ids_np.ndim == 1 else input_ids_np.shape[1]
-
-        for name, shape in self.input_shapes.items():
-            if name == "inputs_embeds":
-                if model.use_text_embeddings_model:
-                    if batch_size == 1:
-                        inputs_dict[name] = inputs_embeds_2d[np.newaxis, :, :]
-                    else:
-                        inputs_dict[name] = np.tile(
-                            inputs_embeds_2d[np.newaxis, :, :],
-                            (batch_size, 1, 1))
-                else:
-                    hidden = shape[-1] if shape[-1] is not None else 2048
-                    inputs_dict[name] = np.zeros(
-                        (batch_size, seq_len, hidden), dtype=np.float32)
-            elif name == "input_ids":
-                if not model.use_text_embeddings_model:
-                    if len(shape) == 2:
-                        inputs_dict[name] = input_ids_np.reshape(batch_size, -1)
-                    else:
-                        inputs_dict[name] = input_ids_np.reshape(-1)
-            elif name == "position_ids":
-                if positions_np is None:
-                    positions_np = model._as_numpy_no_copy(positions)
-                pos = positions_np
-                if len(shape) == 3 and pos.ndim == 2:
-                    inputs_dict[name] = np.ascontiguousarray(pos[:, None, :])
-                elif len(shape) == 3:
-                    seq_len_pos = pos.shape[-1] if pos.ndim > 0 else 1
-                    if self._pos_3d_buf is None and self._pos_3d_channels > 0:
-                        self._pos_3d_buf = np.zeros(
-                            (self._pos_3d_channels, 1, self._max_seq),
-                            dtype=pos.dtype)
-                    if (self._pos_3d_buf is not None
-                            and seq_len_pos <= self._pos_3d_buf.shape[2]):
-                        self._pos_3d_buf[0, 0, :seq_len_pos] = pos.reshape(-1)
-                        inputs_dict[name] = self._pos_3d_buf[:, :, :seq_len_pos]
-                    else:
-                        channels = shape[0] if shape[0] is not None else 1
-                        pos_3d = np.zeros(
-                            (channels, batch_size, seq_len_pos), dtype=pos.dtype)
-                        pos_3d[0, 0, :] = pos.reshape(-1)
-                        inputs_dict[name] = pos_3d
-                elif len(shape) == 2:
-                    inputs_dict[name] = pos.reshape(batch_size, -1)
-                else:
-                    inputs_dict[name] = pos.reshape(-1)
-            elif name == "attention_mask":
-                if positions_np is None:
-                    positions_np = model._as_numpy_no_copy(positions)
-                pos_np = positions_np[0] if positions_np.ndim == 2 else positions_np
-                total_seq_len = (int(pos_np.max()) + 1
-                                 if pos_np.size > 0 else seq_len)
-                if total_seq_len <= self._attention_mask_buf.shape[1]:
-                    inputs_dict[name] = self._attention_mask_buf[:, :total_seq_len]
-                else:
-                    inputs_dict[name] = np.ones(
-                        (batch_size, total_seq_len), dtype=np.int64)
-            elif name == "per_layer_inputs":
-                if model.use_per_layer_embeddings_model:
-                    ple_input_ids = input_ids_np.reshape(1, -1)
-                    model.per_layer_emb_request.infer([ple_input_ids])
-                    ple_out = model.per_layer_emb_request.get_output_tensor(0)
-                    inputs_dict[name] = ple_out.data.reshape(
-                        1, ple_input_ids.shape[1],
-                        ple_out.shape[2], ple_out.shape[3])
-                else:
-                    p_layers = shape[2] if shape[2] is not None else 1
-                    p_emb = shape[3] if shape[3] is not None else 256
-                    inputs_dict[name] = np.zeros(
-                        (batch_size, seq_len, p_layers, p_emb), dtype=np.float32)
-            elif name == "token_type_ids":
-                if seq_len <= self._token_type_ids_buf.shape[1]:
-                    inputs_dict[name] = self._token_type_ids_buf[:, :seq_len]
-                else:
-                    inputs_dict[name] = np.zeros(
-                        (batch_size, seq_len), dtype=np.int64)
-            elif name == "beam_idx":
-                inputs_dict[name] = self._beam_idx_buf
-            elif name == "sampled_tokens_indices":
-                self._sampled_idx_buf[0] = seq_len - 1
-                inputs_dict[name] = self._sampled_idx_buf
-            else:
-                logger.warning(
-                    "StatefulInputBuilder: unhandled input %s "
-                    "(shape %s), skipping", name, shape)
-
-        return inputs_dict
 
 
 def get_model(

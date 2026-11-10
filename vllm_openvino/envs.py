@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_INFERENCE_PRECISION: str | None = None
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
     VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE: int | None = None
-    VLLM_OPENVINO_STATEFUL_PA: bool = True
     VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER: int = 8
     VLLM_OPENVINO_CACHE_DIR: str | None = None
     VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
@@ -27,16 +26,16 @@ KV_CACHE_PRECISION_MAP: dict[str, str] = {
     "f32": "f32", "fp32": "f32",
 }
 
-_TRUE_VALUES = ("1", "true", "yes", "on")
+TRUE_VALUES = ("1", "true", "yes", "on")
 
 
 def _env_bool(name: str, default: str) -> bool:
-    return os.getenv(name, default).strip().lower() in _TRUE_VALUES
+    return os.getenv(name, default).strip().lower() in TRUE_VALUES
 
 
 def _env_tristate(name: str) -> bool | None:
     v = os.getenv(name, "").strip().lower()
-    return None if v in ("", "auto") else v in _TRUE_VALUES
+    return None if v in ("", "auto") else v in TRUE_VALUES
 
 
 def _env_float(name: str, default: str) -> float:
@@ -127,14 +126,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # measure accuracy cost; decode (bandwidth bound) is unaffected.
     "VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE":
     lambda: _env_optional_uint("VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE"),
-
-    # PagedAttention transformation for plain-attention stateful models
-    # (ReadValue-based KV cache, e.g. optimum-intel default exports like
-    # Qwen2.5-Coder-int4-ov). Enables concurrent request batching
-    # (max_num_seqs > 1). Models without SDPA ops fall back to the sequential
-    # stateful path. Set to 0 to force the sequential stateful path.
-    "VLLM_OPENVINO_STATEFUL_PA":
-    lambda: _env_bool("VLLM_OPENVINO_STATEFUL_PA", "1"),
 
     # Hybrid-PA prefix caching: the scheduler block (and conv/SSM checkpoint
     # interval) spans this many OpenVINO KV blocks. Default 8 (256 tokens).
