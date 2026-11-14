@@ -20,6 +20,9 @@ REGRESSION_THRESHOLD_PCT=10
 API_URL="http://127.0.0.1:8080"
 CONTAINER_NAME="vllm-smoke"
 IMAGE="${IMAGE:-quay.io/joopark/vllm-openvino}"
+# Extra ENV=VALUE pairs for every container, e.g. SMOKE_ENV=VLLM_USE_RUST_FRONTEND=1
+SMOKE_ENV_ARGS=()
+for opt in ${SMOKE_ENV:-}; do SMOKE_ENV_ARGS+=(-e "$opt"); done
 MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 
 # "<model dir> [ENV=VALUE | --serve-arg]..."
@@ -76,6 +79,7 @@ run_model_perf() {
     -v "$model_dir:/models:Z" \
     -e VLLM_OPENVINO_DEVICE=CPU \
     -e TORCH_COMPILE_DISABLE=1 \
+    "${SMOKE_ENV_ARGS[@]}" \
     "${env_args[@]}" \
     "$IMAGE" \
     --port=8080 --model /models --max-model-len 4096 "${serve_args[@]}" >/dev/null
@@ -197,6 +201,7 @@ run_preemption_check() {
     -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino:Z" \
     -v "$model_dir:/models:Z" \
     -e VLLM_OPENVINO_KVCACHE_SPACE=0.15 \
+    "${SMOKE_ENV_ARGS[@]}" \
     "$IMAGE" --port=8080 --model /models --max-model-len 2048 >/dev/null
   local ready=false
   for _ in $(seq 1 60); do

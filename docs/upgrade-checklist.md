@@ -100,3 +100,8 @@ prefill TTFT and that vLLM still lacks LFM3 before keeping `register_models`.
    it against an image built for the new version. Throughput moves with host
    load; compare against the previous commit on the same host before calling
    a drop a regression.
+7. Repeat it with `SMOKE_ENV=VLLM_USE_RUST_FRONTEND=1`, and send an image
+   request (Qwen3.5, Gemma-4) and a `prompt_logprobs` request under it. The
+   Rust frontend has its own tokenizer, chat templates and multimodal specs
+   and does not call `Platform.validate_request`; vLLM plans to make it the
+   default, so record what changed in `compatibility.md` (Known Limitations).

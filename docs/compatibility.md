@@ -736,7 +736,17 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   the CPU plugin batches routed rows per expert into a GEMM only on bf16+AMX
   and otherwise runs one GEMV per routed row. openvinotoolkit/openvino#39086
   fixes it in 2026.5; the image's nightly contains it.
-- `VLLM_USE_RUST_FRONTEND=1` starts with the bundled `vllm-rs` binary but gave
-  no throughput change (Qwen3-1.7B, 1/8/16 concurrent, within run-to-run
-  noise): decode runs at 20-300 tok/s, so the frontend is not the bottleneck.
-  Its multimodal support was not tested.
+- `VLLM_USE_RUST_FRONTEND=1` replaces the Python API server with the bundled
+  `vllm-rs` process over the same engine boundary, so the plugin, which runs
+  in the EngineCore, is unchanged. `scripts/smoke-test.sh` with
+  `SMOKE_ENV=VLLM_USE_RUST_FRONTEND=1` passed on every path at the Python
+  frontend's throughput (decode runs at 20-300 tok/s, so the frontend is not
+  the bottleneck), and image (Qwen3.5, Gemma-4) and JSON-schema requests gave
+  the same answers. Two differences:
+  - `OpenVinoPlatform.validate_request` is called only by the Python
+    frontend (`vllm/v1/engine/input_processor.py`), so `prompt_logprobs`
+    fails with HTTP 500 ("prompt_logprobs were requested but generation
+    returned none") instead of 400.
+  - The Rust frontend has no multimodal spec for MiniCPM-V 4.7: image
+    requests get HTTP 400 ("unsupported multimodal content"). Serve it with
+    the Python frontend.

@@ -268,7 +268,8 @@ The following vLLM features are compatible with the OpenVINO backend:
 
 - LoRA serving is not supported.
 - Pin memory is not supported.
-- `prompt_logprobs` (and `echo` with `logprobs`) is not supported; such requests are rejected with HTTP 400 because logits are computed only at sampled positions. Output-token `logprobs` work.
+- `prompt_logprobs` (and `echo` with `logprobs`) is not supported; such requests are rejected with HTTP 400 (HTTP 500 under `VLLM_USE_RUST_FRONTEND=1`, which skips the platform's request check) because logits are computed only at sampled positions. Output-token `logprobs` work.
+- With `VLLM_USE_RUST_FRONTEND=1`, MiniCPM-V 4.7 image requests are rejected (no Rust multimodal spec); Qwen3.5 and Gemma-4 images work.
 - Custom logits processors (`--logits-processors`) fail at startup; the sampler applies only vLLM's builtin `min_p`, `logit_bias` and `min_tokens`, plus `thinking_token_budget` (needs `--reasoning-parser`, see `docs/compatibility.md`).
 - Tensor/pipeline parallelism is not supported. Threads are scheduled across all visible cores, but multi-socket scaling is poor; see [CPU Tuning](#cpu-tuning-avx2).
 - vLLM V1 engine only.
