@@ -41,6 +41,7 @@
 | `worker_v1/openvino_worker_v1.py` | 워커 — warmup, 로드 후 KV 풀 산정, 캐시 할당 |
 | `worker_v1/openvino_model_runner_v1.py` | ModelRunner — 입력 준비, 추론, 샘플링 |
 | `sampler.py` | CPU 샘플러 — V1 `Sampler` 대체, fast path (`VLLM_OPENVINO_FAST_SAMPLER`) |
+| `worker_v1/mtp_proposer.py` | MTP drafter — Qwen3.5/3.6 `openvino_mtp_model.xml` |
 
 ## 검증
 
@@ -71,6 +72,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **bf16은 numpy 변환 전에 float32로** (`_as_numpy_no_copy()`) — OpenVINO는 bf16 numpy를 받지 않는다.
 - **`execute_model`과 `sample_tokens`를 합치지 않는다** — `execute_model`은 logits까지만 계산하고, `sample_tokens(grammar_output)`이 grammar bitmask를 적용한 뒤 샘플링한다(upstream 워커 계약). 구조화 출력이 이 경계에 의존한다.
 - **KV spec의 page 크기는 OpenVINO cache shape에서 계산한다** — vLLM은 spec의 page 크기로 블록 수를 정하고, 플러그인은 그 수만큼 실제 크기 블록을 할당한다. u8 key의 scale/zero-point 행처럼 spec이 모르는 바이트는 `page_size_padded`로 넣는다. 어긋나면 풀이 예산보다 조용히 커진다.
+- **MTP는 동기 스케줄링과 추가 KV 레이어에 의존한다** — draft를 `take_draft_token_ids`로 돌려주므로 platform이 `async_scheduling`을 끈다. MTP KV는 메인 레이어 뒤의 레이어라 메인 모델에는 `kv_caches[:num_main_kv_layers]`만 넘긴다.
 - **gather-before-matmul 때문에 `prompt_logprobs`는 미지원이다** — logits는 샘플링 위치에서만 계산되므로 `validate_request`가 400으로 거부한다.
 - **서빙 경로는 IR로 판정한다** — `ReadValue`의 `variable_id`에 `ssm`/`conv`가 있으면 Hybrid-PA, 그 외 SDPA 모델은 PA(stateful KV export와 Gemma-4 포함), SDPA가 없으면 거부. 단순한 `ReadValue`+SDPA 조합으로 판정하지 않는다.
 - **KV 풀은 VmRSS가 아니라 EngineCore anon RSS로 산정한다** — VmRSS에는 회수 가능한 mmap 가중치가 들어 있다. 측정 전 warmup이 실제 최대 prefill(+더미 이미지)을 돌려야 baseline이 맞다. warmup을 줄이면 풀이 커져 가득 찼을 때 OOM이 난다.

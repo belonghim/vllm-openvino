@@ -40,6 +40,7 @@ def has_op_with_type(function: ov.Model, type_name: str):
 
 ATTENTION_ONLY = "attention_only"
 HYBRID_MAMBA = "hybrid_mamba"
+MTP_IR = "openvino_mtp_model.xml"
 
 
 def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, list]]:
@@ -121,16 +122,87 @@ def find_llm_matmul(model: ov.Model):
     return matmul, slice_gather_dim
 
 
+def _sampled_tokens_indices() -> ov.op.Parameter:
+    indices = ov.op.Parameter(ov.Type.i64, ov.PartialShape([-1]))
+    indices.set_friendly_name("sampled_tokens_indices")
+    indices.output(0).get_tensor().set_names({"sampled_tokens_indices"})
+    return indices
+
+
 def apply_gather_before_matmul_transformation(model: ov.Model):
     matmul, slice_gather_dim = find_llm_matmul(model)
     if matmul.get_type_name() == "MatMul" and matmul.input(0).get_partial_shape().rank == 3:
-        indices = ov.op.Parameter(ov.Type.i64, ov.PartialShape([-1]))
-        indices.set_friendly_name("sampled_tokens_indices")
-        indices.output(0).get_tensor().set_names({"sampled_tokens_indices"})
+        indices = _sampled_tokens_indices()
         axis = ov.op.Constant(ov.Type.i64, ov.Shape([1]), [slice_gather_dim])
         gather = ov.opset8.gather(matmul.input_value(0), indices, axis)
         matmul.input(0).replace_source_output(gather.output(0))
         model.add_parameters([indices])
+
+
+def _slice_weight_rows(weight: ov.Output, num_rows: int) -> ov.Output | None:
+    """Copy of a [rows, hidden] weight subgraph keeping its first num_rows
+    rows: per-row constants (compressed weight, scales, zero points) are cut,
+    so the copy stays a compressed weight. None if the subgraph has other
+    ops than element-wise decompression or sub-byte constants."""
+    total_rows = weight.get_partial_shape()[0].get_length()
+    builders = {
+        "Convert": lambda node, a: ov.opset8.convert(
+            a, node.get_output_element_type(0)),
+        "Subtract": lambda node, a, b: ov.opset8.subtract(a, b),
+        "Multiply": lambda node, a, b: ov.opset8.multiply(a, b),
+    }
+
+    def clone(output: ov.Output) -> ov.Output | None:
+        node = output.get_node()
+        if node.get_type_name() == "Constant":
+            shape = node.get_output_shape(0)
+            if len(shape) == 0 or shape[0] != total_rows:
+                return output
+            if node.get_element_type().bitwidth < 8:
+                return None
+            new = ov.op.Constant(node.get_data()[:num_rows].copy())
+        elif node.get_type_name() in builders:
+            inputs = [clone(node.input_value(i))
+                      for i in range(node.get_input_size())]
+            if any(value is None for value in inputs):
+                return None
+            new = builders[node.get_type_name()](node, *inputs)
+        else:
+            return None
+        return new.output(0)
+
+    return clone(weight) if num_rows < total_rows else None
+
+
+def prepare_mtp_models(model: ov.Model, mtp_model: ov.Model) -> None:
+    """MTP drafting as OpenVINO GenAI's mtp_model_transforms: the main model
+    also returns the lm_head input of every token (``last_hidden_state``),
+    and the MTP model gets the main model's lm_head on its own hidden state,
+    gathered at ``sampled_tokens_indices`` like the main logits. Both must
+    already be PagedAttention-transformed, the main model also
+    gather-before-matmul transformed."""
+    lm_head, _ = find_llm_matmul(model)
+    hidden = lm_head.input_value(0).get_node().input_value(0)
+    hidden_result = ov.opset8.result(hidden)
+    hidden_result.output(0).get_tensor().set_names({"last_hidden_state"})
+    model.add_results([hidden_result])
+
+    indices = _sampled_tokens_indices()
+    mtp_hidden = mtp_model.output(0).get_node().input_value(0)
+    gathered = ov.opset8.gather(
+        mtp_hidden, indices, ov.op.Constant(ov.Type.i64, ov.Shape([1]), [0]))
+    weight = lm_head.input_value(1)
+    draft_vocab = envs.VLLM_OPENVINO_MTP_DRAFT_VOCAB
+    if draft_vocab and lm_head.get_transpose_b():
+        weight = _slice_weight_rows(weight, draft_vocab) or weight
+    logits = ov.opset8.matmul(gathered, weight, False,
+                              lm_head.get_transpose_b())
+    logits_result = ov.opset8.result(logits)
+    logits_result.output(0).get_tensor().set_names({"logits"})
+    mtp_model.add_parameters([indices])
+    mtp_model.add_results([logits_result])
+    model.validate_nodes_and_infer_types()
+    mtp_model.validate_nodes_and_infer_types()
 
 
 class OpenVINOInputBuilder(ABC):
@@ -216,6 +288,7 @@ class OpenVINOCausalLM(nn.Module):
         preloaded_model_type: str | None = None,
         preloaded_ssm_state_shapes: dict | None = None,
         preloaded_ov_model: ov.Model | None = None,
+        use_mtp: bool = False,
     ) -> None:
         super().__init__()
         self.model_config = model_config
@@ -262,6 +335,11 @@ class OpenVINOCausalLM(nn.Module):
         apply_paged_attention_transformation(ov_model, self.model_type)
         apply_gather_before_matmul_transformation(ov_model)
         ov_model.validate_nodes_and_infer_types()
+        mtp_model = None
+        if use_mtp:
+            mtp_model = ov_core.read_model(str(model_dir / MTP_IR))
+            apply_paged_attention_transformation(mtp_model, ATTENTION_ONLY)
+            prepare_mtp_models(ov_model, mtp_model)
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
         perf_mode = envs.VLLM_OPENVINO_PERFORMANCE_MODE
@@ -344,6 +422,14 @@ class OpenVINOCausalLM(nn.Module):
         self.ov_compiled = ov_compiled
         self.ov_request = ov_compiled.create_infer_request()
         self._input_builder: OpenVINOInputBuilder | None = None
+        self.ov_mtp_compiled = None
+        self.mtp_request = None
+        self.last_hidden_states: np.ndarray | None = None
+        self.last_inputs_embeds: np.ndarray | None = None
+        if mtp_model is not None:
+            self.ov_mtp_compiled = ov_core.compile_model(
+                mtp_model, ov_device, main_hint)
+            self.mtp_request = self.ov_mtp_compiled.create_infer_request()
 
         # Hybrid PA models additionally expose a linear-attention paged-state
         # mechanism for conv layers (conv_state_table.*) and/or true SSM
@@ -740,6 +826,9 @@ class OpenVINOCausalLM(nn.Module):
         infer_start = time.perf_counter()
         self.ov_request.infer(inputs)
         self.last_infer_s = time.perf_counter() - infer_start
+        if self.mtp_request is not None:
+            self.last_hidden_states = self.ov_request.get_tensor(
+                "last_hidden_state").data
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
         return logits[:, -1, :] if logits.dim() == 3 else logits
 
@@ -774,6 +863,11 @@ class OpenVINOCausalLM(nn.Module):
                 self.vision_merger_request = None
             if getattr(self, 'vision_pos_request', None) is not None:
                 self.vision_pos_request = None
+            if getattr(self, 'mtp_request', None) is not None:
+                self.mtp_request = None
+            if getattr(self, 'ov_mtp_compiled', None) is not None:
+                self.ov_mtp_compiled.release_memory()
+                self.ov_mtp_compiled = None
 
             if hasattr(self, 'ov_compiled') and self.ov_compiled is not None:
                 self.ov_compiled.release_memory()
@@ -955,6 +1049,7 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         if model.use_text_embeddings_model:
             token_input = {"inputs_embeds": model._prepare_embeddings(
                 input_ids, mm_embeds, image_position_ids)}
+            model.last_inputs_embeds = token_input["inputs_embeds"]
         else:
             token_input = {"input_ids": input_ids}
 
@@ -1005,6 +1100,7 @@ def get_model(
     preloaded_ssm_state_shapes: dict | None = None,
     preloaded_ov_model: ov.Model | None = None,
 ) -> torch.nn.Module:
+    spec_config = vllm_config.speculative_config
     with set_current_vllm_config(vllm_config):
         return OpenVINOCausalLM(
             ov_core,
@@ -1012,6 +1108,7 @@ def get_model(
             preloaded_model_type=preloaded_model_type,
             preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
             preloaded_ov_model=preloaded_ov_model,
+            use_mtp=spec_config is not None and spec_config.method == "mtp",
         )
 
  

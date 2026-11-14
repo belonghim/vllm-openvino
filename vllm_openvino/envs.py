@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_ENABLE_CPU_PINNING: bool | None = None
     VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE: int | None = None
     VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER: int = 8
+    VLLM_OPENVINO_MTP_DRAFT_VOCAB: int = 32768
     VLLM_OPENVINO_CACHE_DIR: str | None = None
     VLLM_OPENVINO_SCHEDULING_CORE_TYPE: str | None = None
     VLLM_OPENVINO_FAST_SAMPLER: bool = True
@@ -135,6 +136,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # checkpoint memory.
     "VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER":
     lambda: _env_int("VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER", "8"),
+
+    # MTP drafting: the draft lm_head keeps only token ids below this value
+    # (a sliced copy of the compressed weight), since reading the whole
+    # vocabulary's lm_head dominates an MTP step. Drafts are verified, so
+    # this changes speed, not output. 0 = whole vocabulary.
+    "VLLM_OPENVINO_MTP_DRAFT_VOCAB":
+    lambda: _env_int("VLLM_OPENVINO_MTP_DRAFT_VOCAB", "32768"),
 
     # Directory for OpenVINO's compiled-model disk cache. When set, OpenVINO
     # skips recompiling the model on process restart if a matching cached

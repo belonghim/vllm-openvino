@@ -464,7 +464,7 @@ the budget, the next token of `reasoning_end_str` gets logit `1e9` after every
 other logits stage and before temperature. Marker positions are cached per
 row, so each step scans only the new tokens. vLLM rejects the parameter
 unless the server runs with `--reasoning-parser` (or `--reasoning-config`).
-Requests with a budget get no n-gram drafts.
+Requests with a budget get no drafts.
 
 Qwen3-1.7B-int4 (`--reasoning-parser qwen3`, greedy, 600 tokens): reasoning
 of 1926 characters unbudgeted, 0 / 122 / 452 at budgets 0 / 32 / 128; six
@@ -473,8 +473,9 @@ ones, also with n-gram speculation on.
 
 ## N-gram Speculative Decoding
 
-Only `method=ngram` is accepted, on PagedAttention and Hybrid-PA models
-(`check_and_update_config` raises otherwise). `execute_model` computes logits for the 1+k query
+`method=ngram` is accepted on PagedAttention and Hybrid-PA models, `mtp` on
+Hybrid-PA IRs that ship an MTP model (next section); `check_and_update_config`
+raises for any other method. `execute_model` computes logits for the 1+k query
 positions of each draft request, and `sample_tokens` accepts drafts while they
 match the argmax (the stock rejection sampler needs Triton). Drafts are
 proposed only for greedy requests without penalties, `logit_bias`,
@@ -514,6 +515,75 @@ on Hybrid-PA at 8, where verification is not free. Keep `prompt_lookup_min`
 high: with 2, spurious matches cost 7-11% on free-form output for Qwen3-1.7B.
 Output can diverge from non-spec runs at near-tie tokens because kernel
 numerics vary with query length.
+
+## MTP Speculative Decoding
+
+Qwen3.5/3.6 exports ship `openvino_mtp_model.xml`, a one-layer
+multi-token-prediction head, and `--speculative-config
+'{"method":"mtp","num_speculative_tokens":1}'` drafts with it, following
+OpenVINO GenAI's MTP strategy (`mtp_model_transforms.cpp`):
+
+- The loader adds a `last_hidden_state` output to the main model (the lm_head
+  input of every token, before gather-before-matmul) and grafts the main
+  lm_head onto the PagedAttention-transformed MTP model, gathered at the
+  sampled rows.
+- The MTP layer at position i reads the main hidden state h_i and the
+  embedding of token i+1 (the main step's own input embedding when that token
+  was in the step, so image positions keep their image embedding) and
+  predicts token i+2, at position i (the vLLM EAGLE convention; i+1 gave the
+  same acceptance).
+- Its KV cache is one more attention layer behind the main layers on the same
+  block table, so vLLM budgets it with them.
+- After each step's verification, the MTP layer catches up on the positions
+  the main model committed (prefill chunks included), which gives the first
+  draft. Each further draft feeds the MTP hidden state and the previous draft
+  one position later; that draft-only KV is overwritten by the next catch-up
+  and stays within the k lookahead slots the scheduler reserves.
+- Requests that cannot take drafts (same rules as n-gram) skip the MTP layer
+  entirely. Drafts return through `take_draft_token_ids`, so the platform
+  turns async scheduling off, which vLLM would otherwise keep for `mtp`.
+
+An MTP step reads the whole lm_head, 248,320 x 2,048 u8 (508 MB) on
+Qwen3.5-2B: drafting took 18 ms per k=1 step against 49 ms for the main
+model. `VLLM_OPENVINO_MTP_DRAFT_VOCAB` (default 32768) builds the draft
+lm_head from the first N rows of the compressed weight and its per-row scale
+and zero point, so it stays a compressed matmul (6 ms per step). Drafts are verified, so this changes speed,
+not output. Feeding the rows through a `Gather` on the compressed weight
+instead was slower than the full lm_head (16 / 30 ms at 32k / 64k rows), and
+adding the requests' context tokens to the low ids recovered only part of the
+acceptance (0.70 -> 0.72 at 32k, offline).
+
+Measured (8 CPUs, greedy, 256 tokens; 4 English/code prompts and 1 Korean of
+4, tok/s for 1 request (4 in a row) / 4 / 8 concurrent):
+
+| Qwen3.5-2B-int4 | 1 | 4 | 8 | acceptance |
+|---|---|---|---|---|
+| no speculation | 20.8 | 61.7 | 94.0 | - |
+| k=1, whole vocabulary | 24.0 | 67.6 | 95.5 | 0.75 |
+| k=1, 32k | 27.4 | 69.2 | 94.7 | 0.73 |
+| k=2, 32k | 29.1 | 65.9 | 88.5 | 0.65, 0.41 |
+| k=1, 16k | 27.7 | 68.4 | 94.5 | 0.66 |
+
+| Qwen3.6-35B-A3B-int4 (32 GiB, `--max-num-seqs 4`) | 1 | 4 | acceptance |
+|---|---|---|---|
+| no speculation | 10.8 | 18.1 | - |
+| k=1, whole vocabulary | 12.7 | 19.7 | 0.86 |
+| k=1, 32k | 13.8 | 19.4 | 0.81 |
+| k=2, 32k | 14.7 | 19.4 | 0.73, 0.62 |
+
+On four Korean prompts (Qwen3.5-2B, k=1) the gain shrinks: 20.6 -> 21.7
+(whole vocabulary, acceptance 0.59) and 21.8 (32k, 0.39). Verifying two tokens
+costs 1.43x a decode step on the MoE model (82 -> 117 ms) against ~1.05x on
+the dense one, which is why concurrency erases the gain sooner there.
+Use k=1 for mixed load; k=2 helps a single stream and loses at 8 concurrent
+requests. The slot pool and `--max-num-seqs` advice of the n-gram section
+applies (k=1: `max_num_seqs * 3 + 1` slots).
+
+Checked on Qwen3.5-0.8B with k=2: twelve concurrent requests mixing greedy,
+seeded sampling, JSON schema, logprobs, `thinking_token_budget` and images
+returned HTTP 200, and greedy repeats differed only where the run without
+speculation also differed (chunk boundaries of a 3k-token prompt); eight
+1000-token requests in a 9.5k-token pool completed through 4 preemptions.
 
 ## Performance Profile
 

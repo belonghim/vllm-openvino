@@ -340,10 +340,19 @@ class OpenVinoPlatform(Platform):
 
         speculative_config = vllm_config.speculative_config
         if (speculative_config is not None
-                and speculative_config.method != "ngram"):
+                and speculative_config.method not in ("ngram", "mtp")):
             raise ValueError(
-                "OpenVINO only supports ngram speculative decoding, got "
-                f"method={speculative_config.method!r}.")
+                "OpenVINO only supports ngram and mtp speculative decoding, "
+                f"got method={speculative_config.method!r}.")
+        if speculative_config is not None and speculative_config.method == "mtp":
+            if not (hybrid_pa and (Path(model_config.model)
+                                   / "openvino_mtp_model.xml").exists()):
+                raise ValueError(
+                    "mtp speculative decoding needs a Hybrid-PA IR that ships "
+                    "openvino_mtp_model.xml (Qwen3.5/3.6 exports).")
+            # Drafts go back to the scheduler through take_draft_token_ids,
+            # as with ngram, which needs synchronous scheduling.
+            vllm_config.scheduler_config.async_scheduling = False
 
         # Recurrent state is not stored in vLLM blocks, so a prefix-cache hit
         # would skip tokens whose state is never restored. Hybrid-PA keeps a

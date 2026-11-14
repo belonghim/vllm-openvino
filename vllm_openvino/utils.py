@@ -27,7 +27,8 @@ class StepStatsLogger:
         self._steps = 0
         self._tokens = 0
         self._max_step = 0.0
-        self._sum = {"prep": 0.0, "infer": 0.0, "other": 0.0, "sample": 0.0}
+        self._sum = {"prep": 0.0, "infer": 0.0, "other": 0.0, "sample": 0.0,
+                     "draft": 0.0}
         self._cur = 0.0
 
     def add(self, **seconds: float) -> None:
@@ -61,10 +62,11 @@ class StepStatsLogger:
         avg = {k: v / steps * 1000 for k, v in sums.items()}
         logger.info(
             "[OV-RUNNER] %.1fs: %d steps, %.1f scheduled tokens/s, step avg "
-            "%.1f ms (prep %.1f, infer %.1f, other forward %.1f, sample %.1f), "
-            "max %.1f ms",
+            "%.1f ms (prep %.1f, infer %.1f, other forward %.1f, sample %.1f, "
+            "draft %.1f), max %.1f ms",
             elapsed, steps, tokens / elapsed, sum(avg.values()), avg["prep"],
-            avg["infer"], avg["other"], avg["sample"], max_step * 1000)
+            avg["infer"], avg["other"], avg["sample"], avg["draft"],
+            max_step * 1000)
 
 
 def detect_cgroup_cpu_quota() -> int | None:

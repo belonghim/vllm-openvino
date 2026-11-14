@@ -217,6 +217,18 @@ class OpenVINOWorkerV1(WorkerBase):
             elif input_name.startswith("gated_delta_state_table."):
                 new_ssm_cache_config.append(input_port.get_partial_shape())
                 new_ssm_cache_dtypes.append(input_port.get_element_type().to_string())
+        # The MTP layer's KV cache is one more attention layer on the same
+        # block table, so vLLM budgets its pages with the main layers'.
+        self.model_runner.num_main_kv_layers = len(new_key_cache_config)
+        if model.ov_mtp_compiled is not None:
+            for name, config in (("key_cache.0", new_key_cache_config),
+                                 ("value_cache.0", new_value_cache_config)):
+                port = model.ov_mtp_compiled.input(name)
+                if port.get_element_type().to_string() != self.cache_dtype:
+                    raise ValueError(
+                        f"MTP {name} is {port.get_element_type()}, the main "
+                        f"model's KV cache is {self.cache_dtype}.")
+                config.append(port.get_partial_shape())
         self.key_cache_config = new_key_cache_config
         self.value_cache_config = new_value_cache_config
         if new_conv_cache_config:

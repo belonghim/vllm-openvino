@@ -137,9 +137,13 @@ class OpenVINOModelRunnerV1:
             spec_config.num_speculative_tokens if spec_config else 0)
         self.drafter = None
         self._draft_token_ids: DraftTokenIds | None = None
-        if spec_config is not None:
+        self._use_mtp = spec_config is not None and spec_config.method == "mtp"
+        if spec_config is not None and not self._use_mtp:
             from vllm_openvino.worker_v1.ngram_proposer import NgramProposer
             self.drafter = NgramProposer(vllm_config)
+        # Main-model KV layers; the MTP layer's cache follows them.
+        self.num_main_kv_layers: int | None = None
+        self._req_token_start: dict[str, int] = {}
         max_sampled_rows = max_seqs * (1 + self._num_spec_tokens)
         self._sampled_idx_buf = np.zeros(max_sampled_rows, dtype=np.int64)
         self._input_tokens_buf = np.zeros(
@@ -368,6 +372,10 @@ class OpenVINOModelRunnerV1:
             preloaded_ssm_state_shapes=preloaded_ssm_state_shapes,
             preloaded_ov_model=preloaded_ov_model,
         )
+
+        if self._use_mtp:
+            from vllm_openvino.worker_v1.mtp_proposer import MtpProposer
+            self.drafter = MtpProposer(self.vllm_config, self.model)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -608,6 +616,7 @@ class OpenVINOModelRunnerV1:
                 max_query_len = query_len
             self._input_tokens_buf[token_idx:token_idx + num_tokens] = \
                 self.input_batch.token_ids_cpu[req_index, num_computed:num_tokens_total]
+            self._req_token_start[req_id] = token_idx
             if req_id in self._mm_req_ids:
                 req_spans[req_id] = (token_idx, num_computed, num_tokens)
             token_idx += num_tokens
@@ -836,7 +845,7 @@ class OpenVINOModelRunnerV1:
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
-            "kv_caches": self.kv_caches,
+            "kv_caches": self.kv_caches[:self.num_main_kv_layers],
             "ssm_caches": self.ssm_caches,
             "conv_caches": self.conv_caches,
             "num_requests": actual_num_requests,
@@ -934,6 +943,27 @@ class OpenVINOModelRunnerV1:
                 drafts[i] = []
         self._draft_token_ids = DraftTokenIds(req_ids, drafts)
 
+    def _propose_mtp_drafts(self, step_spans: list) -> None:
+        """MTP drafts for requests that can take drafts. Their MTP cache
+        catches up on every step, prefill chunks included; other requests
+        never use it."""
+        req_ids = list(self.input_batch.req_ids)
+        drafting, spans = [], []
+        for req_id, (req_index, past, new_computed, emitted) in zip(
+                req_ids, step_spans):
+            request = self.requests[req_id]
+            if not self._supports_drafts(request.sampling_params):
+                continue
+            drafting.append(req_id)
+            spans.append((req_index, past, new_computed - past,
+                          self._req_token_start[req_id], emitted,
+                          request.block_ids[0]))
+        drafts = dict(zip(drafting, self.drafter.propose(
+            spans, self.input_batch.token_ids_cpu,
+            self.kv_caches[self.num_main_kv_layers], self.block_size)))
+        self._draft_token_ids = DraftTokenIds(
+            req_ids, [drafts.get(req_id, []) for req_id in req_ids])
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         draft_token_ids, self._draft_token_ids = self._draft_token_ids, None
         return draft_token_ids
@@ -964,6 +994,8 @@ class OpenVINOModelRunnerV1:
             logprobs_lists = sampler_output.logprobs_tensors.tolists() \
                 if sampler_output.logprobs_tensors is not None else None
 
+        # (InputBatch row, computed before, computed after, emitted a token)
+        step_spans = []
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             req_index = self.input_batch.req_id_to_index[req_id]
@@ -972,10 +1004,11 @@ class OpenVINOModelRunnerV1:
             num_drafts = len(spec_tokens.get(req_id, ()))
             seq_len = num_computed + num_scheduled - num_drafts
             new_computed = seq_len
+            emitted = seq_len >= req_state.num_tokens
 
             # Partial (chunked) prefill: seq_len is still inside known tokens,
             # so the sampled token must neither overwrite them nor be emitted.
-            if seq_len < req_state.num_tokens:
+            if not emitted:
                 sampled_tokens[i] = []
             else:
                 sampled_entry = sampled_tokens[i]
@@ -1000,11 +1033,17 @@ class OpenVINOModelRunnerV1:
                             self._conv_slot_free.extend(temp_slots)
 
             self.input_batch.num_computed_tokens_cpu[req_index] = new_computed
+            step_spans.append(
+                (req_index, int(num_computed), int(new_computed), emitted))
 
-        if self.drafter is not None:
+        draft_start = time.perf_counter()
+        if self._use_mtp:
+            self._propose_mtp_drafts(step_spans)
+        elif self.drafter is not None:
             self._propose_draft_token_ids(scheduler_output, sampled_tokens)
 
-        self._step_stats.add(sample=time.perf_counter() - sample_start)
+        self._step_stats.add(sample=draft_start - sample_start,
+                             draft=time.perf_counter() - draft_start)
         self._step_stats.end_step(scheduler_output.total_num_scheduled_tokens)
 
         # Snapshot (not a live reference): with async scheduling, a later
