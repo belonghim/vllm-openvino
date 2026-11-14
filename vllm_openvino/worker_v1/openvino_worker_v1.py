@@ -2,6 +2,7 @@
 import copy
 import dataclasses
 import math
+import os
 import time
 from pathlib import Path
 
@@ -145,6 +146,7 @@ class OpenVINOWorkerV1(WorkerBase):
         self._la_state_bytes = 0
         self._kv_blocks_per_block = 1
         self._warmed_up = False
+        self._mrv2 = None
         self.cache_dtype: str | None = None
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
@@ -391,6 +393,8 @@ class OpenVINOWorkerV1(WorkerBase):
         self,
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput | None:
+        if self._mrv2 is not None:
+            return self._mrv2.execute_model(scheduler_output)
         if scheduler_output.total_num_scheduled_tokens == 0:
             # The step after the last request finishes schedules nothing but
             # carries finished_req_ids once; update states as upstream does.
@@ -418,6 +422,8 @@ class OpenVINOWorkerV1(WorkerBase):
         return None
 
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
+        if self._mrv2 is not None:
+            return self._mrv2.sample_tokens(grammar_output)
         return self.model_runner.sample_tokens(grammar_output)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -867,6 +873,12 @@ class OpenVINOWorkerV1(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate OpenVINO KV cache with the specified kv_cache_config."""
         self.initialize_cache(kv_cache_config.num_blocks, self.num_swap_blocks)
+        if os.environ.get("VLLM_OPENVINO_MRV2_PROTOTYPE") == "1":
+            from vllm_openvino.mrv2_prototype.runner import (  # noqa: PLC0415
+                OpenVINOMRV2Runner)
+            self._mrv2 = OpenVINOMRV2Runner(self.vllm_config, self.model_runner)
+            self._mrv2.initialize_kv_cache(kv_cache_config)
+            logger.info("[OV-WORKER] MRV2 prototype runner enabled")
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # OpenVINO compiles in load_model(); callers ignore the return value.
