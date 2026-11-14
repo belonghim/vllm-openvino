@@ -354,17 +354,6 @@ class OpenVinoPlatform(Platform):
             # as with ngram, which needs synchronous scheduling.
             vllm_config.scheduler_config.async_scheduling = False
 
-        # Recurrent state is not stored in vLLM blocks, so a prefix-cache hit
-        # would skip tokens whose state is never restored. Hybrid-PA keeps a
-        # conv/SSM checkpoint per scheduler block instead (see the model
-        # runner), except with drafts, whose per-token state slots are not
-        # checkpointed.
-        if (hybrid_pa and speculative_config is not None and cache_config
-                and cache_config.enable_prefix_caching):
-            logger.warning(
-                "[OV-PLATFORM] Disabling prefix caching: Hybrid-PA conv/SSM "
-                "checkpoints do not cover speculative decoding.")
-            cache_config.enable_prefix_caching = False
         if hybrid_pa and hasattr(cache_config, "mamba_cache_mode"):
             cache_config.mamba_cache_mode = "none"
             cache_config.mamba_block_size = None

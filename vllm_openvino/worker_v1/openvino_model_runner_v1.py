@@ -79,13 +79,17 @@ def apply_grammar_bitmask(logits: torch.Tensor, req_ids: list[str],
             rejected, -float("inf"))
 
 
-def num_state_slots(vllm_config: VllmConfig) -> int:
+def num_state_slots(vllm_config: VllmConfig, checkpoints: bool = False) -> int:
     """Physical conv/SSM state slots: one committed slot per request, plus
-    1+k temporary per-token slots per request when drafts are verified."""
+    1+k temporary per-token slots per request when drafts are verified. With
+    block checkpoints only the draft slots are extra (the committed state
+    then lives in a checkpoint or a private slot)."""
     max_seqs = vllm_config.scheduler_config.max_num_seqs
     spec_config = vllm_config.speculative_config
     num_spec_tokens = spec_config.num_speculative_tokens if spec_config else 0
     extra = max_seqs * (1 + num_spec_tokens) if num_spec_tokens else 0
+    if checkpoints:
+        return extra + max_seqs if num_spec_tokens else 0
     return max_seqs + 1 + extra
 
 
@@ -240,6 +244,8 @@ class OpenVINOModelRunnerV1:
         num_conv_slots = num_state_slots(vllm_config)
         self._conv_slot_by_req: dict[str, int] = {}
         self._conv_slot_free: list[int] = list(range(num_conv_slots))
+        # With checkpoints the slots below this index are block checkpoints.
+        self._first_temp_slot = 0
         self._spec_temp_slots: dict[str, list[int]] = {}
         max_la_indices = max_seqs * (2 + self._num_spec_tokens)
         self._la_block_indices_buf = np.zeros(max_la_indices, dtype=np.int32)
@@ -314,8 +320,9 @@ class OpenVINOModelRunnerV1:
         self._la_interval = interval
         self._kv_blocks_per_block = kv_blocks_per_block
         self._kv_block_offsets = np.arange(kv_blocks_per_block, dtype=np.int32)
-        # Per request: one read slot plus one write slot per touched interval.
-        max_la_indices = (3 * self.scheduler_config.max_num_seqs
+        # Per request: one read slot plus one write slot per touched interval
+        # (per token in a draft step).
+        max_la_indices = ((3 + self._num_spec_tokens) * self.scheduler_config.max_num_seqs
                           + self.scheduler_config.max_num_batched_tokens // interval)
         self._la_block_indices_buf = np.zeros(max_la_indices, dtype=np.int32)
         self._la_block_indices_tensor_base = ov.Tensor(
@@ -637,22 +644,36 @@ class OpenVINOModelRunnerV1:
             if self._la_interval:
                 # Read the checkpoint after token num_computed-1 and write one
                 # per touched interval (OpenVINO GenAI's prefix layout); a
-                # fresh prefill reads the zeroed first write slot.
+                # fresh prefill reads the zeroed first write slot. After a
+                # draft step the state may sit in the request's private slot.
                 interval = self._la_interval
                 blocks = request.block_ids[0]
                 if num_computed == 0:
                     for cache in (*self.conv_caches, *self.ssm_caches):
                         cache.data[blocks[0]] = 0
-                first = num_computed // interval
-                num_writes = (num_computed % interval + num_tokens + interval - 1) // interval
+                private = self._conv_slot_by_req.get(req_id)
                 self._la_block_indices_buf[la_offset] = (
-                    blocks[(num_computed - 1) // interval] if num_computed else blocks[0])
-                self._la_block_indices_buf[la_offset + 1:la_offset + 1 + num_writes] = \
-                    blocks[first:first + num_writes]
-                la_offset += 1 + num_writes
+                    private if private is not None
+                    else blocks[(num_computed - 1) // interval] if num_computed
+                    else blocks[0])
+                if drafts:
+                    # Per-token writes into temporary slots, except a token
+                    # that ends a block, which writes that block's checkpoint:
+                    # a rejected one is rewritten before the block is full.
+                    writes = [blocks[pos // interval] if (pos + 1) % interval == 0
+                              else self._conv_slot_free.pop()
+                              for pos in range(num_computed, num_tokens_total)]
+                    self._spec_temp_slots[req_id] = writes
+                    self._la_cache_interval_buf[n_reqs] = 1
+                else:
+                    first = num_computed // interval
+                    num_writes = (num_computed % interval + num_tokens + interval - 1) // interval
+                    writes = blocks[first:first + num_writes]
+                    self._la_cache_interval_buf[n_reqs] = interval
+                self._la_block_indices_buf[la_offset + 1:la_offset + 1 + len(writes)] = writes
+                la_offset += 1 + len(writes)
                 self._la_block_indices_begins_buf[n_reqs + 1] = la_offset
                 self._la_past_lens_buf[n_reqs] = num_computed
-                self._la_cache_interval_buf[n_reqs] = interval
             elif self.conv_caches or self.ssm_caches:
                 conv_slot = self._get_conv_slot(req_id, num_computed)
                 if drafts:
@@ -955,12 +976,17 @@ class OpenVINOModelRunnerV1:
             if not self._supports_drafts(request.sampling_params):
                 continue
             drafting.append(req_id)
+            blocks = request.block_ids[0]
+            if self._kv_blocks_per_block > 1:
+                blocks = (np.asarray(blocks, dtype=np.int32)[:, None]
+                          * self._kv_blocks_per_block
+                          + self._kv_block_offsets).ravel().tolist()
             spans.append((req_index, past, new_computed - past,
-                          self._req_token_start[req_id], emitted,
-                          request.block_ids[0]))
+                          self._req_token_start[req_id], emitted, blocks))
         drafts = dict(zip(drafting, self.drafter.propose(
             spans, self.input_batch.token_ids_cpu,
-            self.kv_caches[self.num_main_kv_layers], self.block_size)))
+            self.kv_caches[self.num_main_kv_layers],
+            self.block_size // self._kv_blocks_per_block)))
         self._draft_token_ids = DraftTokenIds(
             req_ids, [drafts.get(req_id, []) for req_id in req_ids])
 
@@ -1026,11 +1052,18 @@ class OpenVINOModelRunnerV1:
                         new_computed = seq_len + num_accepted
                         temp_slots = self._spec_temp_slots.pop(req_id, None)
                         if temp_slots:
-                            self._conv_slot_free.append(
-                                self._conv_slot_by_req[req_id])
-                            self._conv_slot_by_req[req_id] = temp_slots.pop(
-                                num_accepted)
-                            self._conv_slot_free.extend(temp_slots)
+                            old = self._conv_slot_by_req.pop(req_id, None)
+                            if old is not None:
+                                self._conv_slot_free.append(old)
+                            kept = temp_slots.pop(num_accepted)
+                            if kept >= self._first_temp_slot:
+                                self._conv_slot_by_req[req_id] = kept
+                            self._conv_slot_free.extend(
+                                s for s in temp_slots if s >= self._first_temp_slot)
+            if (self._la_interval and not num_drafts
+                    and req_id in self._conv_slot_by_req):
+                # The step read the private slot and wrote block checkpoints.
+                self._conv_slot_free.append(self._conv_slot_by_req.pop(req_id))
 
             self.input_batch.num_computed_tokens_cpu[req_index] = new_computed
             step_spans.append(

@@ -238,7 +238,7 @@ byte-identical 400-token greedy output on Hybrid-PA and the stateful IR.
 Hybrid-PA uses standard PagedAttention for attention layers. Conv/SSM state
 storage depends on prefix caching:
 
-- Prefix caching on (default, no speculative decoding): each vLLM scheduler
+- Prefix caching on (default): each vLLM scheduler
   block owns one conv/SSM checkpoint slot with the same index. The
   linear-attention inputs follow OpenVINO GenAI's prefix layout: read the
   checkpoint of the block holding token `num_computed - 1`, write one
@@ -267,8 +267,23 @@ storage depends on prefix caching:
   another request fills in the same step. The runner then splits the batch
   into waves (writer first) so the checkpoint read follows its write. Without
   waves, 3 of 4 concurrent identical prompts had different logprobs.
-- Prefix caching off, or speculative decoding configured: a separate
-  physical slot pool, described below.
+- With speculative decoding, a draft step reads the same checkpoint (or the
+  request's private slot) and writes per-token states (`la.cache_interval`
+  1) into temporary slots, as the slot pool below does. A token that ends a
+  block writes that block's checkpoint directly: if it is rejected, the block
+  is not full of known tokens, so vLLM has not cached it, and the token is
+  recomputed before it is. After verification the accepted state becomes the
+  request's private slot, so nothing is copied; the next step without drafts
+  reads it and writes block checkpoints again. The temporary and private
+  slots (`max_num_seqs * (2 + k)`) come out of the KV pool. MTP's KV layer
+  uses the expanded 32-token block table like the main model. Verified on
+  Qwen3.5-2B (MTP k=1, `--max-num-seqs 8`): non-hit requests gave the same
+  greedy text as MTP without prefix caching, a prompt holding a previous
+  600-token output hit 512 tokens whose checkpoints were written in draft
+  steps and continued identically, a repeated 2.3k-token prompt hit in 0.28 s
+  instead of 14.2 s, and acceptance was 80% (77% without prefix caching). The same 600-token check with n-gram (k=4, 533 of 567
+  drafts accepted) on Qwen3.5-0.8B hit 512 tokens and continued identically.
+- Prefix caching off: a separate physical slot pool, described below.
 
 Verification (8 CPUs, greedy): a hit run's first-token logprobs were
 bit-identical to a no-prefix-caching run whose chunk boundary is at the same
@@ -342,16 +357,11 @@ text because of prefill vs decode numerics.
   with prefix caching on).
 - Hybrid-PA without prefix caching takes the conv/SSM state slots out of the
   KV pool first: one per `--max-num-seqs` request plus one, and `1 + k` more
-  per request with `k` speculative tokens. On Qwen3.6-35B-A3B a slot is about
+  per request with `k` speculative tokens (`2 + k` per request, and nothing
+  without drafts, when prefix caching keeps checkpoints). On Qwen3.6-35B-A3B a slot is about
   64 MiB, so the default 128 requests reserve 8 GiB and a 2 GiB pool is left with no KV
   blocks; lower `--max-num-seqs` (4 served it in the same pool). The startup
   warning reports the reservation.
-- Prefix caching is disabled automatically for Hybrid-PA models with
-  speculative decoding: their recurrent state
-  is not checkpointed per vLLM block, so a prefix hit would skip tokens
-  without restoring that state (repeated long prompts gave different, wrong
-  answers). Pure-attention PA models and Hybrid-PA models without
-  speculative decoding keep it enabled.
 - Multimodal requests are encoded per image (own grid and merger attention)
   when vLLM's scheduler lists the image in `scheduled_encoder_inputs`; the
   merged embeddings stay in the runner's encoder cache until the scheduler

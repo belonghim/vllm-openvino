@@ -341,8 +341,14 @@ class OpenVINOWorkerV1(WorkerBase):
         num_ssm_blocks = None
         is_hybrid_pa = self._is_hybrid_pa_model()
         if self._la_state_bytes:
-            # One checkpoint per scheduler block, zeroed on a fresh prefill.
-            num_ssm_blocks = self.cache_config.num_gpu_blocks
+            # One checkpoint per scheduler block, zeroed on a fresh prefill,
+            # then the draft slots.
+            num_blocks = self.cache_config.num_gpu_blocks
+            num_ssm_blocks = num_blocks + num_state_slots(
+                self.vllm_config, checkpoints=True)
+            self.model_runner._first_temp_slot = num_blocks
+            self.model_runner._conv_slot_free = list(
+                range(num_blocks, num_ssm_blocks))
         elif is_hybrid_pa and (self.ssm_cache_config or self.conv_cache_config):
             num_ssm_blocks = num_state_slots(self.vllm_config)
             logger.info(
@@ -765,8 +771,7 @@ class OpenVINOWorkerV1(WorkerBase):
                         format_memory_size(kvcache_now))
                     self.cache_config.openvino_kvcache_space_bytes = fitted
         conv_reservation = (self._conv_reservation_bytes()
-                            if self._is_hybrid_pa_model() and not self._la_state_bytes
-                            else 0)
+                            if self._is_hybrid_pa_model() else 0)
         original_space_bytes = self.cache_config.openvino_kvcache_space_bytes
         if conv_reservation:
             self.cache_config.openvino_kvcache_space_bytes = max(
@@ -815,10 +820,11 @@ class OpenVINOWorkerV1(WorkerBase):
                 num_state_slots)
             cause = (
                 "The %s pool first reserves %s for %d conv/SSM state slots "
-                "(one per --max-num-seqs request, %d)"
+                "(scaled by --max-num-seqs, %d)"
                 % (format_memory_size(pool_bytes),
                    format_memory_size(conv_reservation),
-                   num_state_slots(self.vllm_config),
+                   num_state_slots(self.vllm_config,
+                                   checkpoints=bool(self._la_state_bytes)),
                    self.scheduler_config.max_num_seqs))
             remedies.append("lower --max-num-seqs")
         elif explicit_space:
@@ -1060,7 +1066,8 @@ class OpenVINOWorkerV1(WorkerBase):
     def _conv_reservation_bytes(self) -> int:
         if not self.conv_cache_config and not self.ssm_cache_config:
             return 0
-        num_conv_slots = num_state_slots(self.vllm_config)
+        num_conv_slots = num_state_slots(
+            self.vllm_config, checkpoints=bool(self._la_state_bytes))
         per_slot_bytes = OpenVINOCacheEngine.get_cache_block_size(
             self._kv_cache_dtype(),
             [], [],
