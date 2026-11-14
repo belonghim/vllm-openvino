@@ -747,6 +747,9 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
     frontend (`vllm/v1/engine/input_processor.py`), so `prompt_logprobs`
     fails with HTTP 500 ("prompt_logprobs were requested but generation
     returned none") instead of 400.
+    [vllm-project/vllm#67623](https://github.com/vllm-project/vllm/pull/67623)
+    (open) runs the check again in the engine core; with it applied to
+    `4e3463c87`, both frontends return 400.
   - The Rust frontend has no multimodal spec for MiniCPM-V 4.7: image
     requests get HTTP 400 ("unsupported multimodal content"). Serve it with
     the Python frontend.
