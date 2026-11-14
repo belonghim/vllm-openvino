@@ -122,10 +122,12 @@ Tracked upstream:
   only attention specs and allocates the conv/SSM pool itself, so core
   grouping has nothing to decide.
 
-vLLM main at `4e3463c87` (0.34.0rc1.dev156, 2026-11-10) passes: an image
-built with that wheel passed `scripts/check-vllm-imports.py` and
-`scripts/smoke-test.sh` on every serving path and the preemption check, within
-2% of 0.33.0's throughput on the same host.
+vLLM 0.34.0rc4 passes. The tag commit has no per-commit wheel, so the image
+used `9950ce36a`, its last commit with one (the two after it change only tests
+and XPU CI); it still pins `torch==2.14.0`/`torchvision==0.29.0`. The smoke
+test passed on both frontends, LFM3 alternated against 0.33.0 on the same host
+gave 25.1 vs 24.6 tok/s, and Qwen3.5-2B MTP with prefix caching hit a repeated
+2.3k-token prompt in 0.29 s (14.2 s cold) with 76% acceptance.
 
 vLLM offers no upstream runner for an x86 plugin that cannot use Triton
 (#61995 is non-x86 only), so the plugin keeps its own; the support question
