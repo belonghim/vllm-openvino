@@ -105,15 +105,17 @@ Tracked upstream:
   `encoder_input_updates` only release or restore the worker's copy of
   multimodal payloads; the runner keeps its own `mm_features` and ignores them.
 - [vllm-project/vllm#61452](https://github.com/vllm-project/vllm/pull/61452)
-  (open, not in 0.33.0) moves allocation policy from `KVCacheSpec` onto the KV
-  cache managers. It breaks the plugin's worker: `FullAttentionSpec` is
-  removed (layouts become `AttentionSpec`/`MambaSpec`/...), and
+  (merged after v0.34.0rc3, so expected in 0.35) moves allocation policy from
+  `KVCacheSpec` onto the KV cache managers: `FullAttentionSpec` is removed and
   `WorkerBase.get_kv_cache_spec()` becomes `get_kv_cache_layer_configs()`,
-  returning a `KVCacheLayerConfig` (manager config + spec) per layer.
-  `page_size_padded` stays on `AttentionSpec`, so Hybrid-PA can keep its
-  conv/SSM checkpoints in the attention pages. `initialize_from_config` reads
-  only `num_blocks` and is unaffected by the `KVCacheGroupSpec` ->
-  `KVCacheGroup` rename.
+  returning a `KVCacheLayerConfig` (manager config + spec) per layer. The
+  worker supports both: it imports `AttentionSpec` when `FullAttentionSpec` is
+  gone and wraps each spec in `FullAttentionManager.layer_config()`.
+  `page_size_padded` stays on `AttentionSpec`, so the u8 scale rows and the
+  Hybrid-PA checkpoints still size the pool: on main `5ec99956a` Qwen3-1.7B
+  and Qwen3.5-0.8B planned the same blocks as on 0.33.0 (2024 and 354 at
+  4 GiB) with identical greedy output, MTP drafted with 77% acceptance, and the
+  smoke test passed on both frontends. That main pins `torchvision==0.29.2`.
 - [vllm-project/vllm#53558](https://github.com/vllm-project/vllm/pull/53558)
   (in 0.33.0, experimental) lets a platform supply a `KVCacheConfigBuilder`
   for grouping and placement. The plugin keeps the default: Hybrid-PA exposes

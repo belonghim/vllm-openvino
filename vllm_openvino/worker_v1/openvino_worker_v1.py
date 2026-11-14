@@ -24,7 +24,11 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
 from vllm.v1.worker.utils import bind_kv_cache
-from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig, FullAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, KVCacheConfig
+try:
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+except ImportError:  # vLLM > 0.34 (#61452): the policy moved to the manager
+    from vllm.v1.kv_cache_interface import AttentionSpec as FullAttentionSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase, CompilationTimes
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
@@ -676,6 +680,13 @@ class OpenVINOWorkerV1(WorkerBase):
         # MambaSpec: vLLM stripes >6 mamba layers across multiple block
         # tables, but the model has one shared set of state-table inputs.
         return kv_cache_spec
+
+    def get_kv_cache_layer_configs(self):
+        """vLLM > 0.34 (#61452) asks for the spec plus its allocation policy."""
+        from vllm.v1.core.single_type_kv_cache_manager import (  # noqa: PLC0415
+            FullAttentionManager)
+        return {name: FullAttentionManager.layer_config(spec)
+                for name, spec in self.get_kv_cache_spec().items()}
 
     def determine_available_memory(self) -> int:
         """Determines how much memory is needed for KV-cache
