@@ -133,6 +133,30 @@ vLLM offers no upstream runner for an x86 plugin that cannot use Triton
 (#61995 is non-x86 only), so the plugin keeps its own; the support question
 (#57684) is closed on that basis.
 
+A prototype on branch `mrv2-prototype` (vLLM 0.34.0rc4,
+`VLLM_OPENVINO_MRV2_PROTOTYPE=1`) subclasses that standalone runner
+(`StandaloneCPUModelRunner`) and keeps only the model, the KV cache and the
+forward call. Request lifecycle, batch, input preparation, sampler, grammar
+bitmask and preemption are vLLM's. On Qwen3-1.7B greedy output (sequential
+and 8 concurrent), penalties, JSON schema, `min_tokens` and `logit_bias`
+matched the plugin's runner, logprobs within 4e-5; single-stream decode was
+11% slower (21.5 vs 24.2 tok/s), 8 concurrent equal (153 tok/s). What it
+needed, and why the plugin does not switch:
+- Ten `vllm._cpu_ops` (`gather_block_table_cpu`, `post_update_cpu`,
+  `gumbel_sample_cpu`, ...) exist only in CPU builds of `_C`; the prototype
+  replaces the eight on the text path with PyTorch loops (seeded samples then
+  differ from the C++ op).
+- `torch.compile(fullgraph=True)` helpers (`compute_token_logprobs`,
+  `_compute_token_ranks`, `_apply_min_p`) raise under `TORCH_COMPILE_DISABLE=1`,
+  so logprobs fail until they are unwrapped.
+- No forward seam: `execute_model` calls `self.model(**model_inputs)` inline,
+  `sample` computes logits from hidden states at `logits_indices`, and
+  `load_model`/`initialize_kv_cache` assume vLLM's loader and attention
+  backends, so all four are overridden.
+- No drafts (`decode_query_len != 1` raises), so MTP and n-gram are lost, and
+  hybrid models select `MambaHybridModelState`, which Hybrid-PA's state slots
+  do not fit (not attempted).
+
 The copies track vLLM-side formats the plugin consumes. Since 0.33.0 the
 grammar bitmask gives each structured-output request a fixed block of
 `num_speculative_tokens + 1` rows, and `apply_grammar_bitmask` indexes it that
