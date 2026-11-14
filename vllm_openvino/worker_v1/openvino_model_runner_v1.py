@@ -118,6 +118,7 @@ class OpenVINOModelRunnerV1:
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.model_config.max_model_len,
             vocab_size=self.model_config.get_vocab_size(),
+            reasoning_config=vllm_config.reasoning_config,
         )
 
         # KV cache — set by worker after initialize_cache
@@ -908,6 +909,7 @@ class OpenVINOModelRunnerV1:
             or sampling_params.allowed_token_ids
             or sampling_params.bad_words
             or sampling_params.min_tokens
+            or sampling_params.thinking_token_budget is not None
             or sampling_params.structured_outputs is not None)
 
     def _propose_draft_token_ids(
@@ -946,6 +948,8 @@ class OpenVINOModelRunnerV1:
             apply_grammar_bitmask(
                 logits, self.input_batch.req_ids,
                 scheduler_output.scheduled_spec_decode_tokens, grammar_output)
+        if self.input_batch.thinking_budget:
+            self.input_batch.update_thinking_force()
 
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         if spec_tokens:

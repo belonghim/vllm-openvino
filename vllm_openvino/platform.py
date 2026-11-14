@@ -278,12 +278,6 @@ class OpenVinoPlatform(Platform):
                 "prompt_logprobs is not supported on the OpenVINO backend.",
                 parameter="prompt_logprobs",
                 value=params.prompt_logprobs)
-        if getattr(params, "thinking_token_budget", None) is not None:
-            raise VLLMValidationError(
-                "thinking_token_budget is not supported on the OpenVINO "
-                "backend.",
-                parameter="thinking_token_budget",
-                value=params.thinking_token_budget)
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:

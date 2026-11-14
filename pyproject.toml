@@ -24,7 +24,7 @@ dependencies = [
     "transformers >= 5.18.0",
     "vllm == 0.33.0",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [project.urls]
 Homepage = "https://github.com/belonghim/vllm-openvino"

@@ -454,6 +454,23 @@ as "HELLO 2028", as OpenVINO GenAI 2026.5 nightly does on the same IR; at 48 px
 both read it correctly with the same greedy output, so this is the model, not
 the plugin.
 
+## Thinking Token Budget
+
+`thinking_token_budget` follows Model Runner V2's CPU implementation
+(`CPUThinkingBudgetState`, `vllm/v1/worker/cpu/sampler.py`): a request is
+reasoning while its last reasoning start marker follows its last natural end
+marker, and once the tokens after that start marker (prompt included) reach
+the budget, the next token of `reasoning_end_str` gets logit `1e9` after every
+other logits stage and before temperature. Marker positions are cached per
+row, so each step scans only the new tokens. vLLM rejects the parameter
+unless the server runs with `--reasoning-parser` (or `--reasoning-config`).
+Requests with a budget get no n-gram drafts.
+
+Qwen3-1.7B-int4 (`--reasoning-parser qwen3`, greedy, 600 tokens): reasoning
+of 1926 characters unbudgeted, 0 / 122 / 452 at budgets 0 / 32 / 128; six
+concurrent requests (budgets 16, 64, none) returned the same text as single
+ones, also with n-gram speculation on.
+
 ## N-gram Speculative Decoding
 
 Only `method=ngram` is accepted, on PagedAttention and Hybrid-PA models
@@ -531,6 +548,10 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   403 tok/s at the same four context lengths, consistent with attention
   becoming about half of the time at 17k tokens. The OpenVINO node profile
   (`PERF_COUNT`) did not sum to the step time, so it was not used for shares.
+  The PagedAttention op's XAttention sparse prefill (inputs 17-19) is not
+  used: the CPU kernel applies it only when the step holds a single sequence
+  (`executor_pa.cpp`: `q.size(0) > 1 && B_seq == 1`), which vLLM's mixed
+  prefill/decode batches rarely produce, and it approximates attention.
 - **MoE decode is expert matmul.** `GatherMatmulCompressed` is ~62%
   (LFM2.5-8B-A1B) to ~78% (Gemma-4 26B-A4B) of the node time and attention
   2-4%. Decode is 34 ms/token on LFM2.5-8B-A1B and ~90 ms/token on Gemma-4

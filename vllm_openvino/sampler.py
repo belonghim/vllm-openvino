@@ -72,6 +72,8 @@ class SamplingMetadata:
     min_tokens: dict[int, tuple[int, list[int], set[int], bool]]
     min_p: torch.Tensor | None
     logprob_token_ids: dict[int, list[int]] | None = None
+    # row -> reasoning end token forced by thinking_token_budget this step.
+    thinking_force: dict[int, int] | None = None
 
 
 class OpenVINOSampler:
@@ -124,6 +126,11 @@ class OpenVINOSampler:
             _apply_logit_bias(logits, md.logit_bias)
         if not md.no_penalties:
             logits = self._apply_penalties(logits, md)
+        # Last, as in Model Runner V2, so no other stage weakens the forced
+        # end marker; temperature and top-k/top-p come after.
+        if md.thinking_force:
+            logits[list(md.thinking_force.keys()),
+                   list(md.thinking_force.values())] = 1.0e9
         return logits
 
     def _sample(self, logits: torch.Tensor,

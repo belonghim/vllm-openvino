@@ -10,7 +10,7 @@ GPU code paths exist (`VLLM_OPENVINO_DEVICE=GPU`) but are not part of the valida
 
 ## Requirements
 
-- Python >= 3.10
+- Python >= 3.11 (vLLM 0.33.0 requires it)
 - Linux (x86-64, AVX2+)
 
 ## Installation
@@ -267,7 +267,7 @@ The following vLLM features are compatible with the OpenVINO backend:
 - LoRA serving is not supported.
 - Pin memory is not supported.
 - `prompt_logprobs` (and `echo` with `logprobs`) is not supported; such requests are rejected with HTTP 400 because logits are computed only at sampled positions. Output-token `logprobs` work.
-- `thinking_token_budget` is rejected with HTTP 400, and custom logits processors (`--logits-processors`) fail at startup; the sampler applies only vLLM's builtin `min_p`, `logit_bias` and `min_tokens`.
+- Custom logits processors (`--logits-processors`) fail at startup; the sampler applies only vLLM's builtin `min_p`, `logit_bias` and `min_tokens`, plus `thinking_token_budget` (needs `--reasoning-parser`, see `docs/compatibility.md`).
 - Tensor/pipeline parallelism is not supported. Threads are scheduled across all visible cores, but multi-socket scaling is poor; see [CPU Tuning](#cpu-tuning-avx2).
 - vLLM V1 engine only.
 - Models without `ScaledDotProductAttention` ops are rejected at startup; re-export them with SDPA.

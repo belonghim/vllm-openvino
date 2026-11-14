@@ -34,7 +34,7 @@ class CachedRequestState:
 class InputBatch:
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
-                 vocab_size: int):
+                 vocab_size: int, reasoning_config=None):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
 
@@ -80,6 +80,21 @@ class InputBatch:
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
         self.logit_bias: dict[int, dict[int, float]] = {}
         self.min_tokens: dict[int, tuple[int, list[int], set[int], bool]] = {}
+
+        # thinking_token_budget, as Model Runner V2's CPUThinkingBudgetState:
+        # row -> [budget, last start marker, last natural end marker, scan
+        # position], and the end token forced this step (row -> token id).
+        markers = (
+            (reasoning_config.reasoning_start_token_ids,
+             reasoning_config.reasoning_end_token_ids,
+             reasoning_config.natural_reasoning_end_token_ids)
+            if reasoning_config is not None else (None, None, None))
+        self.think_start, self.think_end, self.think_natural_end = (
+            tuple(ids or ()) for ids in markers)
+        self.thinking_enabled = all(
+            (self.think_start, self.think_end, self.think_natural_end))
+        self.thinking_budget: dict[int, list[int]] = {}
+        self.thinking_force: dict[int, int] = {}
 
         # Rows freed by remove_request(), refilled smallest first.
         self._removed: list[int] = []
@@ -170,6 +185,11 @@ class InputBatch:
                 params.min_tokens, request.output_token_ids,
                 params.all_stop_token_ids,
                 params.structured_outputs is not None)
+        if (self.thinking_enabled
+                and params.thinking_token_budget is not None):
+            self.thinking_budget[req_index] = [
+                min(params.thinking_token_budget, np.iinfo(np.int32).max),
+                -1, -1, 0]
         return req_index
 
     def remove_request(self, req_id: str) -> int | None:
@@ -199,6 +219,7 @@ class InputBatch:
         self.bad_words_token_ids.pop(req_index, None)
         self.logit_bias.pop(req_index, None)
         self.min_tokens.pop(req_index, None)
+        self.thinking_budget.pop(req_index, None)
         return req_index
 
     def condense(self) -> None:
@@ -246,7 +267,7 @@ class InputBatch:
                     self.allowed_token_ids_mask[last_req_index])
                 self.allowed_token_ids_mask[last_req_index].fill_(False)
             for row_state in (self.bad_words_token_ids, self.logit_bias,
-                              self.min_tokens):
+                              self.min_tokens, self.thinking_budget):
                 state = row_state.pop(last_req_index, None)
                 if state is not None:
                     row_state[empty_index] = state
@@ -254,6 +275,41 @@ class InputBatch:
 
         del self._req_ids[num_reqs:]
         del self.req_output_token_ids[num_reqs:]
+
+    def update_thinking_force(self) -> None:
+        """Pick the reasoning end token to force for each row whose request
+        has spent its thinking budget, as Model Runner V2's
+        CPUThinkingBudgetState.apply does for a row without drafts: the
+        request is reasoning when its last start marker follows its last
+        natural end marker, and once the tokens after that start marker reach
+        the budget the next token of the forced end sequence is set (resuming
+        after a prefix of it that is already in place). Marker positions are
+        cached and only the tokens added since the last step are scanned."""
+        self.thinking_force.clear()
+        overlap = max(len(self.think_start), len(self.think_natural_end)) - 1
+        for row, state in self.thinking_budget.items():
+            budget, last_start, last_end, scan_pos = state
+            total_len = int(self.num_tokens_no_spec[row])
+            if scan_pos > total_len:
+                scan_pos, last_start, last_end = 0, -1, -1
+            tokens = self.token_ids_cpu[row, scan_pos:total_len]
+            last_start = _last_match(tokens, self.think_start, scan_pos,
+                                     last_start)
+            last_end = _last_match(tokens, self.think_natural_end, scan_pos,
+                                   last_end)
+            state[1:] = last_start, last_end, max(0, total_len - overlap)
+            if last_start < 0 or last_start <= last_end:
+                continue
+            if total_len - last_start - len(self.think_start) < budget:
+                continue
+            end_prefix_len = 0
+            for prefix_len in range(
+                    1, min(total_len, len(self.think_end) - 1) + 1):
+                if (tuple(self.token_ids_cpu[row, total_len - prefix_len:
+                                             total_len].tolist())
+                        == self.think_end[:prefix_len]):
+                    end_prefix_len = prefix_len
+            self.thinking_force[row] = self.think_end[end_prefix_len]
 
     def refresh_metadata(self) -> None:
         """Rebuild the sampling metadata if requests were added or removed."""
@@ -309,4 +365,19 @@ class InputBatch:
             min_tokens=self.min_tokens,
             min_p=self.min_p[:num_reqs].clone() if self.min_p_reqs else None,
             logprob_token_ids=logprob_token_ids,
+            thinking_force=self.thinking_force,
         )
+
+
+def _last_match(tokens: np.ndarray, marker: tuple[int, ...], offset: int,
+                current: int) -> int:
+    """Position (offset-based) of the last occurrence of `marker` in
+    `tokens`, or `current` if there is none."""
+    num_windows = len(tokens) - len(marker) + 1
+    if num_windows <= 0:
+        return current
+    hit = tokens[:num_windows] == marker[0]
+    for j in range(1, len(marker)):
+        hit &= tokens[j:j + num_windows] == marker[j]
+    found = np.flatnonzero(hit)
+    return offset + int(found[-1]) if found.size else current
