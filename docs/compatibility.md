@@ -277,7 +277,7 @@ storage depends on prefix caching:
   recomputed before it is. After verification the accepted state becomes the
   request's private slot, so nothing is copied; the next step without drafts
   reads it and writes block checkpoints again. The temporary and private
-  slots (`max_num_seqs * (2 + k)`) come out of the KV pool. MTP's KV layer
+  slots (`2 + k` per drafting request) come out of the KV pool. MTP's KV layer
   uses the expanded 32-token block table like the main model. Verified on
   Qwen3.5-2B (MTP k=1, `--max-num-seqs 8`): non-hit requests gave the same
   greedy text as MTP without prefix caching, a prompt holding a previous
@@ -359,8 +359,10 @@ text because of prefill vs decode numerics.
   with prefix caching on).
 - Hybrid-PA without prefix caching takes the conv/SSM state slots out of the
   KV pool first: one per `--max-num-seqs` request plus one, and `1 + k` more
-  per request with `k` speculative tokens (`2 + k` per request, and nothing
-  without drafts, when prefix caching keeps checkpoints). On Qwen3.6-35B-A3B a slot is about
+  per drafting request with `k` speculative tokens (`2 + k` per drafting
+  request, and nothing without drafts, when prefix caching keeps checkpoints).
+  At most `min(max_num_seqs, 8)` requests draft in one step; the rest decode
+  without drafts that step. On Qwen3.6-35B-A3B a slot is about
   64 MiB, so the default 128 requests reserve 8 GiB and a 2 GiB pool is left with no KV
   blocks; lower `--max-num-seqs` (4 served it in the same pool). The startup
   warning reports the reservation.
@@ -501,10 +503,13 @@ Hybrid-PA: a draft request runs with `la.cache_interval=1` and
 `la.block_indices = [committed slot, 1+d temporary slots]`, so token t's
 conv/SSM state lands in temporary slot t. After verification the slot of the
 last accepted token becomes the committed slot and the rest return to the pool.
-With speculation the pool holds `max_num_seqs * (k + 2) + 1` slots, so lower
-`--max-num-seqs` when enabling it: on Qwen3.5-0.8B (about 19.7 MiB per slot),
-k=4 and the default 128 requests reserve 14.8 GiB and do not start in a 16 GiB
-container; `--max-num-seqs 16` does.
+Drafts go to at most 8 requests per step (`MAX_DRAFTING_REQS`), so the pool
+holds `max_num_seqs + 1 + min(max_num_seqs, 8) * (k + 1)` slots; beyond 8
+concurrent requests verification is no longer free on CPU (table below).
+Before the cap, Qwen3.5-0.8B with k=4 and the default 128 requests reserved
+14.8 GiB and did not start in a 16 GiB container; with it, it starts with or
+without prefix caching and served three waves of 16 concurrent copy-heavy
+requests (6624 of 7500 drafts accepted).
 
 Measured (8 CPUs, k=4, `prompt_lookup_min=5`, `prompt_lookup_max=8`,
 tok/s, baseline -> spec; copy-heavy / free-form output):
@@ -590,8 +595,7 @@ On four Korean prompts (Qwen3.5-2B, k=1) the gain shrinks: 20.6 -> 21.7
 costs 1.43x a decode step on the MoE model (82 -> 117 ms) against ~1.05x on
 the dense one, which is why concurrency erases the gain sooner there.
 Use k=1 for mixed load; k=2 helps a single stream and loses at 8 concurrent
-requests. The slot pool and `--max-num-seqs` advice of the n-gram section
-applies (k=1: `max_num_seqs * 3 + 1` slots).
+requests. The n-gram section's cap of 8 drafting requests applies.
 
 Checked on Qwen3.5-0.8B with k=2: twelve concurrent requests mixing greedy,
 seeded sampling, JSON schema, logprobs, `thinking_token_budget` and images

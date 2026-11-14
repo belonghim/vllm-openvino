@@ -79,18 +79,25 @@ def apply_grammar_bitmask(logits: torch.Tensor, req_ids: list[str],
             rejected, -float("inf"))
 
 
+# Hybrid-PA requests drafting in one step. Each holds 1 + k temporary state
+# slots (plus a private slot with checkpoints) taken from the KV pool; at 8
+# concurrent requests verification is no longer free on CPU (free-form output
+# gains nothing with MTP and loses up to 10% with n-gram).
+MAX_DRAFTING_REQS = 8
+
+
 def num_state_slots(vllm_config: VllmConfig, checkpoints: bool = False) -> int:
     """Physical conv/SSM state slots: one committed slot per request, plus
-    1+k temporary per-token slots per request when drafts are verified. With
-    block checkpoints only the draft slots are extra (the committed state
-    then lives in a checkpoint or a private slot)."""
+    1+k temporary per-token slots per drafting request. With block
+    checkpoints only the draft slots are extra (the committed state then
+    lives in a checkpoint or a private slot)."""
     max_seqs = vllm_config.scheduler_config.max_num_seqs
     spec_config = vllm_config.speculative_config
     num_spec_tokens = spec_config.num_speculative_tokens if spec_config else 0
-    extra = max_seqs * (1 + num_spec_tokens) if num_spec_tokens else 0
+    drafting = min(max_seqs, MAX_DRAFTING_REQS) if num_spec_tokens else 0
     if checkpoints:
-        return extra + max_seqs if num_spec_tokens else 0
-    return max_seqs + 1 + extra
+        return drafting * (2 + num_spec_tokens)
+    return max_seqs + 1 + drafting * (1 + num_spec_tokens)
 
 
 class OpenVINOModelRunnerV1:
@@ -962,7 +969,17 @@ class OpenVINOModelRunnerV1:
             if drafts[i] and not self._supports_drafts(
                     self.requests[req_id].sampling_params):
                 drafts[i] = []
+        self._cap_drafting_reqs(drafts)
         self._draft_token_ids = DraftTokenIds(req_ids, drafts)
+
+    def _cap_drafting_reqs(self, drafts: list[list[int]]) -> None:
+        """Hybrid-PA's state slot pool holds draft slots for
+        MAX_DRAFTING_REQS requests (see num_state_slots)."""
+        if not (self.conv_caches or self.ssm_caches):
+            return
+        rows = [i for i, d in enumerate(drafts) if d]
+        for i in rows[MAX_DRAFTING_REQS:]:
+            drafts[i] = []
 
     def _propose_mtp_drafts(self, step_spans: list) -> None:
         """MTP drafts for requests that can take drafts. Their MTP cache
@@ -987,8 +1004,9 @@ class OpenVINOModelRunnerV1:
             spans, self.input_batch.token_ids_cpu,
             self.kv_caches[self.num_main_kv_layers],
             self.block_size // self._kv_blocks_per_block)))
-        self._draft_token_ids = DraftTokenIds(
-            req_ids, [drafts.get(req_id, []) for req_id in req_ids])
+        draft_lists = [drafts.get(req_id, []) for req_id in req_ids]
+        self._cap_drafting_reqs(draft_lists)
+        self._draft_token_ids = DraftTokenIds(req_ids, draft_lists)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         draft_token_ids, self._draft_token_ids = self._draft_token_ids, None
