@@ -843,13 +843,31 @@ class OpenVINOModelRunnerV1:
             logger.debug("[OV-RUNNER] Prefix hit on blocks filled this step: "
                          "%d waves of %s requests", len(waves),
                          [len(wave) for wave in waves])
-            # Logits alias the infer request's output tensor; copy each wave's.
-            wave_logits = torch.cat([
-                self._forward(scheduler_output, wave).clone() for wave in waves])
-            row_of = {req_id: row for row, req_id in
-                      enumerate(req_id for wave in waves for req_id in wave)}
-            logits = wave_logits[torch.tensor(
-                [row_of[req_id] for req_id in self.input_batch.req_ids])]
+            # Logits and the MTP inputs alias the infer request's tensors;
+            # copy each wave's. A drafting request has 1 + drafts logits rows.
+            spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+            wave_logits, hidden, embeds = [], [], []
+            rows_of, token_start = {}, {}
+            num_rows = num_tokens = 0
+            for wave in waves:
+                wave_logits.append(self._forward(scheduler_output, wave).clone())
+                if self._use_mtp:
+                    hidden.append(self.model.last_hidden_states.copy())
+                    embeds.append(self.model.last_inputs_embeds.copy())
+                for req_id in wave:
+                    n = 1 + len(spec_tokens.get(req_id, ()))
+                    rows_of[req_id] = range(num_rows, num_rows + n)
+                    num_rows += n
+                    token_start[req_id] = num_tokens + self._req_token_start[req_id]
+                num_tokens += sum(scheduler_output.num_scheduled_tokens[req_id]
+                                  for req_id in wave)
+            if self._use_mtp:
+                self.model.last_hidden_states = np.concatenate(hidden)
+                self.model.last_inputs_embeds = np.concatenate(embeds)
+                self._req_token_start.update(token_start)
+            logits = torch.cat(wave_logits)[torch.tensor(
+                [row for req_id in self.input_batch.req_ids
+                 for row in rows_of[req_id]])]
         self._execute_state = (scheduler_output, logits)
 
     def _forward(

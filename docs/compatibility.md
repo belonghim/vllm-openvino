@@ -292,7 +292,25 @@ storage depends on prefix caching:
 - vLLM caches a block when it allocates it, so a request can hit a block that
   another request fills in the same step. The runner then splits the batch
   into waves (writer first) so the checkpoint read follows its write. Without
-  waves, 3 of 4 concurrent identical prompts had different logprobs.
+  waves, 3 of 4 concurrent identical prompts had different logprobs. A
+  drafting request has `1 + drafts` logits rows, and MTP reads the main
+  model's hidden states and embeddings at the request's token offset, so the
+  runner concatenates every wave's rows and MTP inputs in batch order. With
+  one row per request, a same-step hit next to a drafting request killed the
+  engine (`IndexError` in `_sample_with_drafts`).
+- Mixed-load stress test (8 CPUs, 16 GiB, 8-16 concurrent greedy, sampled,
+  prefix-hit, image, logprobs, JSON and mid-stream aborted requests, with a
+  per-step check that free + private + temporary state slots equal the pool
+  with no duplicates): Qwen3.5-2B MTP for 60 min (650 requests, 63% prefix
+  hits) and 20 min with a 7.9k-token pool (20 preemptions), Qwen3.5-0.8B
+  n-gram k=4 for 20 min (9 preemptions), each ending with two 16-request
+  draft bursts. No errors, the slot count never drifted, and fixed prompts
+  sent with a fresh `cache_salt` gave the same output before and after.
+  A prefix hit can change greedy output against a cold run when the cold
+  prefill's chunk boundaries differ: restoring the bf16 checkpoint and reading
+  past tokens from the u8 KV cache moved first-token logprobs by up to 0.07
+  and broke a tie. With `--max-num-batched-tokens 256` (chunks on checkpoint
+  boundaries) hit and cold were bit-identical.
 - With speculative decoding, a draft step reads the same checkpoint (or the
   request's private slot) and writes per-token states (`la.cache_interval`
   1) into temporary slots, as the slot pool below does. A token that ends a
