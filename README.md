@@ -4,6 +4,8 @@
 
 ## What is this?
 
+It runs OpenVINO IR models at OpenVINO Model Server speed while keeping vLLM's scheduler, API and ecosystem. On the same IR and 8 CPUs it matched OVMS up to 8 concurrent requests and kept batching past 8 (Qwen3-1.7B, 16 concurrent: 254 vs 146-157 tok/s). Single-stream decode was 1.5x faster than vLLM's own CPU backend on a w4a16 checkpoint. See `docs/compatibility.md` ("Comparison with OVMS and vLLM's CPU Backend").
+
 This project provides an OpenVINO backend for vLLM, allowing you to run vLLM's OpenAI-compatible API server on Intel CPUs. It integrates OpenVINO as the inference execution layer, leveraging vLLM's scheduler, PagedAttention, and API server infrastructure. Models must be pre-exported to OpenVINO IR format (openvino_model.xml + openvino_model.bin).
 
 GPU code paths exist (`VLLM_OPENVINO_DEVICE=GPU`) but are not part of the validated configuration; every measurement in this README is CPU-only.
