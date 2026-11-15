@@ -645,6 +645,21 @@ returned HTTP 200, and greedy repeats differed only where the run without
 speculation also differed (chunk boundaries of a 3k-token prompt); eight
 1000-token requests in a 9.5k-token pool completed through 4 preemptions.
 
+Gemma-4 MTP is not supported. Its drafter is a separate 4-layer model
+(`google/gemma-4-*-it-assistant`) whose attention layers have only Q
+projections and read K/V from the target's last full-attention and last
+sliding-window layers. No OpenVINO IR of it exists: the published Gemma-4 IRs
+ship no drafter, and the optimum-intel export PRs (#1763, #1911) are unmerged.
+OpenVINO GenAI 2026.4 runs it only in its stateful SDPA pipeline at batch 1,
+on a target exported with extra outputs (`mtp_last_hidden_state`,
+`mtp_{full,sliding}_attention_{key,value}`) that it passes to the drafter as
+dense tensors every step; its PagedAttention pipeline has no Gemma-4 MTP. A
+PA version here would need that export plus a drafter whose attention reads
+the target layers' paged u8 cache. N-gram drafting works on Gemma-4
+meanwhile: gemma-4-E2B copying 300 tokens of code ran at 28 tok/s including
+prefill (smoke-test decode without speculation: 17.5), 138 of 152 drafts
+accepted.
+
 ## Performance Profile
 
 Measured on Ryzen 9 7900 (no AMX), 8-CPU quota, OpenVINO 2026.4.1, greedy
