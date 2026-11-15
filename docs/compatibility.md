@@ -799,6 +799,43 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   decode latency changed by -10% to +6% (92.7 / 98.4 / 83.1 ms/tok), within
   noise.
 
+## Comparison with OVMS and vLLM's CPU Backend
+
+Same host, `--cpus=8 --memory=16g`, same client (chat completions, greedy,
+256 tokens with `ignore_eos`, streaming). Decode is single-stream tok/s after
+the first token; c4-c16 are aggregate tok/s over one wave of concurrent
+requests; prefill is a 2.1k-token prompt. Plugin `113e404` on vLLM 0.33.0 and
+OpenVINO 2026.5 nightly; OVMS 2026.4.1 (`--task text_generation`, defaults
+plus `--rest_workers 64`); `vllm/vllm-openai-cpu` 0.33.0
+(`VLLM_CPU_KVCACHE_SPACE=4`, threads bound to 8 CPUs). Two alternating runs
+each; they agreed within 5%.
+
+| Qwen3-1.7B | decode | c4 | c8 | c16 | c16 TTFT | prefill tok/s | peak memory |
+|---|---|---|---|---|---|---|---|
+| plugin, int4 IR | 22.3 | 78 | 147 | 254 | 0.55 s | 604-641 | 4.8-5.1 GiB |
+| OVMS, same IR | 21.5-22.6 | 83-86 | 151-155 | 146-157 | 7.0-7.4 s | 606-611 | 1.6 GiB |
+| vLLM CPU, w4a16 | 15.1 | 51 | 83 | 115 | 1.2 s | 263 | 9.4 GiB |
+| vLLM CPU, bf16 | 8.0 | 32 | 60 | 112 | 0.7 s | 520 | 11.3 GiB |
+
+| Qwen3.5-2B (hybrid) | decode | c4 | c8 | c16 | c16 TTFT | prefill tok/s | peak memory |
+|---|---|---|---|---|---|---|---|
+| plugin, int4 IR | 21.0-21.2 | 59-60 | 96 | 131-133 | 2.0-2.2 s | 213-220 | 7.3-9.2 GiB |
+| OVMS, same IR | 21.3 | 64 | 100 | 96 | 11.7 s | 198 | 1.8 GiB |
+
+- On the same IR the plugin and OVMS run at the same speed up to 8
+  concurrent requests (OVMS 5-8% ahead at c4-c8 on Qwen3.5); both execute the
+  same OpenVINO PagedAttention kernels.
+- OVMS admitted only 8 requests at a time here: its executor log showed at
+  most 8 scheduled requests, so c16 ran in two waves (unary and streaming
+  alike). Its default `rest_workers` (the CPU count) capped it at 4 until set
+  to 64, and no documented option lifted the 8. The plugin batches all 16.
+- vLLM's CPU backend is 1.5x (w4a16) to 2.8x (bf16) slower single-stream and
+  its w4a16 prefill is 2.3x slower; it reserves its KV space up front.
+- Memory: OVMS grows its KV cache on demand (`cache_size 0`); the plugin's
+  default pool is sized to the container limit and its pages become resident
+  as blocks are used, so its peak reflects the pool touched by the run, not a
+  floor. vLLM CPU's figure includes its 4 GiB KV space.
+
 ## Known Limitations
 
 - Models without SDPA ops are not supported.
