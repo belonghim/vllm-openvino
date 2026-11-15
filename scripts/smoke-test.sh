@@ -247,6 +247,74 @@ PYEOF
   return $rc
 }
 
+# Hybrid-PA waves next to drafts: two identical prompts in one step make the
+# second hit blocks the first fills in that step (split into waves) while an
+# MTP request drafts; this once crashed the engine with an IndexError.
+run_spec_prefix_check() {
+  local model_dir="$MODEL_BASE/Qwen3.5-0.8B-int4-ov"
+  [[ -d "$model_dir" ]] || { echo "  SKIP: model dir not found: $model_dir"; return 0; }
+  echo ""
+  echo "=== Same-step prefix hit next to MTP drafts (Qwen3.5-0.8B-int4-ov) ==="
+  cleanup_container
+  podman run --replace -d --name "$CONTAINER_NAME" \
+    -p 8080:8080 --cpus=8 --memory=16g \
+    -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino:Z" \
+    -v "$model_dir:/models:Z" \
+    "${SMOKE_ENV_ARGS[@]}" \
+    "$IMAGE" --port=8080 --model /models --max-model-len 4096 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":2}' >/dev/null
+  local ready=false
+  for _ in $(seq 1 60); do
+    curl -sf "$API_URL/v1/models" >/dev/null 2>&1 && { ready=true; break; }
+    sleep 5
+  done
+  if [[ "$ready" != true ]]; then
+    echo "  FAIL: container startup timeout"
+    podman logs "$CONTAINER_NAME" 2>&1 | tail -10
+    cleanup_container
+    return 1
+  fi
+  python3 - "$API_URL" <<'PYEOF'
+import concurrent.futures as cf, json, re, sys, time, urllib.request
+url = sys.argv[1]
+def post(body):
+    req = urllib.request.Request(url + "/v1/completions", json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=900) as r:
+        return json.load(r)["usage"]["completion_tokens"]
+def metric(name):
+    text = urllib.request.urlopen(url + "/metrics").read().decode()
+    m = re.search(rf"^{name}\{{[^}}]*\}} (\S+)", text, re.M)
+    return float(m.group(1)) if m else 0.0
+results = []
+try:
+    with cf.ThreadPoolExecutor(3) as ex:
+        for rnd in range(3):
+            drafting = ex.submit(post, {"model": "/models", "prompt": f"Count from 1 to 500, round {rnd}: 1, 2, 3,",
+                                        "max_tokens": 300, "temperature": 0, "ignore_eos": True})
+            time.sleep(2)
+            shared = f"Round {rnd}. " + " ".join(f"item{i}" for i in range(400)) + "\nSummarize:"
+            pair = [ex.submit(post, {"model": "/models", "prompt": shared, "max_tokens": 16,
+                                     "temperature": 0, "ignore_eos": True}) for _ in range(2)]
+            results += [f.result() for f in pair] + [drafting.result()]
+except Exception as e:
+    print(f"  request failed: {e}")
+    sys.exit(1)
+drafts = metric("vllm:spec_decode_num_draft_tokens_total")
+hits = metric("vllm:prefix_cache_hits_total")
+print(f"  completion_tokens={results} drafts={drafts:.0f} prefix_hit_tokens={hits:.0f}")
+sys.exit(0 if results == [16, 16, 300] * 3 and drafts > 0 and hits > 0 else 1)
+PYEOF
+  local rc=$?
+  if podman logs "$CONTAINER_NAME" 2>&1 | grep -q Traceback; then
+    echo "  FAIL: Traceback in server log"
+    rc=1
+  fi
+  cleanup_container
+  (( rc == 0 )) && echo "  Prefix hit next to drafts: OK" || echo "  FAIL: prefix hit next to drafts"
+  return $rc
+}
+
 main() {
   echo "=== vllm-openvino Performance Smoke Test ==="
   printf 'Models:'; printf ' [%s]' "${MODELS[@]}"; echo
@@ -263,6 +331,7 @@ main() {
     fi
   done
   run_preemption_check || any_failed=true
+  run_spec_prefix_check || any_failed=true
 
   echo ""
   echo "Results saved: $RESULTS_FILE"
