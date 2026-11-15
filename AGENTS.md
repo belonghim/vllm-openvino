@@ -79,4 +79,4 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **Gemma-4 PA 입력은 rank를 유지해 넣는다** — `per_layer_inputs` `[tokens, 1, layers, hidden]`, `token_type_ids` `[tokens, 1]`. 빠지면 sliding-window 레이어에서 `Eltwise ... dim index: 0 mismatch`.
 - **비전 merger에는 `hidden_states`, `attention_mask`, `rotary_pos_emb` 세 입력을 모두 넘긴다** — 하나만 넘기면 SDPA shape 불일치.
 - **HuggingFace 원본은 로딩하지 않는다** — OpenVINO IR만 지원한다. IR 파일명과 모델별 mm 입력 키는 `docs/compatibility.md`의 Model Files 참조.
-- **미지원**: Pin memory, LoRA, TP·PP. 멀티소켓은 이득이 작으니 한 소켓 cpuset에 바인딩한다(README CPU Tuning).
+- **미지원**: Pin memory, LoRA, TP·PP. 멀티소켓은 이득이 작으니 한 소켓 cpuset에 바인딩한다(README CPU placement).

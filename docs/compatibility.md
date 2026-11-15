@@ -7,7 +7,8 @@
   has the MoE prefill fix (#39086) and reads IRs exported with 2026.5 (LFM3)
 - Linux x86-64 with AVX2 or newer
 - OpenVINO IR model; HuggingFace source models are not loaded directly
-- Tensor and pipeline parallelism are unsupported; multi-socket scaling is poor (see CPU Tuning in README)
+- Tensor and pipeline parallelism are unsupported; multi-socket scaling is poor
+  (see Performance Profile)
 - vLLM V1 engine only
 
 Set `TORCH_COMPILE_DISABLE=1`. torch.compile/Inductor is incompatible with
@@ -15,165 +16,105 @@ the OpenVINO execution path.
 
 ## Upstream vLLM Compatibility
 
-The plugin ships its own worker and V1-style model runner (MRV1). vLLM 0.33.0
-selects MRV2 only when `HAS_TRITON` is true. With the PyPI `vllm` wheel it is
-false on CPU hosts even if Triton is installed, because vLLM requires exactly
-one active GPU driver, so vLLM falls back to MRV1. The official vLLM CPU build
-(`+cpu`) ships triton-cpu
-([#58140](https://github.com/vllm-project/vllm/pull/58140)) and would select
-MRV2, as would any Triton install with `CUDA_VISIBLE_DEVICES=""`. Set
-`VLLM_USE_V2_MODEL_RUNNER=0` in those setups. vLLM marks MRV1 deprecated since
-0.29.0; 0.33.0 still ships it (`gpu_input_batch.py`, `cpu_model_runner.py`,
-the V1 `Sampler`). Releases with #63373 (below) remove the variable; leave it
-unset there.
+The plugin ships its own worker and model runner and keeps trimmed copies of
+the MRV1 pieces it used, which give the same output as vLLM 0.32's:
+`sampler.py` (V1 `Sampler`, `SamplingMetadata`), `worker_v1/input_batch.py`
+(`InputBatch`, `CachedRequestState`), `worker_v1/ngram_proposer.py`, and
+`apply_grammar_bitmask` in the runner (about 3x faster than vLLM's xgrammar
+call on CPU). It imports none of the modules upstream removes. The sampler
+needs no `torch.ops._C` kernel; vLLM's CPU path calls `greedy_argmax` and
+`fused_gumbel_argmax`, which the `VLLM_TARGET_DEVICE=empty` wheel lacks.
 
-Installing the triton-cpu wheel into a `VLLM_TARGET_DEVICE=empty` install does
-not change this: `vllm.triton_utils.importing` recognizes triton-cpu only when
-`"cpu" in version("vllm")`, so the probe still reports no active driver,
-`HAS_TRITON` stays false and MRV1 is selected. With the version string faked to
-`+cpu` (MRV2 selected by config), the plugin's own worker still served
-Qwen3-1.7B on the PagedAttention path. Hybrid-PA, multimodal, n-gram speculation and structured output were not tested under
-that configuration.
+vLLM 0.33.0 selects MRV2 only when `HAS_TRITON` is true. With the PyPI wheel
+it is false on CPU hosts even with Triton installed (vLLM requires exactly one
+active GPU driver), and installing triton-cpu into an `empty` install does not
+change that (`vllm.triton_utils.importing` accepts triton-cpu only when the
+vLLM version contains `cpu`). The official `+cpu` build ships triton-cpu
+(#58140) and would select MRV2, as would any Triton install with
+`CUDA_VISIBLE_DEVICES=""`; set `VLLM_USE_V2_MODEL_RUNNER=0` there. Releases
+with #63373 remove the variable; leave it unset there.
 
 Tracked upstream:
 
-- [vllm-project/vllm#62576](https://github.com/vllm-project/vllm/pull/62576)
-  (in 0.33.0) moves the MRV2 Triton check from config validation to
-  `gpu_worker.Worker`. It keeps the MRV1 fallback for every platform except
-  the unspecified one, and the plugin's worker does not derive from
-  `gpu_worker.Worker`, so it does not affect the plugin.
-- [vllm-project/vllm#61995](https://github.com/vllm-project/vllm/pull/61995)
-  (merged 2026-10-30, not in 0.33.0) adds `StandaloneCPUModelRunner`
-  (`vllm/v1/worker/cpu/standalone_model_runner.py`), an MRV2 runner with no
-  dependency on `vllm/v1/worker/gpu`. It is selected when
-  `Platform.uses_standalone_cpu_model_runner()` is true:
-  `not HAS_TRITON and cpu_architecture != X86` (`platforms/cpu.py`), i.e. Arm,
-  POWER, s390x, RISC-V. On x86 without Triton `use_v2_model_runner` still takes
-  the "requires Triton; using the V1 model runner" branch, so nothing changes
-  for this plugin on x86.
-  The runner is a different design from MRV1: a per-step `InputBatch`
-  dataclass over a persistent `CPURequestState` indexed by `idx_mapping`, a
-  PyTorch `CPUSampler`, and per-model `ModelState`s (default, mamba-hybrid,
-  encoder-only, encoder-decoder). Ten `torch.ops._C.*_cpu` ops from `csrc/cpu`
-  (block-table gather, slot mapping, prefill inputs, position/seq-lens,
-  M-RoPE, combine sampled/draft tokens, post-update, prompt-logprob token ids,
-  Gumbel sample, logit bias) are missing from the `VLLM_TARGET_DEVICE=empty`
-  wheel, like the `greedy_argmax` kernel of the V1 sampler. Not supported: speculative decoding
-  (n-gram included), prompt embeddings, custom logits processors, decode and
-  prefill context parallelism, LoRA tower/connector. Extending it to x86 was
-  suggested on #57684; it would still not run the plugin's OpenVINO runner.
-- [vllm-project/vllm#63373](https://github.com/vllm-project/vllm/pull/63373)
-  (merged 2026-11-07, not in 0.33.0) removes MRV1: `gpu_input_batch.py`,
-  `cpu_model_runner.py`, the V1 `Sampler`, `VLLM_USE_V2_MODEL_RUNNER` and
-  `use_v2_model_runner`, and makes `CpuPlatform` refuse x86 without Triton
-  (the plugin's platform is not `CpuPlatform`). The plugin imports none of the
-  removed modules: it keeps its own trimmed copies of the MRV1 pieces it used,
-  which give the same output as vLLM 0.32's (`sampler.py` for the V1 `Sampler`
-  and `SamplingMetadata`, `worker_v1/input_batch.py` for `InputBatch` and
-  `CachedRequestState`, `worker_v1/ngram_proposer.py`, and
-  `apply_grammar_bitmask` in the runner, about 3x faster than vLLM's xgrammar
-  call on CPU). The MRV2 replacements (`vllm/v1/worker/gpu/input_batch.py`,
-  `block_table.py`, `sample/gumbel.py`, ...) are Triton kernels, and #61995's
-  CPU runner needs the C++ ops above and a different runner state design, so
-  neither is a drop-in.
-  It also changes the scheduler-worker interface to MRV2's, which the runner
-  and worker accept alongside 0.33.0's: `CachedRequestData` loses
+- [#61995](https://github.com/vllm-project/vllm/pull/61995) (merged
+  2026-10-30, not in 0.33.0) adds `StandaloneCPUModelRunner`, an MRV2 runner
+  with no `vllm/v1/worker/gpu` dependency. It is selected only when
+  `not HAS_TRITON and cpu_architecture != X86`, so nothing changes on x86. It
+  needs ten `torch.ops._C.*_cpu` ops missing from the `empty` wheel and does
+  not support speculative decoding.
+- [#63373](https://github.com/vllm-project/vllm/pull/63373) (merged
+  2026-11-07, not in 0.33.0) removes MRV1 (`gpu_input_batch.py`,
+  `cpu_model_runner.py`, the V1 `Sampler`, `VLLM_USE_V2_MODEL_RUNNER`) and
+  makes `CpuPlatform` refuse x86 without Triton (the plugin's platform is not
+  `CpuPlatform`). It also moves the scheduler-worker interface to MRV2's, which
+  the runner and worker accept alongside 0.33.0's: `CachedRequestData` loses
   `resumed_req_ids` and `all_token_ids`, `ModelRunnerOutput` loses
-  `req_id_to_index` (the scheduler indexes by `req_ids` order),
-  `NewRequestData.prefill_token_ids` becomes required, and a preempted request
-  is resumed through `scheduled_new_reqs` with `prefill_token_ids` holding the
-  prompt and its generated tokens. The runner restores the generated tokens
-  into `output_token_ids`, so the re-prefill input, penalties and n-gram
-  lookups see them, and keeps the request's `torch.Generator`, so a seeded
-  request continues its random sequence. With the variable gone from vLLM's
-  list, the platform's `validate_environ` rejects
-  `VLLM_USE_V2_MODEL_RUNNER` values other than `1` as upstream does.
-  Verified on a 0.33.0 image with the wheel of the merge
-  commit (`aac1b2a4f`) installed: Qwen3-1.7B with a pool of about 2k tokens (8
-  concurrent greedy requests, half with `repetition_penalty`, 4 preemptions)
-  returned the same text as 0.33.0 under the same preemptions, while dropping
-  the restore changed all 4 preempted requests; Qwen3.5-0.8B (Hybrid-PA, 6
-  preemptions), an image request, structured output and sequential requests
-  ran without errors. Seeded sampling (`temperature=0.8`, 8 seeds, 3
-  preemptions) matched 0.33.0 on all 8 requests; with a fresh generator on
-  resume the 3 preempted requests diverged. Hybrid-PA output under preemption differs from run to
-  run on 0.33.0 itself, so it was not compared token for token. An image
-  built with `--build-arg VLLM_SPEC=<merge-commit wheel>` (dependencies
-  resolved, torch `2.14.0+cpu`) passed `scripts/smoke-test.sh` on every
-  serving path and the preemption check, at the same throughput as 0.33.0 on
-  the same host. The new
-  `encoder_input_updates` only release or restore the worker's copy of
-  multimodal payloads; the runner keeps its own `mm_features` and ignores them.
-- [vllm-project/vllm#61452](https://github.com/vllm-project/vllm/pull/61452)
-  (merged after v0.34.0rc3, so expected in 0.35) moves allocation policy from
-  `KVCacheSpec` onto the KV cache managers: `FullAttentionSpec` is removed and
-  `WorkerBase.get_kv_cache_spec()` becomes `get_kv_cache_layer_configs()`,
-  returning a `KVCacheLayerConfig` (manager config + spec) per layer. The
-  worker supports both: it imports `AttentionSpec` when `FullAttentionSpec` is
-  gone and wraps each spec in `FullAttentionManager.layer_config()`.
-  `page_size_padded` stays on `AttentionSpec`, so the u8 scale rows and the
-  Hybrid-PA checkpoints still size the pool: on main `5ec99956a` Qwen3-1.7B
-  and Qwen3.5-0.8B planned the same blocks as on 0.33.0 (2024 and 354 at
-  4 GiB) with identical greedy output, MTP drafted with 77% acceptance, and the
-  smoke test passed on both frontends. That main pins `torchvision==0.29.2`.
-- [vllm-project/vllm#53558](https://github.com/vllm-project/vllm/pull/53558)
-  (in 0.33.0, experimental) lets a platform supply a `KVCacheConfigBuilder`
-  for grouping and placement. The plugin keeps the default: Hybrid-PA exposes
-  only attention specs and allocates the conv/SSM pool itself, so core
-  grouping has nothing to decide.
+  `req_id_to_index`, `NewRequestData.prefill_token_ids` becomes required, and
+  a preempted request resumes through `scheduled_new_reqs` with
+  `prefill_token_ids` holding prompt plus generated tokens. The runner
+  restores the generated tokens into `output_token_ids` (so penalties and
+  n-gram lookups see them) and keeps the request's `torch.Generator` (so a
+  seeded request continues its sequence). The platform's `validate_environ`
+  rejects `VLLM_USE_V2_MODEL_RUNNER` values other than `1`, as upstream does.
+  Verified with the merge-commit wheel (`aac1b2a4f`): under the same
+  preemptions Qwen3-1.7B greedy and seeded output matched 0.33.0 (dropping the
+  restore or the generator changed every preempted request), and the smoke
+  test passed at 0.33.0's throughput. `encoder_input_updates` only manage the
+  worker's copy of multimodal payloads; the runner keeps its own
+  `mm_features`.
+- [#61452](https://github.com/vllm-project/vllm/pull/61452) (merged after
+  v0.34.0rc3, expected in 0.35) moves allocation policy from `KVCacheSpec`
+  onto the KV cache managers: `FullAttentionSpec` is removed and
+  `get_kv_cache_spec()` becomes `get_kv_cache_layer_configs()`. The worker
+  supports both: it imports `AttentionSpec` when `FullAttentionSpec` is gone
+  and wraps each spec in `FullAttentionManager.layer_config()`.
+  `page_size_padded` stays on `AttentionSpec`. On main `5ec99956a`
+  Qwen3-1.7B and Qwen3.5-0.8B planned the same blocks as on 0.33.0 with
+  identical greedy output, MTP drafted, and the smoke test passed on both
+  frontends. That main pins `torchvision==0.29.2`.
+- [#53558](https://github.com/vllm-project/vllm/pull/53558) (in 0.33.0) lets a
+  platform supply a `KVCacheConfigBuilder`. The plugin keeps the default:
+  Hybrid-PA exposes only attention specs and allocates conv/SSM state itself.
 
-vLLM 0.34.0rc4 passes. The tag commit has no per-commit wheel, so the image
-used `9950ce36a`, its last commit with one (the two after it change only tests
-and XPU CI); it still pins `torch==2.14.0`/`torchvision==0.29.0`. The smoke
-test passed on both frontends, LFM3 alternated against 0.33.0 on the same host
-gave 25.1 vs 24.6 tok/s, and Qwen3.5-2B MTP with prefix caching hit a repeated
-2.3k-token prompt in 0.29 s (14.2 s cold) with 76% acceptance.
-
-vLLM offers no upstream runner for an x86 plugin that cannot use Triton
-(#61995 is non-x86 only), so the plugin keeps its own; the support question
-(#57684) is closed on that basis.
-
-A prototype on branch `mrv2-prototype` (vLLM 0.34.0rc4,
-`VLLM_OPENVINO_MRV2_PROTOTYPE=1`) subclasses that standalone runner
-(`StandaloneCPUModelRunner`) and keeps only the model, the KV cache and the
-forward call. Request lifecycle, batch, input preparation, sampler, grammar
-bitmask and preemption are vLLM's. On Qwen3-1.7B greedy output (sequential
-and 8 concurrent), penalties, JSON schema, `min_tokens` and `logit_bias`
-matched the plugin's runner, logprobs within 4e-5; single-stream decode was
-11% slower (21.5 vs 24.2 tok/s), 8 concurrent equal (153 tok/s). What it
-needed, and why the plugin does not switch:
-- Ten `vllm._cpu_ops` (`gather_block_table_cpu`, `post_update_cpu`,
-  `gumbel_sample_cpu`, ...) exist only in CPU builds of `_C`; the prototype
-  replaces the eight on the text path with PyTorch loops (seeded samples then
-  differ from the C++ op).
-- `torch.compile(fullgraph=True)` helpers (`compute_token_logprobs`,
-  `_compute_token_ranks`, `_apply_min_p`) raise under `TORCH_COMPILE_DISABLE=1`,
-  so logprobs fail until they are unwrapped.
-- No forward seam: `execute_model` calls `self.model(**model_inputs)` inline,
-  `sample` computes logits from hidden states at `logits_indices`, and
-  `load_model`/`initialize_kv_cache` assume vLLM's loader and attention
-  backends, so all four are overridden.
-- No drafts (`decode_query_len != 1` raises), so MTP and n-gram are lost, and
-  hybrid models select `MambaHybridModelState`, which Hybrid-PA's state slots
-  do not fit (not attempted).
+vLLM 0.34.0rc4 passes (wheel `9950ce36a`, the last rc4 commit with a
+per-commit wheel; it still pins `torch==2.14.0`/`torchvision==0.29.0`): the
+smoke test passed on both frontends, LFM3 ran at 0.33.0's speed, and
+Qwen3.5-2B MTP with prefix caching hit a repeated 2.3k-token prompt in 0.29 s
+(14.2 s cold) with 76% acceptance.
 
 The copies track vLLM-side formats the plugin consumes. Since 0.33.0 the
 grammar bitmask gives each structured-output request a fixed block of
 `num_speculative_tokens + 1` rows, and `apply_grammar_bitmask` indexes it that
-way; the 0.32 packed layout made structured-output requests return HTTP 500
-on 0.33.0 when n-gram speculation was on and several were batched.
+way; the 0.32 packed layout returned HTTP 500 on 0.33.0 when n-gram
+speculation was on and several structured-output requests were batched.
 
-The plugin samples with its own `sampler.py`, which follows vLLM 0.32's V1
-`Sampler` and needs no `torch.ops._C` kernel: vLLM's CPU path calls
-`greedy_argmax` and `fused_gumbel_argmax`, which the PyPI-style wheel lacks.
+### Why the plugin keeps its own runner
 
-`/v1/decisions` (on by default since 0.33.0) reads label probabilities from
-one greedy token with `logprob_token_ids`, not `prompt_logprobs`, so it works
-on the plugin. Qwen3-1.7B-int4-ov answered predicate, choice and score
-questions with HTTP 200, and eight concurrent predicate requests returned the
-same probabilities as sequential ones. Wrong answers on that model (e.g.
-P(true)=0.03 for "Two plus two is four.") come from the model: the stateful
-IR run directly in OpenVINO on the same prompt gave 0.011.
+vLLM offers no upstream runner for an x86 plugin that cannot use Triton
+(#61995 is non-x86 only); #57684 is closed on that basis. A prototype on
+branch `mrv2-prototype` (vLLM 0.34.0rc4, `VLLM_OPENVINO_MRV2_PROTOTYPE=1`)
+subclasses `StandaloneCPUModelRunner` and keeps only the model, the KV cache
+and the forward call. On Qwen3-1.7B, greedy output, penalties, JSON schema,
+`min_tokens` and `logit_bias` matched the plugin's runner and logprobs were
+within 4e-5; single-stream decode was 11% slower (21.5 vs 24.2 tok/s) and 8
+concurrent equal (153 tok/s). It needed:
+
+- PyTorch replacements for eight of ten `vllm._cpu_ops`
+  (`gather_block_table_cpu`, `post_update_cpu`, `gumbel_sample_cpu`, ...) that
+  exist only in CPU builds of `_C` (seeded samples then differ from the C++ op);
+- unwrapping the `torch.compile(fullgraph=True)` helpers
+  (`compute_token_logprobs`, `_compute_token_ranks`, `_apply_min_p`), which
+  raise under `TORCH_COMPILE_DISABLE=1`;
+- overriding `execute_model`, `sample`, `load_model` and
+  `initialize_kv_cache`, because there is no forward seam.
+
+It loses drafts (`decode_query_len != 1` raises), so MTP and n-gram, and
+hybrid models select `MambaHybridModelState`, which Hybrid-PA's state slots do
+not fit.
+
+`/v1/decisions` (on by default since 0.33.0) reads label probabilities from one
+greedy token with `logprob_token_ids`, not `prompt_logprobs`, so it works;
+concurrent and sequential requests returned the same probabilities.
 
 ## Serving Paths
 
@@ -185,275 +126,182 @@ The plugin selects a path from the model IR:
 | Any other model with SDPA (stateful KV exports and Gemma-4 included) | PagedAttention | External KV cache and concurrent batching |
 | No SDPA | Rejected at startup | — |
 
-Without SDPA ops the IR cannot be transformed to PagedAttention, and the
-sequential stateful path that served such models was removed: none of the
-tested models needed it. `VLLM_OPENVINO_STATEFUL_PA=0` is rejected at startup
-and `=1` only logs that the variable is redundant.
+The sequential stateful path that served IRs without SDPA was removed because
+no tested model needed it. `VLLM_OPENVINO_STATEFUL_PA=0` is rejected at
+startup and `=1` only logs that the variable is redundant.
 
-Stateful plain-attention models (optimum-intel default exports, e.g.
-Qwen2.5-Coder-int4-ov) get the PagedAttention transformation at load time:
-`max_num_seqs` keeps its default 128 and the KV cache moves to the external
-paged cache (u8 default, which
-is the OpenVINO CPU plugin's own default on x86_64/ARM64 - the variable is
-unset by default and the loader then passes no `KV_CACHE_PRECISION`;
-verified on Qwen3-1.7B, Gemma-4-E2B, LFM2.5-350M (Hybrid-PA) and
-Qwen3.5-0.8B (hybrid), all `cache_type=u8`. `VLLM_OPENVINO_KV_CACHE_PRECISION`
-selects `u8`/`f16`/`bf16` through the
-OpenVINO `KV_CACHE_PRECISION` compile property; on a CPU whose runtime
-precision is bf16 the plugin replaces `f16` with `bf16` (`scaled_attn.cpp`
-`side_cache_precision`: f16 is kept only if rtPrecision is not bf16), seen
-as `key_cache.0` port type and worker `cache_dtype` both `bf16` — `f32`/`i8` are rejected by
-CPU PagedAttention and fall back to the default with a warning). Validated
-on Qwen2.5-Coder-0.5B, Qwen3-1.7B, TinyLlama-1.1B and Phi-3.5-mini (int4
-IR): concurrency-8 aggregate throughput was 4.9-7.0x the removed sequential
-stateful path, single-stream -7.8% to +4%. Sliding-window models take the
-same path: the PagedAttention op applies the window itself.
+### PagedAttention
 
-Gemma-4 E2B (sliding window 512, 15 KV pairs after KV sharing, per-layer
-embeddings) was verified on the PA path with OpenVINO 2026.4.1: greedy output
-on 2.3k-token prompts and on image prompts was byte-identical to the stateful
-IR, concurrent and prefix-cache-hit requests matched single requests, and
-n-gram speculation produced the same output. 128-token decode (8 CPUs, u8 KV):
-concurrency 1 18.6 -> 19.5 tok/s, concurrency 8 18.7 -> 125.2 tok/s (6.7x);
-a repeated 2.3k-token prompt went from 7.5 s to 1.2 s through prefix caching.
-Gemma-4 26B-A4B (MoE, sliding window 1024, 30 KV pairs, `token_type_ids`
-input, 14.3 GB weights) gave the same text answer as the stateful IR and the
-same extraction of a text-heavy image; concurrency 1 9.8 -> 10.2 tok/s,
-concurrency 8 9.8 -> 30.9 tok/s (3.2x). With the automatic pool the PA path
-needs a 32 GiB container: post-warmup anonymous RSS is 19.8 GB, the pool
-7.25 GB, and three concurrent images followed by about 141k tokens of unique
-~2.5k-token prompts four at a time passed with no OOM. At 24 GiB the pool
-falls to the 256 MiB floor and startup fails for `max-model-len 4096`.
-When concurrent requests split long prompts at different chunk boundaries,
-greedy output can change at near-tie tokens (seen on E2B with and without
-prefix caching, both answers correct).
+Stateful plain-attention exports (optimum-intel defaults such as
+Qwen2.5-Coder-int4-ov) are transformed at load time; `max_num_seqs` keeps its
+default 128. The KV cache defaults to u8, the CPU plugin's own default on
+x86_64/ARM64: with the variable unset the loader passes no
+`KV_CACHE_PRECISION`. `VLLM_OPENVINO_KV_CACHE_PRECISION` selects
+`u8`/`f16`/`bf16`; on a CPU whose runtime precision is bf16 the CPU plugin
+stores `bf16` for an `f16` request (`scaled_attn.cpp`
+`side_cache_precision`), and `f32`/`i8` are rejected by CPU PagedAttention and
+fall back to the default with a warning. On Qwen2.5-Coder-0.5B, Qwen3-1.7B,
+TinyLlama-1.1B and Phi-3.5-mini, concurrency-8 throughput was 4.9-7.0x the
+removed sequential path and single-stream -7.8% to +4%. Greedy output matched
+the stateful IR on TinyLlama and differed on Qwen-family models with u8 and
+bf16 caches alike, so the difference comes from the transformed attention,
+not cache precision.
 
-The PA graph keeps `per_layer_inputs` rank 4, so it is fed as
+Sliding-window models take the same path; the PagedAttention op applies the
+window. Gemma-4 E2B and 26B-A4B gave the same greedy output as their stateful
+IR on text and image prompts, with 6.7x / 3.2x its concurrency-8 throughput
+(18.7 -> 125.2 and 9.8 -> 30.9 tok/s). When concurrent requests split long
+prompts at different chunk boundaries, greedy output can change at near-tie
+tokens.
+
+Gemma-4 inputs keep their rank. `per_layer_inputs` is fed as
 `[tokens, 1, layers, hidden]` (as in OpenVINO GenAI's `ModelRunner`); 26B-A4B
-has hidden 0, so reshapes name the token count instead of `-1`.
-`token_type_ids` stays rank 2 and is fed as `[tokens, 1]` per the
-PagedAttention op, carrying the step's real per-token types (1 on image
-embedding positions, 0 elsewhere) the way OpenVINO GenAI's `ModelRunner` feeds
-them. The PA kernel reads this input directly (input 25). A synthetic run of
-the PA op from this IR showed that tokens inside a contiguous type-1 run attend
-bidirectionally, text stays causal, and two runs separated by text are
-independent. Adjacent runs with no separating token merge into one block. The
-E2B IR has no `token_type_ids` input, so the feed is dropped there and its image
-tokens stay causal. Without `per_layer_inputs` the first infer failed in a
-sliding-window layer's residual add (`Eltwise shape infer ... dim index: 0
-mismatch`).
+has hidden 0, so reshapes name the token count instead of `-1`. Without it the
+first infer failed in a sliding-window layer (`Eltwise shape infer ... dim
+index: 0 mismatch`). `token_type_ids` is fed as `[tokens, 1]` with the step's
+real per-token types (1 on image embedding positions); the PA kernel reads it
+(input 25), so tokens inside a contiguous type-1 run attend bidirectionally
+and text stays causal. Adjacent runs with no separating token merge into one
+block. The E2B IR has no `token_type_ids` input, so its image tokens stay
+causal.
 
-Greedy output matched the stateful IR on TinyLlama-1.1B and
-differed on Qwen-family models; u8 and bf16 caches produced
-byte-identical output on those short checks, so the difference comes from
-the transformed attention computation, not cache precision (long-context
-`u8` vs `bf16` differences are in the Performance Profile).
+### Hybrid-PA
 
-Hybrid-PA is the default for genuine hybrid Mamba/attention models such as
-Qwen3.5, LFM2.5 and LFM3.
-Gemma-4 is not a Hybrid-PA candidate because its state is transformer KV
-cache, not SSM/conv state.
+Hybrid-PA serves hybrid Mamba/attention models (Qwen3.5, LFM2.5, LFM3,
+MiniCPM-V 4.7) with standard PagedAttention for attention layers and paged
+conv/SSM state. Gemma-4 is not a candidate: its state is transformer KV.
 
-LFM3 (conv width 7, full and 256-token sliding-window attention layers) is
-not in vLLM 0.33 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM`
-as a `vllm.general_plugins` entry so the config passes validation, and the
-model needs `--trust-remote-code` for its `configuration_lfm3.py`. Its IR is
-exported with OpenVINO 2026.5. On LFM3-1.7B-int4-ov a 1746-token prompt gave
-byte-identical 400-token greedy output on Hybrid-PA and the stateful IR.
+LFM3 (conv width 7, full and 256-token sliding-window attention) is not in
+vLLM 0.33 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM` as a
+`vllm.general_plugins` entry so the config validates, and the model needs
+`--trust-remote-code`. Its IR is exported with OpenVINO 2026.5. A 1746-token
+prompt gave byte-identical 400-token greedy output against the stateful IR.
 
-Hybrid-PA uses standard PagedAttention for attention layers. Conv/SSM state
-storage depends on prefix caching:
+Conv/SSM state storage depends on prefix caching.
 
-- Prefix caching on (default): each vLLM scheduler
-  block owns one conv/SSM checkpoint slot with the same index. The
-  linear-attention inputs follow OpenVINO GenAI's prefix layout: read the
-  checkpoint of the block holding token `num_computed - 1`, write one
-  checkpoint per touched interval (`la.cache_interval` = scheduler block
-  size). A prefix hit is always block-aligned, so it restores the state
-  from the last hit block. A scheduler block spans `N` OpenVINO KV blocks of
-  32 tokens; the runner expands each block id to its `N` KV block ids. `N` is
-  `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`, default 8 (256 tokens) for
-  every model. `0` selects GenAI's automatic rule
-  `max(8, checkpoint bytes / KV block bytes)`: 8 for LFM2.5-350M (61 KB
-  checkpoint) and 47 (1504 tokens) for Qwen3.5-0.8B and MiniCPM-V 4.7
-  (10.3 MB checkpoint). Checkpoint bytes are part of the block page size, so
-  the 4 GiB pool holds 570k tokens for LFM2.5 (619k without prefix caching)
-  and 90k for Qwen3.5 (280k with the automatic 1504-token interval). With
-  multiplier 1 (32 tokens, the plain PA block) LFM2.5 holds 466k tokens and
-  hits like a pure-attention model; Qwen3.5 would hold about 13k.
-- Checkpoint bytes follow the CPU plugin's state precision: bf16 on CPUs with
-  AVX-512-BF16, f32 otherwise (or an explicit
-  `VLLM_OPENVINO_INFERENCE_PRECISION`). The same IR and flags therefore give a
-  10.3 MB (bf16) or 20.6 MB (f32) checkpoint on Qwen3.5-0.8B and a block page
-  of 12.1 or 22.4 MB. A memory limit that fits the bf16 pool can leave the f32
-  pool at the 256 MiB floor, which holds 11 blocks where one
-  `--max-model-len 4096` request needs 16; the worker logs the applicable
+**Prefix caching on (default).** Each scheduler block owns one conv/SSM
+checkpoint slot with the same index, following OpenVINO GenAI's prefix
+layout: read the checkpoint of the block holding token `num_computed - 1`,
+write one per touched interval (`la.cache_interval` = scheduler block size).
+Hits are block-aligned, so a hit restores the state at the last hit block.
+
+- A scheduler block spans `N` 32-token KV blocks and the runner expands each
+  block id to its `N` KV block ids. `N` is
+  `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`, default 8 (256 tokens). `0`
+  selects GenAI's `max(8, checkpoint bytes / KV block bytes)`: 8 for
+  LFM2.5-350M (61 KB checkpoint), 47 (1504 tokens) for Qwen3.5-0.8B and
+  MiniCPM-V 4.7 (10.3 MB). Checkpoints are part of the block page, so a 4 GiB
+  pool holds 570k tokens for LFM2.5 and 90k for Qwen3.5 (280k at 1504 tokens).
+- Checkpoints follow the CPU plugin's state precision: bf16 with AVX-512-BF16,
+  f32 otherwise. Qwen3.5-0.8B's checkpoint is then 20.6 MB instead of 10.3 MB,
+  and a limit that fits the bf16 pool can leave the f32 pool at the 256 MiB
+  floor (11 blocks where one 4096-token request needs 16); the worker logs the
   remedies before vLLM's own ValueError.
 - vLLM caches a block when it allocates it, so a request can hit a block that
-  another request fills in the same step. The runner then splits the batch
-  into waves (writer first) so the checkpoint read follows its write. Without
-  waves, 3 of 4 concurrent identical prompts had different logprobs. A
-  drafting request has `1 + drafts` logits rows, and MTP reads the main
-  model's hidden states and embeddings at the request's token offset, so the
-  runner concatenates every wave's rows and MTP inputs in batch order. With
-  one row per request, a same-step hit next to a drafting request killed the
-  engine (`IndexError` in `_sample_with_drafts`).
-- Mixed-load stress test (8 CPUs, 16 GiB, 8-16 concurrent greedy, sampled,
-  prefix-hit, image, logprobs, JSON and mid-stream aborted requests, with a
-  per-step check that free + private + temporary state slots equal the pool
-  with no duplicates): Qwen3.5-2B MTP for 60 min (650 requests, 63% prefix
-  hits) and 20 min with a 7.9k-token pool (20 preemptions), Qwen3.5-0.8B
-  n-gram k=4 for 20 min (9 preemptions), each ending with two 16-request
-  draft bursts. No errors, the slot count never drifted, and fixed prompts
-  sent with a fresh `cache_salt` gave the same output before and after.
-  A prefix hit can change greedy output against a cold run when the cold
-  prefill's chunk boundaries differ: restoring the bf16 checkpoint and reading
-  past tokens from the u8 KV cache moved first-token logprobs by up to 0.07
-  and broke a tie. With `--max-num-batched-tokens 256` (chunks on checkpoint
-  boundaries) hit and cold were bit-identical.
-- With speculative decoding, a draft step reads the same checkpoint (or the
-  request's private slot) and writes per-token states (`la.cache_interval`
-  1) into temporary slots, as the slot pool below does. A token that ends a
-  block writes that block's checkpoint directly: if it is rejected, the block
-  is not full of known tokens, so vLLM has not cached it, and the token is
-  recomputed before it is. After verification the accepted state becomes the
-  request's private slot, so nothing is copied; the next step without drafts
-  reads it and writes block checkpoints again. The temporary and private
-  slots (`2 + k` per drafting request) come out of the KV pool. MTP's KV layer
-  uses the expanded 32-token block table like the main model. Verified on
-  Qwen3.5-2B (MTP k=1, `--max-num-seqs 8`): non-hit requests gave the same
-  greedy text as MTP without prefix caching, a prompt holding a previous
-  600-token output hit 512 tokens whose checkpoints were written in draft
-  steps and continued identically, a repeated 2.3k-token prompt hit in 0.28 s
-  instead of 14.2 s, and acceptance was 80% (77% without prefix caching). The same 600-token check with n-gram (k=4, 533 of 567
-  drafts accepted) on Qwen3.5-0.8B hit 512 tokens and continued identically.
-- Prefix caching off: a separate physical slot pool, described below.
+  another request fills in the same step. The runner splits such a batch into
+  waves (writer first) so the checkpoint read follows its write; without waves
+  3 of 4 concurrent identical prompts had different logprobs. A drafting
+  request has `1 + drafts` logits rows and MTP reads the main model's hidden
+  states and embeddings at the request's token offset, so the runner
+  concatenates every wave's rows and MTP inputs in batch order. With one row
+  per request, a same-step hit next to a drafting request killed the engine
+  (`IndexError` in `_sample_with_drafts`); `scripts/smoke-test.sh` covers it.
+- With speculative decoding, a draft step reads the checkpoint (or the
+  request's private slot) and writes per-token states (`la.cache_interval` 1)
+  into temporary slots. A token that ends a block writes that block's
+  checkpoint directly: if it is rejected the block is not full of known tokens,
+  so vLLM has not cached it. The accepted state becomes the request's private
+  slot, so nothing is copied. The temporary and private slots (`2 + k` per
+  drafting request) come out of the KV pool.
+- A prefix hit can change greedy output against a cold run whose chunk
+  boundaries differ: restoring the bf16 checkpoint and reading past tokens
+  from the u8 cache moved first-token logprobs by up to 0.07. With chunks on
+  checkpoint boundaries (`--max-num-batched-tokens 256`, or 1504 at the
+  automatic interval) hit and cold runs were bit-identical, image prompts whose
+  hit boundary falls inside the image included.
+- Hit TTFT: LFM2.5 2.1k-token prompt 0.74 -> 0.06 s; Qwen3.5 2.4k / 4.0k-token
+  prompts 8.2 / 13.9 -> 0.20 / 0.56 s (2.9 / 3.4 s at 1504-token hits).
+  Concurrency-8 decode was unchanged.
+- Mixed-load stress test (8-16 concurrent greedy, sampled, prefix-hit, image,
+  logprobs, JSON and aborted requests, with a per-step check that free +
+  private + temporary state slots equal the pool): Qwen3.5-2B MTP for 60 min
+  and for 20 min with a 7.9k-token pool (20 preemptions), Qwen3.5-0.8B n-gram
+  k=4 for 20 min (9 preemptions). No errors and no slot drift.
 
-Verification (8 CPUs, greedy): a hit run's first-token logprobs were
-bit-identical to a no-prefix-caching run whose chunk boundary is at the same
-interval (`--max-num-batched-tokens 1504`), and to a cold run with the same
-chunking, including MiniCPM-V and Qwen3.5 image prompts whose hit boundary falls
-inside the image tokens. A cold run with a different chunk boundary can differ
-slightly because the bf16 checkpoint is stored at the boundary, the same
-effect chunked prefill already has. Hit TTFT: LFM2.5 2.1k-token prompt 0.74 s
--> 0.06 s; Qwen3.5 2.4k/4.0k-token prompts 8.2/13.9 s -> 0.20/0.56 s
-(multiplier 8) or 2.9/3.4 s (1504-token hits). Concurrency-8 decode was
-unchanged (LFM2.5 410 vs 403 tok/s, Qwen3.5 133 vs 134 tok/s).
-
-The slot pool (prefix caching off) is intentionally separate
-from vLLM scheduler blocks. Slots are released when a request finishes
-(including the zero-token step that follows the last finish) or is preempted
-(`preempted_req_ids`, as upstream's MRV2 frees a preempted request), and are
-reset on a fresh or re-prefilled start (`num_computed == 0`). The preempted
-request's cached state stays, so a seeded request keeps its generator. Holding
-only running requests, the pool of `max_num_seqs + 1` cannot be exhausted under
-any scheduling policy. Verified on Qwen3.5-0.8B (`max_num_seqs=4`, 0.08 GiB
-pool, 8 concurrent 1.3k-token requests): 2 preemptions, all requests complete,
-the pool returned to 5 free slots.
-A recomputed request can diverge from its uninterrupted output late in the
-text because of prefill vs decode numerics.
+**Prefix caching off.** Conv/SSM state lives in a separate slot pool of
+`max_num_seqs + 1` slots, taken out of the KV pool first. Slots are released
+when a request finishes or is preempted (`preempted_req_ids`, as MRV2 frees a
+preempted request) and reset on a fresh or re-prefilled start; holding only
+running requests, the pool cannot be exhausted. A recomputed request can
+diverge late in the text from its uninterrupted output (prefill vs decode
+numerics).
 
 ## Runtime Constraints
 
 - CPU KV block size is `32`; GPU KV block size is `16`. Hybrid-PA with prefix
   caching uses a larger scheduler block (a multiple of the KV block size).
-- `VLLM_OPENVINO_CPU_THREADS_NUM=0` uses cgroup CPU quota when available;
-  an explicit value takes precedence. The same quota caps the Torch/OMP
-  thread pools at engine config time unless `OMP_NUM_THREADS` is set
-  externally.
-- `VLLM_OPENVINO_KVCACHE_SPACE=0` sizes the CPU pool automatically from the
-  memory ceiling (see the sizing rules below); GPU profiles the device.
-- KV cache allocation must not add zero-fill to `_allocate_kv_cache()`;
-  OpenVINO initializes the cache and extra zero-fill can cause OOM.
+- `VLLM_OPENVINO_CPU_THREADS_NUM=0` uses the cgroup CPU quota when it is
+  tighter than the visible cores and also caps the Torch/OMP pools unless
+  `OMP_NUM_THREADS` is set. An explicit value takes precedence. On an
+  8-quota/24-core host a 32-request burst went from 4.5 s wall with 3.1 s of
+  CFS throttling to 3.6 s with none.
+- Do not add zero-fill to `_allocate_kv_cache()`; OpenVINO initializes the
+  cache and extra zero-fill can cause OOM. SSM/conv state caches are
+  zero-filled. The worker zero-fills scheduler-reported
+  `new_block_ids_to_zero` blocks as upstream does (no measurable cost).
 - The KV cache is one fixed-size mapping whose pages become resident only as
-  blocks are used, so RSS grows toward `baseline + KV pool` and then plateaus
-  (measured with a 1 GiB pool: one 1049 MiB mapping, Rss 36 -> 110 MiB over
-  10 rounds while its size stayed fixed; cgroup total 1.6 -> 2.5 GB).
-  Size containers for `baseline + VLLM_OPENVINO_KVCACHE_SPACE`, not for the
-  pool alone.
-- vLLM plans the block count from each layer's `FullAttentionSpec` page, so
-  that page must be the OpenVINO block's real size. u8 keys keep their
-  per-channel scale and zero point as extra rows (`[heads, 32 + 8, head]`),
-  which a `block_size x head_size` page leaves out; `get_kv_cache_spec` pads
-  such layers (`page_size_padded`) to the real size, as Hybrid-PA already does.
-  Without the padding vLLM planned 8.8% more blocks than the budget on
-  Qwen3-1.7B (183,424 tokens for 5,268 budgeted blocks of 32), and the pool
-  was allocated that much over the budget.
-- On CPU the pool is sized from a memory ceiling: the cgroup memory limit when
-  one is set, otherwise host MemAvailable. Before model load (estimate):
-  ceiling - model weights (`openvino_*.bin`) - 1.5 GiB runtime baseline -
-  APIServer overhead - 2.2 GiB headroom. After model load: the PA warmup runs
-  first, then the pool is set to ceiling - EngineCore anonymous RSS -
-  APIServer overhead - 2.2 GiB headroom (never below 256 MiB). The APIServer
-  overhead is 1.5 GiB for text models and 2.75 GiB for checkpoints with a vision
-  encoder (measured APIServer anon RSS 0.55-0.87 GiB text, 1.23-1.26 GiB
-  Gemma-4 with images disabled, 2.1-2.7 GiB vision). Anonymous RSS is the right baseline because the kernel
-  reclaims the memory-mapped weights under pressure (26B: VmRSS 33.5 GB of which
-  19.8 GB is anonymous).
-- With `VLLM_OPENVINO_KVCACHE_SPACE=0` (default) the post-load budget sets the
-  pool in both directions. With an explicit value it only reduces the pool to
-  that budget, with a warning; a pool above 90% of the pre-load budget logs a
-  headroom warning.
-- vLLM's prefix caching (default on) retains freed blocks, so workloads with
-  unique prompts keep touching new pool pages over time;
-  `--no-enable-prefix-caching` keeps the resident set at the working set
-  (measured: anon flat at ~477 MiB after warm-up vs +62 MiB over 8 rounds
-  with prefix caching on).
-- Hybrid-PA without prefix caching takes the conv/SSM state slots out of the
-  KV pool first: one per `--max-num-seqs` request plus one, and `1 + k` more
-  per drafting request with `k` speculative tokens (`2 + k` per drafting
-  request, and nothing without drafts, when prefix caching keeps checkpoints).
-  At most `min(max_num_seqs, 8)` requests draft in one step; the rest decode
-  without drafts that step. On Qwen3.6-35B-A3B a slot is about
-  64 MiB, so the default 128 requests reserve 8 GiB and a 2 GiB pool is left with no KV
-  blocks; lower `--max-num-seqs` (4 served it in the same pool). The startup
+  blocks are used, so RSS grows toward `baseline + pool` and then plateaus.
+  Prefix caching retains freed blocks, so unique prompts keep touching new
+  pages; `--no-enable-prefix-caching` holds the resident set at the working
+  set.
+- vLLM plans the block count from each layer's spec page, so that page must
+  be the OpenVINO block's real size. u8 keys keep per-channel scale and zero
+  point as extra rows (`[heads, 32 + 8, head]`); `get_kv_cache_spec` pads such
+  layers (`page_size_padded`). Without the padding vLLM planned 8.8% more
+  blocks than the budget on Qwen3-1.7B and the pool grew that much over it.
+- CPU pool sizing (`VLLM_OPENVINO_KVCACHE_SPACE=0`), from a memory ceiling
+  (cgroup limit, else host MemAvailable):
+  - before model load (estimate): ceiling - `openvino_*.bin` sizes - 1.5 GiB
+    runtime - APIServer overhead - 2.2 GiB headroom;
+  - after model load and warmup: ceiling - EngineCore anonymous RSS -
+    APIServer overhead - 2.2 GiB headroom, never below 256 MiB. Anonymous RSS
+    excludes the memory-mapped weights, which the kernel reclaims (26B: VmRSS
+    33.5 GB, 19.8 GB anonymous); evicting them did not slow decode;
+  - APIServer overhead is 1.5 GiB for text models and 2.75 GiB with a vision
+    encoder (measured 0.55-0.87 GiB text, 2.1-2.7 GiB vision);
+  - an explicit value is only reduced when it does not fit, with a warning.
+- The warmup must run the real maximum prefill. PA models run one prefill of
+  `max_num_batched_tokens` and one decode on the null block 0, against a
+  throwaway cache, inside `determine_available_memory` before the post-load
+  measurement, so the first-infer weight repack and prefill buffers are in the
+  baseline. Multimodal models also encode one maximum-size dummy image and
+  prefill the first step of its prompt (skipped when the image limit is 0 or
+  the prompt exceeds both 2048 tokens and one step). With a 16-token warmup
+  the 26B baseline read 16.9 GB instead of 19.8 GB and the pool was OOM-killed
+  once fully resident; leaving out the image put the baseline 0.5-0.6 GB low
+  on gemma-4-E2B and MiniCPM-V. The warmup also halves first-request latency
+  (Qwen3-1.7B 1.51 -> 0.79 s). Startup cost: 26 s on the 26B, 11 s on E2B.
+- Hybrid-PA conv/SSM slots come out of the KV pool first: without prefix
+  caching `max_num_seqs + 1` plus `1 + k` per drafting request; with prefix
+  caching `2 + k` per drafting request. At most `min(max_num_seqs, 8)`
+  requests draft per step. A Qwen3.6-35B-A3B slot is about 64 MiB, so the
+  default 128 requests reserve 8 GiB; lower `--max-num-seqs`. The startup
   warning reports the reservation.
-- Multimodal requests are encoded per image (own grid and merger attention)
-  when vLLM's scheduler lists the image in `scheduled_encoder_inputs`; the
-  merged embeddings stay in the runner's encoder cache until the scheduler
-  frees them (`free_encoder_mm_hashes`), so an image split across steps is
-  encoded once. Embeddings are scattered by explicit
-  `(batch_start, batch_end, patch_offset, image_index)` rows (one per contiguous
-  `is_embed` run of the placeholder), so concurrent requests, differently sized images, multi-image prompts and
-  images split by chunked prefill are handled. For text-only serving of a
-  multimodal checkpoint, `--language-model-only` or
-  `--limit-mm-per-prompt '{"image":0,"video":0}'` skips the multimodal warmup
-  (startup 64 s to 50 s on Qwen3.5-0.8B-int4), does not compile the vision
-  encoder, and budgets the text APIServer overhead. gemma-4-E2B at 16 GiB:
-  post-load anon RSS 3.84 -> 2.71 GB, pool 7.21 -> 9.59 GB (1.23 GB APIServer observed, 1.5 GiB budgeted); image requests
-  get HTTP 400 from vLLM.
-- PA models run one prefill and one decode step on the reserved null block 0 at
-  startup to absorb the CPU kernel JIT cost; the first request dropped from
-  1.51 s to 0.79 s (Qwen3-1.7B-int4) and 0.87 s to 0.49 s (Qwen3.5-0.8B-int4)
-  with no visible startup cost. On CPU the warmup runs inside
-  `determine_available_memory`, against a throwaway cache, *before* the
-  post-load memory measurement, so the CPU plugin's first-infer weight repack
-  and prefill buffers are part of the measured baseline;
-  `compile_or_warm_up_model` skips its own copy. The warmup prefill is
-  `max_num_batched_tokens` long, and multimodal models also encode one
-  maximum-size dummy image from vLLM's dummy-input processor and prefill the
-  first step of its prompt (skipped when the image limit is 0 or the dummy
-  prompt exceeds both 2048 tokens and one step, e.g. Qwen3.5's 16k-token dummy
-  image). At `--max-num-batched-tokens 256`, leaving out the image would put
-  the baseline 0.52 GB low on gemma-4-E2B (259-token prompt) and 0.58 GB low
-  on MiniCPM-V 4.7 (679 tokens), and the pool that much too large. With a
-  16-token warmup the 26B baseline was 16.9 GB
-  and the pool OOM-killed under full residency; with the full-step text and
-  image warmup it is 19.8 GB and the same loads pass. The startup cost is
-  26 s on the 26B and 11 s on E2B. Hybrid-PA prefix caching needs one
-  conv/SSM checkpoint per warmup block in the throwaway cache.
-- SSM/conv state caches are zero-filled; attention KV caches are not.
-- The worker zero-fills scheduler-reported `new_block_ids_to_zero` blocks each
-  step. Removing it changed nothing measurable (Qwen3-1.7B-int4, 8-CPU quota,
-  2 runs each: prefill 16 x ~1.4k tokens at concurrency 8 about 690 tok/s,
-  decode concurrency 8 about 125 tok/s, RSS 6.5 GB, decode output identical),
-  so it is kept to stay aligned with upstream.
+- Images are encoded when vLLM lists them in `scheduled_encoder_inputs`; the
+  merged embeddings stay in the runner's encoder cache until
+  `free_encoder_mm_hashes`, so an image split across steps is encoded once and
+  a repeated image behind a different prefix skips the vision tower.
+  Embeddings are scattered by `(batch_start, batch_end, patch_offset,
+  image_index)` rows, one per contiguous `is_embed` run. For text-only serving
+  of a multimodal checkpoint, `--language-model-only` or
+  `--limit-mm-per-prompt '{"image":0,"video":0}'` skips the vision encoder and
+  its warmup and budgets the text APIServer overhead (gemma-4-E2B at 16 GiB:
+  pool 7.21 -> 9.59 GB).
 - bf16 tensors must be converted to float32 before NumPy conversion because
   OpenVINO does not accept bf16 NumPy arrays.
-- Pin memory and LoRA serving are unsupported.
 - `paged_attention_transformation()` and gather-before-matmul are applied to
-  every model; an IR without SDPA fails at startup instead.
-- OpenVINO import failure must remain deferred until configuration validation
+  every model.
+- OpenVINO import failure must stay deferred until configuration validation
   so plugin discovery can inspect other platforms safely.
 
 ## Model Files
@@ -464,6 +312,7 @@ text because of prefill vs decode numerics.
 - Vision encoder: `openvino_vision_embeddings_model.xml`
 - Vision merger: `openvino_vision_embeddings_merger_model.xml`
 - Vision position embeddings (Qwen3.5/3.6): `openvino_vision_embeddings_pos_model.xml`
+- MTP head (Qwen3.5/3.6): `openvino_mtp_model.xml`
 
 The vision encoder expects a 2D `[num_patches, features]` input. Vision merger
 calls require `hidden_states`, `attention_mask`, and `rotary_pos_emb`.
@@ -472,62 +321,78 @@ uses `pixel_values`.
 
 ### Qwen3.5 / Qwen3.6 images
 
-Same steps as OpenVINO GenAI's `qwen3_vl` and `qwen3_5`:
+Same steps as OpenVINO GenAI's `qwen3_vl` and `qwen3_5`; Qwen3.5-0.8B gives
+the same answer as GenAI 2026.4.1 on the same IR, also with chunked prefill,
+cached images and concurrent requests:
 
-- vLLM 0.32 enables `mm_device_do_normalize` for this family, so `pixel_values`
-  arrive as raw uint8. The loader applies vLLM's `build_mm_input_norm`, as the
-  upstream model does. Without it the encoder sees 0-255 pixels.
+- vLLM enables `mm_device_do_normalize` for this family, so `pixel_values`
+  arrive as raw uint8. The loader applies vLLM's `build_mm_input_norm`.
 - The position IR takes the four bilinear corner indices `[4, n]` of the 48x48
   learned grid; the weighted sum is permuted to merge order and added to the
   patch embeddings before the merger.
 - `rotary_pos_emb` width comes from the merger IR (32 on Qwen3.5-0.8B, 36 on
   Qwen3.6-35B-A3B), with `dim/2` frequencies per axis.
-- The LM's `position_ids [4, n]` carry the text positions in row 0 and M-RoPE
+- The LM's `position_ids [4, n]` carry text positions in row 0 and M-RoPE
   (t, h, w) in rows 1-3, computed by vLLM's `Qwen3VLForConditionalGeneration`;
   decode positions are `index + rope_delta`.
-
-Before these were in place, Qwen3.5-0.8B misread a synthetic image ("100") and
-Qwen3.6-35B-A3B failed every image request (merger `rotary_pos_emb` width).
-Now Qwen3.5-0.8B gives the same answer as GenAI 2026.4.1 on the same IR, also
-with 128-token chunked prefill, cached images and concurrent requests.
 
 ### MiniCPM-V 4.7
 
 The vision IR takes one packed crop per infer: `pixel_values [1,3,14,h*w*14]`
-plus host-built `position_ids`, `window_index` and `merge_index` (same algorithms
-as OpenVINO GenAI's `VisionEncoderMiniCPMv4_7`) and returns merged tokens
-`[tokens, hidden]`. vLLM's zero-padded `pixel_values [n_slices,3,14,L_max]` is
-cut by `tgt_sizes` (passed through the `image_grid_thw` slot). The slice
-placeholders interleave `<slice>`/newline tokens with `<|image_pad|>` runs, so
-embeddings go to the `is_embed` runs only. The LM takes `[3, n]` canvas M-RoPE
-positions computed by vLLM's `MiniCPMV4_7ForConditionalGeneration`
-(`get_mrope_input_positions`); decode positions are `index + rope_delta`.
+plus host-built `position_ids`, `window_index` and `merge_index` (same
+algorithms as OpenVINO GenAI's `VisionEncoderMiniCPMv4_7`) and returns merged
+tokens `[tokens, hidden]`. vLLM's zero-padded `pixel_values
+[n_slices,3,14,L_max]` is cut by `tgt_sizes` (passed through the
+`image_grid_thw` slot). Slice placeholders interleave `<slice>`/newline tokens
+with `<|image_pad|>` runs, so embeddings go to the `is_embed` runs only. The LM
+takes `[3, n]` M-RoPE positions from vLLM's
+`MiniCPMV4_7ForConditionalGeneration`; decode positions are
+`index + rope_delta`.
 
-Requires vLLM >= 0.32.0 (contains vllm-project/vllm #58674 and #56372) and
-Transformers >= 5.18.0; vLLM 0.31.0 and Transformers 5.17.0 lack them. Verified
-on the 0.32.0 image: single and multi-slice images and concurrent image requests
-describe the image correctly; chunked prefill was last checked on 0.32.0rc0.
-On a 640x480 image with ~10 px text, MiniCPM-V-4.7-1B-int4 reads "HELLO 2026"
-as "HELLO 2028", as OpenVINO GenAI 2026.5 nightly does on the same IR; at 48 px
-both read it correctly with the same greedy output, so this is the model, not
-the plugin.
+Requires vLLM >= 0.32.0 (#58674, #56372) and Transformers >= 5.18.0.
+MiniCPM-V-4.7-1B-int4 misreads ~10 px text ("HELLO 2026" as "HELLO 2028")
+exactly as OpenVINO GenAI does on the same IR, so this is the model.
 
-## Thinking Token Budget
+## Sampler
 
-`thinking_token_budget` follows Model Runner V2's CPU implementation
+`sampler.py` follows vLLM 0.32's V1 `Sampler` and its builtin `min_p`,
+`logit_bias` and `min_tokens` processors step for step. An all-greedy batch
+returns after a bare `argmax`, as upstream does.
+
+- Random draws: vLLM's CPU path uses a C++ Gumbel-max kernel the wheel does
+  not ship. The plugin samples softmax -> cumsum -> `searchsorted(right=True)`
+  with one uniform per row from the per-row seed vLLM passes (from the
+  request's `torch.Generator` when it sets `seed`). 20k draws matched the
+  softmax probabilities within 0.4 points and never chose a masked token;
+  `seed=42` requests were identical alone and batched with unseeded ones.
+- `VLLM_OPENVINO_FAST_SAMPLER=1` (default) replaces two routines whose cost
+  scales with `(batch, vocab)`: top-k/top-p takes a partial `topk` over
+  `max(k)` candidates (1024 when only `top_p` is set) and falls back to the
+  full sort when they hold less than `p` of the mass; the repetition penalty
+  is applied only at prompt/output token positions (presence/frequency
+  penalties take the dense path). At batch 8, vocab 151,936: top-k+top-p
+  17.8 -> 0.9 ms, repetition penalty 3.3 -> 0.3 ms.
+- Equivalence: 56 cases each (greedy, seeded and unseeded random,
+  top-k/top-p, penalties, logprobs, logprob token ids, allowed tokens, bad
+  words) gave bit-identical tokens and logprobs against vLLM 0.32's `Sampler`,
+  with `FAST_SAMPLER` on and off.
+- An in-graph TopK was not pursued: the host-side partial `topk` leaves at
+  most 0.9 ms to save, and OpenVINO GenAI also samples host-side over full
+  logits.
+
+### Thinking Token Budget
+
+`thinking_token_budget` follows MRV2's CPU implementation
 (`CPUThinkingBudgetState`, `vllm/v1/worker/cpu/sampler.py`): a request is
 reasoning while its last reasoning start marker follows its last natural end
 marker, and once the tokens after that start marker (prompt included) reach
 the budget, the next token of `reasoning_end_str` gets logit `1e9` after every
 other logits stage and before temperature. Marker positions are cached per
-row, so each step scans only the new tokens. vLLM rejects the parameter
-unless the server runs with `--reasoning-parser` (or `--reasoning-config`).
-Requests with a budget get no drafts.
-
-Qwen3-1.7B-int4 (`--reasoning-parser qwen3`, greedy, 600 tokens): reasoning
-of 1926 characters unbudgeted, 0 / 122 / 452 at budgets 0 / 32 / 128; six
-concurrent requests (budgets 16, 64, none) returned the same text as single
-ones, also with n-gram speculation on.
+row, so each step scans only new tokens. vLLM rejects the parameter unless the
+server runs with `--reasoning-parser` (or `--reasoning-config`). Requests with
+a budget get no drafts. Qwen3-1.7B (greedy, 600 tokens): reasoning of 1926
+characters unbudgeted, 0 / 122 / 452 at budgets 0 / 32 / 128; concurrent
+requests returned the same text as single ones, also with n-gram on.
 
 ## N-gram Speculative Decoding
 
@@ -538,20 +403,20 @@ positions of each draft request, and `sample_tokens` accepts drafts while they
 match the argmax (the stock rejection sampler needs Triton). Drafts are
 proposed only for greedy requests without penalties, `logit_bias`,
 `allowed_token_ids`, `bad_words`, `min_tokens`, logprobs, or structured
-output; other requests in the same batch use the normal sampler. vLLM disables
-async scheduling for `ngram` automatically.
+output; other requests in the batch use the normal sampler. Model
+`generation_config.json` defaults count: LFM2.5 ships `repetition_penalty:
+1.05`, so no request drafts unless it sets `repetition_penalty=1.0` or the
+server runs with `--generation-config vllm`.
 
 Hybrid-PA: a draft request runs with `la.cache_interval=1` and
 `la.block_indices = [committed slot, 1+d temporary slots]`, so token t's
-conv/SSM state lands in temporary slot t. After verification the slot of the
-last accepted token becomes the committed slot and the rest return to the pool.
-Drafts go to at most 8 requests per step (`MAX_DRAFTING_REQS`), so the pool
-holds `max_num_seqs + 1 + min(max_num_seqs, 8) * (k + 1)` slots; beyond 8
-concurrent requests verification is no longer free on CPU (table below).
-Before the cap, Qwen3.5-0.8B with k=4 and the default 128 requests reserved
-14.8 GiB and did not start in a 16 GiB container; with it, it starts with or
-without prefix caching and served three waves of 16 concurrent copy-heavy
-requests (6624 of 7500 drafts accepted).
+state lands in temporary slot t; after verification the last accepted slot
+becomes the committed slot. Drafts go to at most 8 requests per step
+(`MAX_DRAFTING_REQS`), so the pool holds
+`max_num_seqs + 1 + min(max_num_seqs, 8) * (k + 1)` slots; past 8 concurrent
+requests verification is no longer free on CPU (table below). Without the cap
+Qwen3.5-0.8B with k=4 and the default 128 requests reserved 14.8 GiB and did
+not start in 16 GiB.
 
 Measured (8 CPUs, k=4, `prompt_lookup_min=5`, `prompt_lookup_max=8`,
 tok/s, baseline -> spec; copy-heavy / free-form output):
@@ -560,22 +425,16 @@ tok/s, baseline -> spec; copy-heavy / free-form output):
 |---|---|---|---|---|
 | Qwen3-1.7B (PA) | 23 -> 57 / 23 -> 23 | 82 -> 148 / 82 -> 85 | 154 -> 282 / 160 -> 149 | 268 -> 358 / 267 -> 274 |
 | Qwen3.5-2B (Hybrid-PA) | 21 -> 43 / 22 -> 21 | 56 -> 92 / 64 -> 64 | 86 -> 114 / 102 -> 90 | - -> 124 / - |
-| LFM2.5-8B-A1B (Hybrid-PA, MoE, conv-only state) | 23 -> 42 / 25 -> 50 | 44 -> 60 / 49 -> 78 | 56 -> 69 / 66 -> 88 | - |
+| LFM2.5-8B-A1B (Hybrid-PA, MoE) | 23 -> 42 / 25 -> 50 | 44 -> 60 / 49 -> 78 | 56 -> 69 / 66 -> 88 | - |
 
-LFM2.5-8B-A1B was run with `--generation-config vllm`; its "free-form" prompt
-degenerates into loops under greedy decoding without a repetition penalty, so
-that column is not representative of free text (acceptance ~99%).
-
-Model `generation_config.json` defaults count as request parameters. LFM2.5
-ships `repetition_penalty: 1.05`, which makes every request ineligible for
-drafts (0 drafts proposed) unless the request sets `repetition_penalty=1.0` or
-the server runs with `--generation-config vllm`.
-
-Free-form output is neutral up to 4 concurrent requests and loses up to ~10%
-on Hybrid-PA at 8, where verification is not free. Keep `prompt_lookup_min`
-high: with 2, spurious matches cost 7-11% on free-form output for Qwen3-1.7B.
-Output can diverge from non-spec runs at near-tie tokens because kernel
-numerics vary with query length.
+LFM2.5-8B-A1B ran with `--generation-config vllm`; its free-form prompt loops
+under greedy decoding without a repetition penalty, so that column is not
+representative. Free-form output is neutral up to 4 concurrent requests and
+loses up to ~10% on Hybrid-PA at 8. Keep `prompt_lookup_min` high: with 2,
+spurious matches cost 7-11% on free-form output. Output can diverge from
+non-spec runs at near-tie tokens because kernel numerics vary with query
+length. On gemma-4-E2B copying 300 tokens of code ran at 28 tok/s including
+prefill (17.5 without speculation), 138 of 152 drafts accepted.
 
 ## MTP Speculative Decoding
 
@@ -591,31 +450,28 @@ OpenVINO GenAI's MTP strategy (`mtp_model_transforms.cpp`):
 - The MTP layer at position i reads the main hidden state h_i and the
   embedding of token i+1 (the main step's own input embedding when that token
   was in the step, so image positions keep their image embedding) and
-  predicts token i+2, at position i (the vLLM EAGLE convention; i+1 gave the
-  same acceptance).
+  predicts token i+2, at position i (the vLLM EAGLE convention).
 - Its KV cache is one more attention layer behind the main layers on the same
-  block table, so vLLM budgets it with them.
+  block table, so vLLM budgets it with them; the main model gets
+  `kv_caches[:num_main_kv_layers]`.
 - After each step's verification, the MTP layer catches up on the positions
   the main model committed (prefill chunks included), which gives the first
   draft. Each further draft feeds the MTP hidden state and the previous draft
   one position later; that draft-only KV is overwritten by the next catch-up
   and stays within the k lookahead slots the scheduler reserves.
-- Requests that cannot take drafts (same rules as n-gram) skip the MTP layer
-  entirely. Drafts return through `take_draft_token_ids`, so the platform
-  turns async scheduling off, which vLLM would otherwise keep for `mtp`.
+- Requests that cannot take drafts (same rules as n-gram) skip the MTP layer.
+  Drafts return through `take_draft_token_ids`, so the platform turns async
+  scheduling off, which vLLM would otherwise keep for `mtp`.
 
-An MTP step reads the whole lm_head, 248,320 x 2,048 u8 (508 MB) on
-Qwen3.5-2B: drafting took 18 ms per k=1 step against 49 ms for the main
-model. `VLLM_OPENVINO_MTP_DRAFT_VOCAB` (default 32768) builds the draft
-lm_head from the first N rows of the compressed weight and its per-row scale
-and zero point, so it stays a compressed matmul (6 ms per step). Drafts are verified, so this changes speed,
-not output. Feeding the rows through a `Gather` on the compressed weight
-instead was slower than the full lm_head (16 / 30 ms at 32k / 64k rows), and
-adding the requests' context tokens to the low ids recovered only part of the
-acceptance (0.70 -> 0.72 at 32k, offline).
+The full lm_head (248,320 x 2,048 u8, 508 MB on Qwen3.5-2B) made a k=1 draft
+step 18 ms against 49 ms for the main model. `VLLM_OPENVINO_MTP_DRAFT_VOCAB`
+(default 32768) builds the draft lm_head from the first N rows of the
+compressed weight and its per-row scale and zero point, so it stays a
+compressed matmul (6 ms). Drafts are verified, so this changes speed, not
+output. A `Gather` on the compressed weight was slower than the full lm_head.
 
-Measured (8 CPUs, greedy, 256 tokens; 4 English/code prompts and 1 Korean of
-4, tok/s for 1 request (4 in a row) / 4 / 8 concurrent):
+Measured (8 CPUs, greedy, 256 tokens, mostly English/code prompts; tok/s for
+1 request / 4 / 8 concurrent):
 
 | Qwen3.5-2B-int4 | 1 | 4 | 8 | acceptance |
 |---|---|---|---|---|
@@ -632,106 +488,55 @@ Measured (8 CPUs, greedy, 256 tokens; 4 English/code prompts and 1 Korean of
 | k=1, 32k | 13.8 | 19.4 | 0.81 |
 | k=2, 32k | 14.7 | 19.4 | 0.73, 0.62 |
 
-On four Korean prompts (Qwen3.5-2B, k=1) the gain shrinks: 20.6 -> 21.7
-(whole vocabulary, acceptance 0.59) and 21.8 (32k, 0.39). Verifying two tokens
-costs 1.43x a decode step on the MoE model (82 -> 117 ms) against ~1.05x on
-the dense one, which is why concurrency erases the gain sooner there.
-Use k=1 for mixed load; k=2 helps a single stream and loses at 8 concurrent
-requests. The n-gram section's cap of 8 drafting requests applies.
-
-Checked on Qwen3.5-0.8B with k=2: twelve concurrent requests mixing greedy,
-seeded sampling, JSON schema, logprobs, `thinking_token_budget` and images
-returned HTTP 200, and greedy repeats differed only where the run without
-speculation also differed (chunk boundaries of a 3k-token prompt); eight
-1000-token requests in a 9.5k-token pool completed through 4 preemptions.
+On Korean prompts the gain shrinks (Qwen3.5-2B k=1: 20.6 -> 21.7, acceptance
+0.59 whole vocabulary, 0.39 at 32k). Verifying two tokens costs 1.43x a decode
+step on the MoE model against ~1.05x on the dense one, so concurrency erases
+the gain sooner there. Use k=1 for mixed load; k=2 helps a single stream and
+loses at 8 concurrent requests.
 
 Gemma-4 MTP is not supported. Its drafter is a separate 4-layer model
 (`google/gemma-4-*-it-assistant`) whose attention layers have only Q
 projections and read K/V from the target's last full-attention and last
-sliding-window layers. No OpenVINO IR of it exists: the published Gemma-4 IRs
-ship no drafter, and the optimum-intel export PRs (#1763, #1911) are unmerged.
-OpenVINO GenAI 2026.4 runs it only in its stateful SDPA pipeline at batch 1,
-on a target exported with extra outputs (`mtp_last_hidden_state`,
-`mtp_{full,sliding}_attention_{key,value}`) that it passes to the drafter as
-dense tensors every step; its PagedAttention pipeline has no Gemma-4 MTP. A
-PA version here would need that export plus a drafter whose attention reads
-the target layers' paged u8 cache. N-gram drafting works on Gemma-4
-meanwhile: gemma-4-E2B copying 300 tokens of code ran at 28 tok/s including
-prefill (smoke-test decode without speculation: 17.5), 138 of 152 drafts
-accepted.
+sliding-window layers. No OpenVINO IR of it exists (optimum-intel #1763 and
+#1911 are unmerged), and OpenVINO GenAI 2026.4 runs it only in its stateful
+SDPA pipeline at batch 1, on a target exported with extra outputs
+(`mtp_last_hidden_state`, `mtp_{full,sliding}_attention_{key,value}`). A PA
+version would need that export plus a drafter whose attention reads the
+target layers' paged u8 cache. Use n-gram on Gemma-4.
 
 ## Performance Profile
 
 Measured on Ryzen 9 7900 (no AMX), 8-CPU quota, OpenVINO 2026.4.1, greedy
 decode. Where the time goes, so tuning effort is not spent in the wrong place:
 
-- **Runner overhead is negligible.** Qwen2.5-Coder-0.5B-int4: client inter-token
-  latency 13.7 ms (1 request) / 19.8 ms (8) vs step time 13.9 / 20.1 ms; `infer`
-  is ~95% of the step, input preparation 0.1 ms, sampling 0.5-1.1 ms. The same IR
-  run as a plain stateful model in OpenVINO decodes in 13.3 ms (LATENCY) /
-  14.5 ms (THROUGHPUT), so the PagedAttention transformation costs nothing.
-  `VLLM_OPENVINO_PERFORMANCE_MODE=LATENCY` made no difference in the server.
-- **KV precision: the `u8` default is the fastest.** Qwen3-1.7B-int4 decode at
-  1.2k / 4.5k / 8.7k / 17.5k context tokens: `u8` 36 / 43 / 51 / 70 ms,
-  `f16` 37 / 47 / 59 / 89 ms, `bf16` 37 / 48 / 61 / 88 ms; prefill speed is the
-  same for all three. The `f16` and `bf16` rows are the same configuration on
-  this CPU (the plugin stores `bf16` for an `f16` request), so their small
-  differences are run-to-run noise. Greedy outputs diverge after 40-480
-  characters between `u8` and the 2-byte cache, so the two were compared on
-  next-token distributions. 20 prompts of 500 / 2k / 5k / 12k tokens (slices of
-  this repository's sources), each scored at 4 positions along the `bf16`
-  greedy continuation (teacher-forced, `logprobs=20`, `u8` vs `bf16`). Top-1
-  token agreement was 79/80 on Qwen3-1.7B-int4 and 79/80 on
-  Qwen2.5-Coder-0.5B-int4; mean KL over the top-20 was 0.007 and 0.016 nats,
-  mean |logprob change| of the top-1 token 0.019 and 0.024. The one flip per
-  model was a near tie (`bf16` top-1/top-2 gap 0.0 and 0.25 nats). KL did not
-  grow with context (Qwen3: 0.006 / 0.012 / 0.007 / 0.003 at 500 / 2k / 5k /
-  12k), and rerunning `bf16` gave bit-identical logprobs. 80 positions per
-  model is a small sample: this bounds the `u8` effect, it does not replace a
-  task benchmark.
-- **Long-context prefill slows down.** Qwen3-1.7B-int4 `u8`: 845 / 732 / 607 /
-  403 tok/s at the same four context lengths, consistent with attention
-  becoming about half of the time at 17k tokens. The OpenVINO node profile
-  (`PERF_COUNT`) did not sum to the step time, so it was not used for shares.
-  The PagedAttention op's XAttention sparse prefill (inputs 17-19) is not
-  used: the CPU kernel applies it only when the step holds a single sequence
-  (`executor_pa.cpp`: `q.size(0) > 1 && B_seq == 1`), which vLLM's mixed
-  prefill/decode batches rarely produce, and it approximates attention.
-- **MoE decode is expert matmul.** `GatherMatmulCompressed` is ~62%
-  (LFM2.5-8B-A1B) to ~78% (Gemma-4 26B-A4B) of the node time and attention
-  2-4%. Decode is 34 ms/token on LFM2.5-8B-A1B and ~90 ms/token on Gemma-4
-  26B-A4B. This is OpenVINO CPU kernel time, not plugin code, and it is not
-  slow for what it reads. Weight bytes per token (constants in the IR, routed
-  experts scaled by top-k / experts, everything else read in full, tied
-  `lm_head` included) over the step time: LFM2.5-8B-A1B 1.0 GB in 34 ms
-  (29.5 GB/s), Gemma-4 26B-A4B 2.4 GB in 90 ms (26.9 GB/s), Qwen3-1.7B-int4
-  1.18 GB in 36 ms (~32 GB/s). Decode is memory-bandwidth bound at ~27-32 GB/s
-  for dense and MoE alike, so only reading fewer bytes (smaller weights, fewer
-  active experts) makes it faster. Evidence: a read-only AVX2 sum over 2 GB
-  reaches 43 GB/s on 1 thread and 45-48 GB/s on 2-24 threads on this machine,
-  and plain OpenVINO stateful decode of Qwen3-1.7B-int4 is flat from 4 to 24
-  threads (33.5 / 33.8 / 34.2 / 34.5 / 34.5 ms at 4 / 8 / 12 / 16 / 24), about
-  35 GB/s or ~75% of that ceiling. Decode needs only ~4 CPUs; extra CPUs help
-  prefill and batched decode, not single-stream decode.
-- **Prefill speed:** Qwen3-1.7B-int4 ~840 tok/s at 1k tokens; LFM2.5-8B-A1B
-  ~516 tok/s at 2.3k (patched plugin); Gemma-4 26B-A4B ~170-250 tok/s at 2.4k
-  (first requests are slower while mmapped weights fault in).
-- **Prefix caching works on the PA path:** an 8.6k-token prompt took 14.4 s
-  the first time and 0.19 s when repeated.
-- **Prefill is at the matmul ceiling.** Qwen3-1.7B has 1.41 B non-embedding
-  parameters (2.8 GFLOP/token), so 888 tok/s at 1k tokens is ~2.5 TFLOP/s. A
-  standalone OpenVINO matmul with Qwen3 MLP shapes (1024 x 2048 x 6144, 8-CPU
-  quota, `bf16` inference precision) reached 1.8-1.9 TFLOP/s with `bf16`
-  weights and 2.1-2.2 with int4 weights at the default
-  `DYNAMIC_QUANTIZATION_GROUP_SIZE` 32 (256 tokens: 2.7), so prefill has no
-  headroom left at the default beyond kernel work. The one lever found is
-  `DYNAMIC_QUANTIZATION_GROUP_SIZE=128` (exposed as
-  `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE`, unset by default; measured
-  with a scratch patch before the variable existed): matmul 2.7-2.8 TFLOP/s and server
-  prefill 888 -> 1148 tok/s at 1k tokens and 752 -> 935 at 4k (+29% / +24%),
-  decode unchanged (28.6-29.3 tok/s). Accuracy was compared with a
-  larger sample (56 first-token distributions of 300 / 1k / 3k / 6k-token
-  prompts per model, top-20 KL against no dynamic quantization, `0`):
+- **Runner overhead is negligible.** Qwen2.5-Coder-0.5B: client inter-token
+  latency 13.7 ms (1 request) / 19.8 ms (8) vs step time 13.9 / 20.1 ms;
+  `infer` is ~95% of the step, input preparation 0.1 ms, sampling 0.5-1.1 ms.
+  The same IR as a plain stateful model decodes in 13.3-14.5 ms, so the
+  PagedAttention transformation costs nothing.
+- **Decode is memory-bandwidth bound** at ~27-32 GB/s for dense and MoE alike
+  (weight bytes per token over step time: Qwen3-1.7B 1.18 GB in 36 ms,
+  LFM2.5-8B-A1B 1.0 GB in 34 ms, Gemma-4 26B-A4B 2.4 GB in 90 ms), against a
+  45-48 GB/s read ceiling on this machine. Plain OpenVINO decode of Qwen3-1.7B
+  is flat from 4 to 24 threads (33.5-34.5 ms), so a single stream needs ~4
+  CPUs; only reading fewer bytes makes it faster. On MoE models
+  `GatherMatmulCompressed` is 62-78% of node time.
+- **KV precision: the `u8` default is the fastest.** Qwen3-1.7B decode at
+  1.2k / 4.5k / 8.7k / 17.5k context: `u8` 36 / 43 / 51 / 70 ms, `bf16`
+  37 / 48 / 61 / 88 ms; prefill is the same. On 80 teacher-forced positions
+  per model (500-12k-token prompts) `u8` vs `bf16` top-1 agreement was 79/80
+  on Qwen3-1.7B and Qwen2.5-Coder-0.5B, mean top-20 KL 0.007 / 0.016 nats,
+  not growing with context; the flips were near ties. This bounds the effect;
+  it does not replace a task benchmark.
+- **Prefill is at the matmul ceiling** (~2.5 TFLOP/s; Qwen3-1.7B ~840-890
+  tok/s at 1k tokens) and slows with context (845 / 732 / 607 / 403 tok/s at
+  the four lengths above) as attention grows to about half the time. The PA
+  op's XAttention sparse prefill is not used: the CPU kernel applies it only
+  to single-sequence steps and it approximates attention.
+- **Dynamic activation quantization** is the one prefill lever found.
+  `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` (unset = OpenVINO's 32);
+  56 first-token distributions per model, top-20 KL against `0`
+  (unquantized activations):
 
   | | prefill 1k / 4k (tok/s) | mean KL (nats) | top-1 agreement |
   |---|---|---|---|
@@ -744,18 +549,18 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   | Qwen2.5-Coder-0.5B, 64 | 3610 / 2767 | 0.051 | 55/56 |
   | Qwen2.5-Coder-0.5B, 128 | 3857 / 2911 | 0.042 | 53/56 |
 
-  Larger groups buy +17-18% (64) and +23-32% (128) prefill, but the default
-  already deviates from unquantized activations by ~0.03 nats and the extra
-  deviation of 64/128 (0.00-0.02) is within the noise of this sample (it is
-  not monotonic on Qwen2.5-Coder; 48-token greedy output matched the
-  unquantized run on only 1-3 of 8 prompts for every setting, including the
-  default). An earlier 24-prompt run suggested 2.4x the KL at 128; the larger
-  sample does not support that. KL grows with prompt length for all settings
-  (Qwen3: 0.01-0.03 at 300 tokens, 0.09-0.11 at 6k). The default was kept
-  because the cost, though small, could not be ruled out; the variable is opt-in.
-- **Concurrency scaling (decode-heavy, 8 CPUs).** N simultaneous requests,
-  ~15-token prompts, 256 output tokens each, `ignore_eos`; aggregate output
-  tok/s (default `max_num_seqs` 128):
+  Decode is unchanged. The extra deviation of 64/128 is within this sample's
+  noise, but the default was kept because the cost could not be ruled out.
+- **Other CPU compile properties** (Qwen3-1.7B, concurrency 1/8) are best at
+  OpenVINO's defaults: `INFERENCE_PRECISION` (already bf16), `ENABLE_CPU_PINNING`
+  (already on). `ENABLE_HYPER_THREADING=false` cost 13% at concurrency 8 and
+  `KEY/VALUE_CACHE_GROUP_SIZE=64` did not help. `PERFORMANCE_MODE=THROUGHPUT`
+  gave +28-31% single-stream and +10% at concurrency 8 over LATENCY on
+  Qwen2.5-Coder-0.5B, at 25 -> 34 ms first-token latency.
+  `NUM_STREAMS=AUTO` fragments threads across streams vLLM never runs
+  concurrently (one blocking `infer` per step): `NUM_STREAMS=1` was 3.56x
+  faster at concurrency 8 on Qwen3-1.7B and 2.4-2.7x on Hybrid-PA models.
+- **Concurrency scaling** (decode-heavy, 256 output tokens, aggregate tok/s):
 
   | N | 1 | 4 | 16 | 32 | 64 | 128 |
   |---|---|---|---|---|---|---|
@@ -763,41 +568,31 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   | Qwen2.5-Coder-0.5B-int4 | 86 | 236 | 757 | 1125 | 1228 | 1340 |
   | LFM2.5-8B-A1B-int4 (MoE) | 32 | 59 | 121 | 157 | 228 | 296 |
 
-  Dense models scale almost linearly to N=8-16 (weights are read once per
-  step), reach ~85-90% of their ceiling at N=32 and gain only 5-15% more
-  from N=32 to 128 while per-request speed halves each doubling, so N=16-32
-  is the useful range. The MoE model scales poorly because different tokens
-  select different experts, so a larger batch reads more expert weights per
-  step; it is still gaining at N=128. With 4 CPUs Qwen3-1.7B matches 8 CPUs
-  up to N=4 (29 / 99 tok/s) but flattens at 318 tok/s against 532 once the
-  batch is large enough to become compute-bound (N=16: 253 vs 327). Use 4
-  CPUs for a single-user or few-user deployment and more for batch serving.
-- **AVX2-only CPUs (emulated).** `OV_CPU_MAX_ISA=AVX2` caps the OpenVINO CPU
-  plugin at AVX2 (`ONEDNN_MAX_CPU_ISA` has no effect): inference precision
-  drops from `bf16` to `f32` and kernels become `jit_avx2_f32`. This removes
-  AVX-512, bf16 and VNNI but keeps Zen 4's caches, memory bandwidth and FMA
-  width, so it approximates the ISA of Haswell/Zen 2-3, not their speed.
-  Qwen3-1.7B, 8-CPU quota, host shared with VMs (the native row is slower
-  than the figures above for that reason; compare rows with each other):
+  Dense models scale almost linearly to N=8-16 and gain only 5-15% from 32 to
+  128. MoE scales worse because a larger batch reads more experts. With 4
+  CPUs Qwen3-1.7B matches 8 CPUs up to N=4 but flattens at 318 tok/s.
+- **Multi-socket** (2-socket Xeon E5-2670 v3, 12 cores per socket,
+  Qwen3.5-0.8B, guidellm output tok/s at 2 / 8 streams): 8 threads on one
+  node 14.7 / 22.7, split 4+4 across nodes 13.0 / 18.6; 12 threads on one
+  node 18.5 / 27.6, 24 across both 18.7 / 30.0. `numactl --interleave=all`
+  did not close the gap (29.7), so the limit is bandwidth, not locality.
+- **AVX2-only CPUs (emulated).** `OV_CPU_MAX_ISA=AVX2` drops inference
+  precision to `f32` while keeping Zen 4's caches and bandwidth, so it
+  approximates the ISA of Haswell/Zen 2-3, not their speed. Qwen3-1.7B, host
+  shared with VMs (compare rows with each other):
 
   | | prefill 0.9k / 3.7k (tok/s) | decode c=1 (ms/tok) | c=8 / c=32 (tok/s) |
   |---|---|---|---|
   | int4, native (bf16) | 719 / 627 | 42.7 | 153 / 402 |
   | int4, AVX2 | 307-312 / 285 | 41.7-42.5 | 96-99 / 198 |
-  | int4, AVX2, `DYNAMIC_QUANTIZATION_GROUP_SIZE` 0 / 128 | 306 / 305 | 42.9 / 40.5 | 99 / 98 at c=8 |
   | int8, AVX2 | 304 / 279 | 56.6 | 86 / 189 |
   | fp16, AVX2 | 295 / 273 | 111.3 | 58 / 154 |
 
-  Single-stream decode stays memory-bound and does not change; prefill is
-  2.2-2.3x and batched decode 1.6-2x slower, all from f32 matmul throughput.
-  Prefill is the same for every weight format, so weight decompression is not
-  the bottleneck, and int4 is the fastest format everywhere because it reads
-  the fewest bytes. Dynamic activation quantization has no measurable effect
-  at any group size. N-gram speculation (copy-heavy prompt, 256 tokens) still
-  helps a single stream: 44.4 -> 33.5 ms/tok at `num_speculative_tokens` 2 and
-  31.1 at 4 (native: 44.8 -> 32.9 / 27.2). At 8 concurrent requests per-request
-  decode latency changed by -10% to +6% (92.7 / 98.4 / 83.1 ms/tok), within
-  noise.
+  Single-stream decode is unchanged; prefill is 2.2-2.3x and batched decode
+  1.6-2x slower, all from f32 matmul throughput. int4 is the fastest format
+  because it reads the fewest bytes. Dynamic quantization group size has no
+  effect there. N-gram (k=4) still cut copy-heavy single-stream decode from
+  44.4 to 31.1 ms/tok.
 
 ## Comparison with OVMS and vLLM's CPU Backend
 
@@ -843,25 +638,18 @@ each; they agreed within 5%.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation
   computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
   rejects such requests with HTTP 400. Output-token `logprobs` work.
-- On OpenVINO 2026.4.x, MoE prefill is slow on CPUs without AMX:
-  LFM2.5-8B-A1B ~108 tok/s, Qwen3.6-35B-A3B ~74 tok/s (8 CPUs, Zen 4), because
-  the CPU plugin batches routed rows per expert into a GEMM only on bf16+AMX
-  and otherwise runs one GEMV per routed row. openvinotoolkit/openvino#39086
-  fixes it in 2026.5; the image's nightly contains it.
-- `VLLM_USE_RUST_FRONTEND=1` replaces the Python API server with the bundled
-  `vllm-rs` process over the same engine boundary, so the plugin, which runs
-  in the EngineCore, is unchanged. `scripts/smoke-test.sh` with
-  `SMOKE_ENV=VLLM_USE_RUST_FRONTEND=1` passed on every path at the Python
-  frontend's throughput (decode runs at 20-300 tok/s, so the frontend is not
-  the bottleneck), and image (Qwen3.5, Gemma-4) and JSON-schema requests gave
-  the same answers. Two differences:
-  - `OpenVinoPlatform.validate_request` is called only by the Python
-    frontend (`vllm/v1/engine/input_processor.py`), so `prompt_logprobs`
-    fails with HTTP 500 ("prompt_logprobs were requested but generation
-    returned none") instead of 400.
-    [vllm-project/vllm#67623](https://github.com/vllm-project/vllm/pull/67623)
-    (open) runs the check again in the engine core; with it applied to
-    `4e3463c87`, both frontends return 400.
+- On OpenVINO 2026.4.x, MoE prefill is slow on CPUs without AMX
+  (LFM2.5-8B-A1B ~108 tok/s, Qwen3.6-35B-A3B ~74 tok/s) because the CPU plugin
+  batches routed rows per expert into a GEMM only on bf16+AMX.
+  openvinotoolkit/openvino#39086 fixes it in 2026.5; the image's nightly has
+  it.
+- `VLLM_USE_RUST_FRONTEND=1` replaces the Python API server with `vllm-rs`
+  over the same engine boundary, so the plugin is unchanged; the smoke test
+  passes on every path at the same throughput, and image (Qwen3.5, Gemma-4)
+  and JSON-schema requests give the same answers. Two differences:
+  - `validate_request` is called only by the Python frontend, so
+    `prompt_logprobs` fails with HTTP 500 instead of 400.
+    [#67623](https://github.com/vllm-project/vllm/pull/67623) (open) runs the
+    check in the engine core; with it both frontends return 400.
   - The Rust frontend has no multimodal spec for MiniCPM-V 4.7: image
-    requests get HTTP 400 ("unsupported multimodal content"). Serve it with
-    the Python frontend.
+    requests get HTTP 400. Serve it with the Python frontend.
