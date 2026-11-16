@@ -35,5 +35,5 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
 RUN mkdir /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
-ENV PYTHONPATH=/opt/app-root VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1
+ENV PYTHONPATH=/opt/app-root VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 OMP_WAIT_POLICY=PASSIVE
 ENTRYPOINT ["vllm", "serve"]

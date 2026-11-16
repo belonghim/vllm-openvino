@@ -245,6 +245,16 @@ numerics).
   `OMP_NUM_THREADS` is set. An explicit value takes precedence. On an
   8-quota/24-core host a 32-request burst went from 4.5 s wall with 3.1 s of
   CFS throttling to 3.6 s with none.
+- The image sets `OMP_WAIT_POLICY=PASSIVE`. With libgomp's default spin-wait,
+  the 3 extra Torch workers spun after every sampler call (even greedy
+  `argmax`) and took 6.5 CPU-seconds per 10 s from OpenVINO's 4 threads under
+  a 4-CPU quota. Passive waiting raised aggregate decode at 4 CPUs (LFM2.5-350M
+  c4 / c16 208-214 / 611 -> 233-265 / 763 tok/s, Qwen3.5-0.8B 73 / 110 -> 82 /
+  117) and at 8 CPUs by 3-9% (Qwen3-1.7B, Qwen3.5-2B c4-c16); sampling stayed
+  as fast as before (64 x 248k-vocab top-k/top-p 52 ms; one thread takes
+  102 ms, which is why the plugin does not set `OMP_NUM_THREADS=1` itself).
+  libgomp reads the variable when `import torch` loads it, before the plugin
+  runs, so it has to be in the process environment.
 - Do not add zero-fill to `_allocate_kv_cache()`; OpenVINO initializes the
   cache and extra zero-fill can cause OOM. SSM/conv state caches are
   zero-filled. The worker zero-fills scheduler-reported
@@ -618,8 +628,28 @@ each; they agreed within 5%.
 | OVMS, same IR | 21.3 | 64 | 100 | 96 | 11.7 s | 198 | 1.8 GiB |
 
 - On the same IR the plugin and OVMS run at the same speed up to 8
-  concurrent requests (OVMS 5-8% ahead at c4-c8 on Qwen3.5); both execute the
-  same OpenVINO PagedAttention kernels.
+  concurrent requests; both execute the same OpenVINO PagedAttention kernels.
+  The plugin rows above predate `OMP_WAIT_POLICY=PASSIVE`, which was the
+  5-8% c4-c8 gap: with it Qwen3-1.7B gave 82 / 153 / 261 and Qwen3.5-2B
+  64 / 97 / 133 tok/s at c4 / c8 / c16. At 4 CPUs / 8 GiB
+  (`--max-num-batched-tokens 512`) the plugin gave LFM2.5-350M-int8 63-69 /
+  233-265 / 763 tok/s at c1 / c4 / c16 against OVMS's 69-71 / 259 / 270, and
+  Qwen3.5-0.8B-int4 35 / 82 / 117 against 32 / 78 / 78.
+- Accuracy matches OVMS on the same IR (4 CPUs, greedy, OVMS 2026.4.1, first
+  300 GSM8K test questions, every 28th of MMLU's 14k test questions with the
+  letter answer):
+
+  | | GSM8K | MMLU (500) |
+  |---|---|---|
+  | LFM2.5-350M-int8, OVMS / plugin / plugin DQ 128 | 38.3 / 38.3 / 36.7% | 32.6 / 32.4 / 33.2% |
+  | Qwen3.5-0.8B-int4 (no thinking), OVMS / plugin / plugin DQ 128 | 37.7 / 37.7 / 43.0% | 33.8 / 33.0 / 31.4% |
+
+  The plugin's text matched OVMS's on 291/300 and 495/500 (LFM2.5) and 275/300
+  and 483/500 (Qwen3.5) after stripping a trailing newline OVMS emits; no
+  GSM8K question was solved by only one of them. Dynamic quantization group
+  128 changes outputs at near-ties (57/300 identical on LFM2.5) without a
+  consistent direction: Qwen3.5 gained 16 GSM8K questions and lost 8 MMLU
+  ones.
 - OVMS admitted only 8 requests at a time here: its executor log showed at
   most 8 scheduled requests, so c16 ran in two waves (unary and streaming
   alike). Its default `rest_workers` (the CPU count) capped it at 4 until set

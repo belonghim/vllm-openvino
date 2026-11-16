@@ -34,7 +34,7 @@ podman run -d --name vllm-server -p 8080:8080 \
 ```bash
 VLLM_TARGET_DEVICE="empty" PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" pip install .
 pip uninstall -y triton   # vLLM may pull in triton, which is incompatible with OpenVINO
-TORCH_COMPILE_DISABLE=1 vllm serve --model /models/<model_dir>
+TORCH_COMPILE_DISABLE=1 OMP_WAIT_POLICY=PASSIVE vllm serve --model /models/<model_dir>
 ```
 
 ## Environment Variables
@@ -57,6 +57,7 @@ TORCH_COMPILE_DISABLE=1 vllm serve --model /models/<model_dir>
 | `VLLM_OPENVINO_FAST_SAMPLER` | Partial top-k/top-p and sparse repetition penalty instead of full-vocabulary routines (same output) | `1` |
 | `VLLM_OPENVINO_CACHE_DIR` | Compiled-model disk cache; unset = `~/.cache/vllm-openvino` if writable | auto |
 | `TORCH_COMPILE_DISABLE` | Must be `1` (set in the image); torch.compile is incompatible with OpenVINO | — |
+| `OMP_WAIT_POLICY` | `PASSIVE` (set in the image) stops idle Torch OpenMP threads from spinning on the CPUs OpenVINO needs: +10-20% at 4 concurrent requests on 4 CPUs. `OMP_NUM_THREADS=1` has the same effect but halves large-batch sampling speed | — |
 
 ## Performance
 

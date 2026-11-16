@@ -67,6 +67,7 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 상세 설명과 측정값은 `docs/compatibility.md` 참조.
 
 - **`TORCH_COMPILE_DISABLE=1` 필수** — torch.compile/Inductor는 OpenVINO와 비호환.
+- **`OMP_WAIT_POLICY=PASSIVE`는 프로세스 환경에 둔다** — 기본 spin-wait에서는 Torch OpenMP 워커가 샘플링 뒤에도 CPU를 계속 점유해 OpenVINO 스레드의 quota를 빼앗는다. libgomp가 `import torch` 시점에 값을 읽으므로 플러그인 코드에서는 설정할 수 없다. `OMP_NUM_THREADS=1`로 대신하면 큰 배치 샘플링이 느려진다.
 - **`import openvino` 실패를 import 시점에 raise하지 않는다** — vLLM 플러그인 디스커버리가 다른 플랫폼을 검사하다 깨진다.
 - **`_allocate_kv_cache()`에 `.fill(0)`을 넣지 않는다** — OpenVINO가 초기화하며, 추가하면 OOM. SSM/conv 캐시(`_allocate_state_cache()`)의 zero-fill은 유지한다.
 - **bf16은 numpy 변환 전에 float32로** (`_as_numpy_no_copy()`) — OpenVINO는 bf16 numpy를 받지 않는다.
