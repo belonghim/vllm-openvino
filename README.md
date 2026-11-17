@@ -11,7 +11,7 @@ Models must be pre-exported to OpenVINO IR with [optimum-intel](https://github.c
 ## Requirements
 
 - Linux x86-64 with AVX2 or newer
-- Python >= 3.11, vLLM 0.33.0, OpenVINO >= 2026.4.1
+- Python >= 3.11, vLLM 0.34.0, OpenVINO >= 2026.4.1
 
 ## Installation
 
@@ -126,7 +126,7 @@ The serving path is chosen from the IR. Both need `ScaledDotProductAttention` op
 - `thinking_token_budget` (needs `--reasoning-parser`)
 - Gemma 3 and Gemma 4, text and image
 - Qwen3.5/3.6 text and image, LFM2.5 (Hybrid-PA)
-- LFM3 (Hybrid-PA): pass `--trust-remote-code`; needs OpenVINO 2026.5 (the image's nightly). It ships `repetition_penalty: 1.1`, which disables n-gram drafts; send `"repetition_penalty": 1.0` to use them
+- LFM3 (Hybrid-PA): needs OpenVINO 2026.5 (the image's nightly). It ships `repetition_penalty: 1.1`, which disables n-gram drafts; send `"repetition_penalty": 1.0` to use them
 - MiniCPM-V 4.7 text and image (Hybrid-PA); needs vLLM >= 0.32.0 and Transformers >= 5.18.0
 - `VLLM_USE_RUST_FRONTEND=1`, with the differences below
 

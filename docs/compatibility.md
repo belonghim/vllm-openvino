@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- vLLM `0.33.0`
+- vLLM `0.34.0`
 - OpenVINO `>= 2026.4.1`; the image pins nightly `2026.5.0.dev20261030`, which
   has the MoE prefill fix (#39086) and reads IRs exported with 2026.5 (LFM3)
 - Linux x86-64 with AVX2 or newer
@@ -25,25 +25,18 @@ call on CPU). It imports none of the modules upstream removes. The sampler
 needs no `torch.ops._C` kernel; vLLM's CPU path calls `greedy_argmax` and
 `fused_gumbel_argmax`, which the `VLLM_TARGET_DEVICE=empty` wheel lacks.
 
-vLLM 0.33.0 selects MRV2 only when `HAS_TRITON` is true. With the PyPI wheel
-it is false on CPU hosts even with Triton installed (vLLM requires exactly one
-active GPU driver), and installing triton-cpu into an `empty` install does not
-change that (`vllm.triton_utils.importing` accepts triton-cpu only when the
-vLLM version contains `cpu`). The official `+cpu` build ships triton-cpu
-(#58140) and would select MRV2, as would any Triton install with
-`CUDA_VISIBLE_DEVICES=""`; set `VLLM_USE_V2_MODEL_RUNNER=0` there. Releases
-with #63373 remove the variable; leave it unset there.
+vLLM 0.34.0 has no MRV1 and no `VLLM_USE_V2_MODEL_RUNNER` switch (#63373);
+leave the variable unset. The plugin's platform and runner do not depend on
+`HAS_TRITON`, which is false on CPU hosts with the PyPI wheel.
 
 Tracked upstream:
 
-- [#61995](https://github.com/vllm-project/vllm/pull/61995) (merged
-  2026-10-30, not in 0.33.0) adds `StandaloneCPUModelRunner`, an MRV2 runner
+- [#61995](https://github.com/vllm-project/vllm/pull/61995) (in 0.34.0) adds `StandaloneCPUModelRunner`, an MRV2 runner
   with no `vllm/v1/worker/gpu` dependency. It is selected only when
   `not HAS_TRITON and cpu_architecture != X86`, so nothing changes on x86. It
   needs ten `torch.ops._C.*_cpu` ops missing from the `empty` wheel and does
   not support speculative decoding.
-- [#63373](https://github.com/vllm-project/vllm/pull/63373) (merged
-  2026-11-07, not in 0.33.0) removes MRV1 (`gpu_input_batch.py`,
+- [#63373](https://github.com/vllm-project/vllm/pull/63373) (in 0.34.0) removes MRV1 (`gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler`, `VLLM_USE_V2_MODEL_RUNNER`) and
   makes `CpuPlatform` refuse x86 without Triton (the plugin's platform is not
   `CpuPlatform`). It also moves the scheduler-worker interface to MRV2's, which
@@ -76,11 +69,12 @@ Tracked upstream:
   platform supply a `KVCacheConfigBuilder`. The plugin keeps the default:
   Hybrid-PA exposes only attention specs and allocates conv/SSM state itself.
 
-vLLM 0.34.0rc4 passes (wheel `9950ce36a`, the last rc4 commit with a
-per-commit wheel; it still pins `torch==2.14.0`/`torchvision==0.29.0`): the
-smoke test passed on both frontends, LFM3 ran at 0.33.0's speed, and
-Qwen3.5-2B MTP with prefix caching hit a repeated 2.3k-token prompt in 0.29 s
-(14.2 s cold) with 76% acceptance.
+vLLM 0.34.0 (same tree as rc4, still `torch==2.14.0`/`torchvision==0.29.0`):
+the smoke test passed on both frontends at or above 0.33.0's throughput,
+Qwen3.5 and Gemma-4 image requests worked on both, and `prompt_logprobs` is
+still rejected (400, or 500 under the Rust frontend). Qwen3.5-2B MTP with
+prefix caching hit a repeated 2.3k-token prompt in 0.29 s (14.2 s cold) with
+76% acceptance on rc4.
 
 The copies track vLLM-side formats the plugin consumes. Since 0.33.0 the
 grammar bitmask gives each structured-output request a fixed block of
@@ -171,10 +165,11 @@ Hybrid-PA serves hybrid Mamba/attention models (Qwen3.5, LFM2.5, LFM3,
 MiniCPM-V 4.7) with standard PagedAttention for attention layers and paged
 conv/SSM state. Gemma-4 is not a candidate: its state is transformer KV.
 
-LFM3 (conv width 7, full and 256-token sliding-window attention) is not in
-vLLM 0.33 or Transformers 5.18; the plugin registers `Lfm3ForCausalLM` as a
-`vllm.general_plugins` entry so the config validates, and the model needs
-`--trust-remote-code`. Its IR is exported with OpenVINO 2026.5. A 1746-token
+LFM3 (conv width 7, full and 256-token sliding-window attention) needs vLLM
+0.34, whose `Lfm3ForCausalLM` and config validate the IR's `config.json`
+without `--trust-remote-code` (0.33 needed a plugin-registered arch and remote
+code, which failed under an arbitrary UID). Its IR is exported with OpenVINO
+2026.5. A 1746-token
 prompt gave byte-identical 400-token greedy output against the stateful IR.
 
 Conv/SSM state storage depends on prefix caching.

@@ -29,7 +29,7 @@ MODEL_BASE="${MODEL_BASE:-$HOME/hf/OpenVINO}"
 MODELS=(
   "Qwen3-1.7B-int4-ov"
   "gemma-4-E2B-it-int4-ov"
-  "LFM3-1.7B-int4-ov --trust-remote-code"
+  "LFM3-1.7B-int4-ov"
   "Qwen3.5-0.8B-int4-ov"
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov"
 )

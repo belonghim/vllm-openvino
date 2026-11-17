@@ -83,7 +83,7 @@ The image pins OpenVINO nightly `2026.5.0.dev20261030` from
 `storage.openvinotoolkit.org/simple/wheels/nightly` for the MoE prefill fix
 (#39086) and 2026.5-exported IRs (LFM3). Move to the 2026.5 release once it
 ships and drop the nightly index. When upgrading, re-check LFM2.5-8B-A1B
-prefill TTFT and that vLLM still lacks LFM3 before keeping `register_models`.
+prefill TTFT.
 
 ## Validation
 

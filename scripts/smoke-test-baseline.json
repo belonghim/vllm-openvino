@@ -12,7 +12,7 @@
     "total_tokens": 1127,
     "avg_tps": 17.44
   },
-  "LFM3-1.7B-int4-ov (--trust-remote-code)": {
+  "LFM3-1.7B-int4-ov": {
     "total_ms": 55714,
     "total_tokens": 1280,
     "avg_tps": 22.97
