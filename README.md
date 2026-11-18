@@ -137,5 +137,6 @@ The serving path is chosen from the IR. Both need `ScaledDotProductAttention` op
 - With `VLLM_USE_RUST_FRONTEND=1`, MiniCPM-V 4.7 image requests are rejected.
 - Custom logits processors (`--logits-processors`) fail at startup; only vLLM's builtin `min_p`, `logit_bias` and `min_tokens` are applied.
 - vLLM V1 engine only. Models without `ScaledDotProductAttention` ops are rejected; re-export them with SDPA.
+- Qwen3.5 text-only exports (`openvino_model.xml`) are rejected: until openvinotoolkit/openvino#39652 ships, PagedAttention gives them wrong rotary positions. Use the multimodal export (`openvino_language_model.xml`, also with `--language-model-only`).
 
 See `docs/compatibility.md` for implementation details and measurements.

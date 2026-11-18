@@ -79,6 +79,17 @@ def apply_paged_attention_transformation(model: ov.Model, model_type: str) -> No
         allow_adaptive_rkv=False,
         allow_cache_rotation=False,
     )
+    # An IR that builds RoPE positions from the sequence length leaves
+    # position_ids unused; under PagedAttention every token of a step then
+    # gets the same position (Qwen3.5 text-only export, openvino#39652).
+    if any(p.get_friendly_name() == "position_ids"
+           and not p.output(0).get_target_inputs()
+           for p in model.get_parameters()):
+        raise ValueError(
+            "The model does not use its position_ids input after the "
+            "PagedAttention transformation, so rotary positions would be "
+            "wrong. Qwen3.5 text-only exports hit this until OpenVINO ships "
+            "openvino#39652; export the multimodal model instead.")
     if model_type == HYBRID_MAMBA:
         logger.info(
             "Hybrid model: applied PagedAttention transformation "

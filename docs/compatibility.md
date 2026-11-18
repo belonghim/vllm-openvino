@@ -659,6 +659,18 @@ each; they agreed within 5%.
 ## Known Limitations
 
 - Models without SDPA ops are not supported.
+- Qwen3.5 text-only exports (`openvino_model.xml`, `Qwen3_5ForCausalLM`) are
+  rejected at startup. They build RoPE positions from the sequence length and
+  leave `position_ids` unused, so after the PagedAttention transformation
+  every token of a step gets position `max_context_len - num_tokens`: all
+  prompt tokens land on position 0 and batched requests share one position.
+  Output still reads well because only 6 of 24 layers are attention, but
+  greedy tokens drift from the SDPA reference (an 869-token prompt diverged at
+  token 4 at a 1.24-logit margin). openvinotoolkit/openvino#39652 fixes the
+  transformation on master, after 2026.5.1. The loader rejects any IR whose
+  `position_ids` has no consumer after the transformation; every other local
+  IR, LFM2.5/LFM3 and the MTP heads included, has one. Multimodal exports
+  (`openvino_language_model.xml`) take `position_ids` and are not affected.
 - LoRA, pin memory, and multi-socket execution are not supported.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation
   computes logits only at sampled positions. `OpenVinoPlatform.validate_request`
