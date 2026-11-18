@@ -33,15 +33,19 @@ class MtpProposer:
         token_ids_cpu: np.ndarray,
         kv_cache: tuple[ov.Tensor, ov.Tensor],
         block_size: int,
-    ) -> list[list[int]]:
+        sampling_metadata,
+        random_rows: set[int],
+    ) -> tuple[list[list[int]], list[list[torch.Tensor]]]:
         """spans: per drafting request (InputBatch row, positions committed
         before this step, positions committed in this step, row of its first
         token in the main model's output, whether it emitted a token, block
-        ids). Returns the drafts of each span."""
+        ids). Returns the drafts of each span and, for spans whose row is in
+        random_rows, the distribution each draft was drawn from."""
         drafts: list[list[int]] = [[] for _ in spans]
+        draft_probs: list[list[torch.Tensor]] = [[] for _ in spans]
         catch_up = [i for i, span in enumerate(spans) if span[2]]
         if not catch_up:
-            return drafts
+            return drafts, draft_probs
         hidden = self.model.last_hidden_states
         # Copied first: the main embeddings may alias the embedding model's
         # output buffer, which the next embedding infer overwrites.
@@ -68,10 +72,14 @@ class MtpProposer:
         # (span, next position, row in the last MTP output) of requests that
         # emitted a token; partial prefill chunks only catch up.
         chain = []
-        for out_row, (i, token) in enumerate(
-                zip(catch_up, logits.argmax(-1).tolist())):
+        tokens, probs = self._next_tokens(
+            logits, [spans[i][0] for i in catch_up], sampling_metadata,
+            random_rows)
+        for out_row, i in enumerate(catch_up):
             if spans[i][4]:
-                drafts[i] = [token]
+                drafts[i] = [tokens[out_row]]
+                if probs[out_row] is not None:
+                    draft_probs[i] = [probs[out_row]]
                 chain.append((i, spans[i][1] + spans[i][2], out_row))
         for _ in range(self.k - 1):
             # The scheduler reserves blocks for k lookahead tokens.
@@ -88,11 +96,37 @@ class MtpProposer:
                 block_tables=[spans[i][5] for i, *_ in chain],
                 kv_cache=kv_cache,
             )
-            for out_row, token in enumerate(logits.argmax(-1).tolist()):
+            tokens, probs = self._next_tokens(
+                logits, [spans[i][0] for i, *_ in chain], sampling_metadata,
+                random_rows)
+            for out_row, (token, q) in enumerate(zip(tokens, probs)):
                 i, pos, _ = chain[out_row]
                 drafts[i].append(token)
+                if q is not None:
+                    draft_probs[i].append(q)
                 chain[out_row] = (i, pos + 1, out_row)
-        return drafts
+        return drafts, draft_probs
+
+    def _next_tokens(self, logits: np.ndarray, batch_rows: list[int],
+                     sampling_metadata, random_rows: set[int],
+                     ) -> tuple[list[int], list[torch.Tensor | None]]:
+        """Greedy requests draft the argmax; random requests draw from the
+        distribution the target sampler applies to these logits, so the
+        target can verify the draft against it."""
+        logits = torch.from_numpy(logits)
+        tokens = logits.argmax(-1).tolist()
+        probs: list[torch.Tensor | None] = [None] * len(tokens)
+        sel = [n for n, row in enumerate(batch_rows) if row in random_rows]
+        if sel:
+            q = self.model.sampler.random_probs(
+                logits[sel], sampling_metadata,
+                torch.tensor([batch_rows[n] for n in sel]))
+            for m, n in enumerate(sel):
+                probs[n] = q[m]
+                tokens[n] = int(torch.multinomial(
+                    q[m], 1,
+                    generator=sampling_metadata.generators.get(batch_rows[n])))
+        return tokens, probs
 
     def _embed(self, token_ids: list[int]) -> np.ndarray:
         return self.model._prepare_embeddings(

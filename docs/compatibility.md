@@ -421,11 +421,20 @@ requests returned the same text as single ones, also with n-gram on.
 `method=ngram` is accepted on PagedAttention and Hybrid-PA models, `mtp` on
 Hybrid-PA IRs that ship an MTP model (next section); `check_and_update_config`
 raises for any other method. `execute_model` computes logits for the 1+k query
-positions of each draft request, and `sample_tokens` accepts drafts while they
-match the argmax (the stock rejection sampler needs Triton). Drafts are
-proposed only for greedy requests without penalties, `logit_bias`,
-`allowed_token_ids`, `bad_words`, `min_tokens`, logprobs, or structured
-output; other requests in the batch use the normal sampler. Model
+positions of each draft request, and `sample_tokens` verifies them (the stock
+rejection sampler needs Triton). Greedy requests accept drafts while they
+match the argmax. Sampled requests use speculative sampling as OpenVINO GenAI
+does since openvino.genai#4769: accept draft d with probability
+min(1, p(d)/q(d)), else emit a sample of norm(max(0, p - q)) and stop, where p
+is the sampler's distribution after temperature, min_p, top-k and top-p and q
+is the one the draft was drawn from (one-hot for n-gram), so the output
+follows p alone. Drafts are proposed only for requests without penalties,
+`logit_bias`, `allowed_token_ids`, `bad_words`, `min_tokens`, logprobs, or
+structured output; other requests in the batch use the normal sampler.
+Drafts return through `take_draft_token_ids`, so the platform turns async
+scheduling off for both methods: vLLM 0.34 enables it for ngram, and the
+scheduler then sends `-1` placeholders instead of the drafts, which accepted
+no draft and changed greedy output. Model
 `generation_config.json` defaults count: LFM2.5 ships `repetition_penalty:
 1.05`, so no request drafts unless it sets `repetition_penalty=1.0` or the
 server runs with `--generation-config vllm`.
@@ -482,8 +491,9 @@ OpenVINO GenAI's MTP strategy (`mtp_model_transforms.cpp`):
   one position later; that draft-only KV is overwritten by the next catch-up
   and stays within the k lookahead slots the scheduler reserves.
 - Requests that cannot take drafts (same rules as n-gram) skip the MTP layer.
-  Drafts return through `take_draft_token_ids`, so the platform turns async
-  scheduling off, which vLLM would otherwise keep for `mtp`.
+  Sampled requests draw each draft from the sampler's distribution over the
+  draft logits (top-k clamped to the draft vocabulary) and keep it as q for
+  verification.
 
 The full lm_head (248,320 x 2,048 u8, 508 MB on Qwen3.5-2B) made a k=1 draft
 step 18 ms against 49 ms for the main model. `VLLM_OPENVINO_MTP_DRAFT_VOCAB`
@@ -509,6 +519,14 @@ Measured (8 CPUs, greedy, 256 tokens, mostly English/code prompts; tok/s for
 | k=1, whole vocabulary | 12.7 | 19.7 | 0.86 |
 | k=1, 32k | 13.8 | 19.4 | 0.81 |
 | k=2, 32k | 14.7 | 19.4 | 0.73, 0.62 |
+
+Sampled (`temperature=0.7, top_k=20, top_p=0.8`, 256 tokens, one request):
+Qwen3.5-2B 20.2-20.7 -> 25.5 tok/s at k=1 (acceptance 0.59) and 24.3 at k=2
+(0.40 per draft). The verifier reproduced p on synthetic distributions
+(total variation 0.002-0.005 over 200k draws, acceptance equal to
+sum(min(p, q))), and 600 seeded `temperature=1.0` requests gave per-position
+output distributions as far from two non-speculative runs as those runs are
+from each other.
 
 On Korean prompts the gain shrinks (Qwen3.5-2B k=1: 20.6 -> 21.7, acceptance
 0.59 whole vocabulary, 0.39 at 32k). Verifying two tokens costs 1.43x a decode

@@ -154,6 +154,22 @@ class OpenVINOSampler:
         return torch.where(md.temperature < _SAMPLING_EPS, greedy, sampled,
                            out=greedy)
 
+    def random_probs(self, logits: torch.Tensor, md: SamplingMetadata,
+                     rows: torch.Tensor) -> torch.Tensor:
+        """The distribution `_sample` draws batch row rows[i] from, for
+        logits[i]. Logits narrower than the vocabulary (the MTP draft
+        lm_head) clamp top-k to their width."""
+        def pick(t):
+            return None if t is None else t[rows]
+        logits = logits.to(torch.float32).div(md.temperature[rows].unsqueeze(1))
+        if md.min_p is not None:
+            _apply_min_p(logits, md.min_p[rows])
+        top_k = pick(md.top_k)
+        if top_k is not None:
+            top_k = top_k.clamp(max=logits.shape[1])
+        return self._apply_top_k_top_p(logits, top_k,
+                                       pick(md.top_p)).softmax(dim=-1)
+
     def _apply_top_k_top_p(self, logits: torch.Tensor, k: torch.Tensor | None,
                            p: torch.Tensor | None) -> torch.Tensor:
         if p is None:

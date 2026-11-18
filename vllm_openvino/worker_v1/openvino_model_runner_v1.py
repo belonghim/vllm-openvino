@@ -148,6 +148,7 @@ class OpenVINOModelRunnerV1:
             spec_config.num_speculative_tokens if spec_config else 0)
         self.drafter = None
         self._draft_token_ids: DraftTokenIds | None = None
+        self._draft_probs: dict[str, list[torch.Tensor]] = {}
         self._use_mtp = spec_config is not None and spec_config.method == "mtp"
         if spec_config is not None and not self._use_mtp:
             from vllm_openvino.worker_v1.ngram_proposer import NgramProposer
@@ -432,6 +433,7 @@ class OpenVINOModelRunnerV1:
             self.input_batch.remove_request(req_id)
             self._mm_req_ids.discard(req_id)
             self._mrope_by_req.pop(req_id, None)
+            self._draft_probs.pop(req_id, None)
             slot = self._conv_slot_by_req.pop(req_id, None)
             if slot is not None:
                 self._conv_slot_free.append(slot)
@@ -913,10 +915,11 @@ class OpenVINOModelRunnerV1:
         logits: torch.Tensor,
         spec_tokens: dict[str, list[int]],
     ) -> tuple[list, object]:
-        """Greedy verification of draft tokens; other requests use the sampler.
+        """Verifies draft tokens; requests without drafts use the sampler.
 
-        Drafts are only proposed for greedy requests without penalties, so the
-        target token is the plain argmax of the logits row.
+        Drafts are only proposed for requests without penalties or logits
+        processors (_supports_drafts), so a greedy target token is the plain
+        argmax of the logits row and a random one follows random_probs.
         """
         req_ids = self.input_batch.req_ids
         target = logits.argmax(dim=-1).tolist()
@@ -925,7 +928,12 @@ class OpenVINOModelRunnerV1:
         row = 0
         for i, req_id in enumerate(req_ids):
             drafts = spec_tokens.get(req_id)
-            if drafts:
+            draft_probs = self._draft_probs.pop(req_id, None)
+            if drafts and req_id not in self.input_batch.greedy_reqs:
+                sampled[i] = self._verify_sampled_drafts(
+                    logits[row:row + 1 + len(drafts)], drafts, i, draft_probs)
+                row += 1 + len(drafts)
+            elif drafts:
                 accepted = 0
                 for token in drafts:
                     if token != target[row + accepted]:
@@ -951,9 +959,46 @@ class OpenVINOModelRunnerV1:
                 logprobs_lists = sampler_output.logprobs_tensors.tolists()
         return sampled, logprobs_lists
 
+    def _verify_sampled_drafts(
+        self,
+        logits: torch.Tensor,
+        drafts: list[int],
+        batch_row: int,
+        draft_probs: list[torch.Tensor] | None,
+    ) -> list[int]:
+        """Speculative sampling (Leviathan et al., 2023), as OpenVINO GenAI
+        verifies sampled drafts: accept draft d with probability
+        min(1, p(d) / q(d)), else emit a sample of norm(max(0, p - q)) and
+        stop; after the last draft, sample the bonus token from p. q is the
+        distribution the draft was drawn from, one-hot for n-gram drafts.
+        The emitted tokens then follow p alone."""
+        md = self.input_batch.sampling_metadata
+        p = self.model.sampler.random_probs(
+            logits, md, torch.full((len(logits), ), batch_row))
+        generator = md.generators.get(batch_row)
+        out = []
+        for j, token in enumerate(drafts):
+            q = draft_probs[j] if draft_probs else None
+            q_token = 1.0 if q is None else float(q[token])
+            if torch.rand(1, generator=generator).item() * q_token < p[j, token]:
+                out.append(token)
+                continue
+            residual = p[j].clone()
+            if q is None:
+                residual[token] = 0
+            else:
+                residual[:len(q)] -= q
+                residual.clamp_(min=0)
+            if residual.sum() <= 0:
+                residual = p[j]
+            out.append(int(torch.multinomial(residual, 1, generator=generator)))
+            return out
+        out.append(int(torch.multinomial(p[-1], 1, generator=generator)))
+        return out
+
     @staticmethod
     def _supports_drafts(sampling_params) -> bool:
-        if sampling_params is None or sampling_params.temperature != 0:
+        if sampling_params is None:
             return False
         return not (
             sampling_params.logprobs is not None
@@ -1018,10 +1063,18 @@ class OpenVINOModelRunnerV1:
                           + self._kv_block_offsets).ravel().tolist()
             spans.append((req_index, past, new_computed - past,
                           self._req_token_start[req_id], emitted, blocks))
-        drafts = dict(zip(drafting, self.drafter.propose(
+        random_rows = {
+            self.input_batch.req_id_to_index[req_id] for req_id in drafting
+            if req_id not in self.input_batch.greedy_reqs}
+        draft_lists, prob_lists = self.drafter.propose(
             spans, self.input_batch.token_ids_cpu,
             self.kv_caches[self.num_main_kv_layers],
-            self.block_size // self._kv_blocks_per_block)))
+            self.block_size // self._kv_blocks_per_block,
+            self.input_batch.sampling_metadata, random_rows)
+        drafts = dict(zip(drafting, draft_lists))
+        for req_id, probs in zip(drafting, prob_lists):
+            if probs:
+                self._draft_probs[req_id] = probs
         draft_lists = [drafts.get(req_id, []) for req_id in req_ids]
         self._cap_drafting_reqs(draft_lists)
         self._draft_token_ids = DraftTokenIds(req_ids, draft_lists)
