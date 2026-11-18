@@ -350,8 +350,11 @@ class OpenVinoPlatform(Platform):
                 raise ValueError(
                     "mtp speculative decoding needs a Hybrid-PA IR that ships "
                     "openvino_mtp_model.xml (Qwen3.5/3.6 exports).")
+        if speculative_config is not None:
             # Drafts go back to the scheduler through take_draft_token_ids,
-            # as with ngram, which needs synchronous scheduling.
+            # which needs synchronous scheduling; async scheduling sends -1
+            # placeholders instead of the drafts (vLLM 0.34 enables it for
+            # ngram by default).
             vllm_config.scheduler_config.async_scheduling = False
 
         if hybrid_pa and hasattr(cache_config, "mamba_cache_mode"):
