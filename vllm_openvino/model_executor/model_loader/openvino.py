@@ -41,6 +41,9 @@ def has_op_with_type(function: ov.Model, type_name: str):
 ATTENTION_ONLY = "attention_only"
 HYBRID_MAMBA = "hybrid_mamba"
 MTP_IR = "openvino_mtp_model.xml"
+# SSM state inputs after the PA transformation: GatedDeltaNet (Qwen3.5) and
+# Mamba2 (Nemotron-H). Both page through the la.* slots like conv state.
+SSM_STATE_TABLES = ("gated_delta_state_table.", "selective_ssm_state_table.")
 
 
 def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, list]]:
@@ -69,22 +72,26 @@ def detect_model_type_and_shapes(ov_model: ov.Model) -> tuple[str, dict[str, lis
 def apply_paged_attention_transformation(model: ov.Model, model_type: str) -> None:
     """Attention layers become PagedAttention; on HYBRID_MAMBA models the
     conv/SSM layers become a linear-attention paged state (la.* with
-    conv_state_table.* and, for true SSM state, gated_delta_state_table.*)."""
+    conv_state_table.* and, for true SSM state, one of SSM_STATE_TABLES)."""
     if not has_op_with_type(model, "ScaledDotProductAttention"):
         raise ValueError(
             "The model has no ScaledDotProductAttention ops, so it cannot be "
             "transformed to PagedAttention. Re-export the model with SDPA.")
+    declares_position_ids = any(p.get_friendly_name() == "position_ids"
+                                for p in model.get_parameters())
     paged_attention_transformation(
         model,
         allow_adaptive_rkv=False,
         allow_cache_rotation=False,
     )
-    # An IR that builds RoPE positions from the sequence length leaves
-    # position_ids unused; under PagedAttention every token of a step then
-    # gets the same position (Qwen3.5 text-only export, openvino#39652).
-    if any(p.get_friendly_name() == "position_ids"
-           and not p.output(0).get_target_inputs()
-           for p in model.get_parameters()):
+    # An IR that declares position_ids but builds RoPE positions from the
+    # sequence length leaves it unused; under PagedAttention every token of a
+    # step then gets the same position (Qwen3.5 text-only export,
+    # openvino#39652). NoPE models (Nemotron-H) declare none and pass.
+    if declares_position_ids and any(
+            p.get_friendly_name() == "position_ids"
+            and not p.output(0).get_target_inputs()
+            for p in model.get_parameters()):
         raise ValueError(
             "The model does not use its position_ids input after the "
             "PagedAttention transformation, so rotary positions would be "
@@ -444,12 +451,14 @@ class OpenVINOCausalLM(nn.Module):
 
         # Hybrid PA models additionally expose a linear-attention paged-state
         # mechanism for conv layers (conv_state_table.*) and/or true SSM
-        # state, e.g. GatedDeltaNet (gated_delta_state_table.*), sharing one
-        # set of la.* paging indices.
+        # state (SSM_STATE_TABLES), sharing one set of la.* paging indices.
         self._has_linear_attention_inputs = any(
-            inp.get_any_name().startswith(("conv_state_table.", "gated_delta_state_table."))
+            inp.get_any_name().startswith(("conv_state_table.", *SSM_STATE_TABLES))
             for inp in ov_compiled.inputs
         )
+        self.ssm_state_table = next(
+            (prefix for inp in ov_compiled.inputs for prefix in SSM_STATE_TABLES
+             if inp.get_any_name().startswith(prefix)), SSM_STATE_TABLES[0])
         self._position_input_name: str | None = None
         self._position_input_channels = 1
         known_names = {"input_ids", "inputs_embeds", "max_context_len",
@@ -457,8 +466,7 @@ class OpenVINOCausalLM(nn.Module):
                        "block_indices_begins", "sampled_tokens_indices",
                        "token_type_ids", "per_layer_inputs"}
         known_prefixes = ("key_cache.", "value_cache.",
-                           "conv_state_table.", "gated_delta_state_table.",
-                           "la.")
+                           "conv_state_table.", *SSM_STATE_TABLES, "la.")
         for inp in ov_compiled.inputs:
             name = inp.get_any_name()
             if name in known_names or name.startswith(known_prefixes):
@@ -1018,7 +1026,7 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
     Attention layers use real PagedAttention (key_cache.N/value_cache.N,
     identical semantics to PAInputBuilder). Conv/SSM layers use a separate
     linear-attention paged-state mechanism (la.*/conv_state_table.N and/or
-    la.*/gated_delta_state_table.N), one physical slot per running sequence
+    la.* with an SSM_STATE_TABLES input), one physical slot per running sequence
     shared across both groups, fed from ``attn_metadata``.
     """
 
@@ -1099,7 +1107,7 @@ class HybridPAInputBuilder(OpenVINOInputBuilder):
         for i, conv_cache in enumerate(conv_caches or []):
             inputs[f"conv_state_table.{i}"] = conv_cache
         for i, ssm_cache in enumerate(ssm_caches or []):
-            inputs[f"gated_delta_state_table.{i}"] = ssm_cache
+            inputs[f"{model.ssm_state_table}{i}"] = ssm_cache
 
         return inputs
 

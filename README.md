@@ -115,7 +115,7 @@ Sampling runs in the plugin's CPU sampler, which gives the same tokens and logpr
 The serving path is chosen from the IR. Both need `ScaledDotProductAttention` ops; an IR without them is rejected at startup.
 
 - **PagedAttention** for attention-only models, including stateful (`ReadValue`) exports and sliding-window models such as Gemma-4. Concurrency-8 throughput was 4.9-7.0x the removed sequential path on dense models and 3.2-6.7x on Gemma-4. Greedy output can differ from the stateful IR on Qwen-family models because of the transformed attention, not the cache precision.
-- **Hybrid-PA** for hybrid Mamba/attention models (Qwen3.5, LFM2.5, LFM3, MiniCPM-V 4.7): attention layers use PagedAttention and conv/SSM state is paged separately, so requests batch. Prefix caching works, also with speculative decoding, by keeping a state checkpoint per scheduler block; hits land on the checkpoint interval (`VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`). Qwen3.5-0.8B 2.4k-token prompt: 8.2 s cold, 0.20 s on a hit.
+- **Hybrid-PA** for hybrid Mamba/attention models (Qwen3.5, LFM2.5, LFM3, MiniCPM-V 4.7, Nemotron-H): attention layers use PagedAttention and conv/SSM state is paged separately, so requests batch. Prefix caching works, also with speculative decoding, by keeping a state checkpoint per scheduler block; hits land on the checkpoint interval (`VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER`). Qwen3.5-0.8B 2.4k-token prompt: 8.2 s cold, 0.20 s on a hit.
 
 ## Compatibility
 
@@ -128,6 +128,7 @@ The serving path is chosen from the IR. Both need `ScaledDotProductAttention` op
 - Qwen3.5/3.6 text and image, LFM2.5 (Hybrid-PA)
 - LFM3 (Hybrid-PA): needs OpenVINO 2026.5 (the image's nightly). It ships `repetition_penalty: 1.1`, which disables n-gram drafts; send `"repetition_penalty": 1.0` to use them
 - MiniCPM-V 4.7 text and image (Hybrid-PA); needs vLLM >= 0.32.0 and Transformers >= 5.18.0
+- Nemotron-H (Hybrid-PA, Mamba2): export with optimum-intel >= 0ee909b and without `--trust-remote-code`
 - `VLLM_USE_RUST_FRONTEND=1`, with the differences below
 
 ## Limitations

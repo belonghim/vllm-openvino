@@ -162,8 +162,22 @@ causal.
 ### Hybrid-PA
 
 Hybrid-PA serves hybrid Mamba/attention models (Qwen3.5, LFM2.5, LFM3,
-MiniCPM-V 4.7) with standard PagedAttention for attention layers and paged
-conv/SSM state. Gemma-4 is not a candidate: its state is transformer KV.
+MiniCPM-V 4.7, Nemotron-H) with standard PagedAttention for attention layers
+and paged conv/SSM state. Gemma-4 is not a candidate: its state is transformer
+KV. The PA transformation names the SSM state input after the op:
+`gated_delta_state_table.N` for GatedDeltaNet (Qwen3.5),
+`selective_ssm_state_table.N` for Mamba2 (Nemotron-H); both page through the
+same `la.*` slots, as in GenAI's `LinearAttentionCacheManager`.
+
+Nemotron-H (NVIDIA-Nemotron-3-Nano-4B: 21 Mamba2, 4 attention layers, no
+RoPE) was checked on a bf16 IR: greedy output matched the stateful IR token
+for token on 7 prompts of 5-868 tokens, sequentially, as 7 concurrent
+requests and on a prefix-cache hit. Export it with optimum-intel >= 0ee909b
+(#2085), which caps Transformers below 5.16, and without
+`--trust-remote-code`: the checkpoint's remote code imports the CUDA-only
+`mamba-ssm`, while Transformers' built-in `nemotron_h` exports. The stateful
+IR's own single-shot prefill of 869 tokens exceeded 16 GiB; the plugin's PA
+path serves it within the same limit.
 
 LFM3 (conv width 7, full and 256-token sliding-window attention) needs vLLM
 0.34, whose `Lfm3ForCausalLM` and config validate the IR's `config.json`
@@ -667,9 +681,11 @@ each; they agreed within 5%.
   Output still reads well because only 6 of 24 layers are attention, but
   greedy tokens drift from the SDPA reference (an 869-token prompt diverged at
   token 4 at a 1.24-logit margin). openvinotoolkit/openvino#39652 fixes the
-  transformation on master, after 2026.5.1. The loader rejects any IR whose
-  `position_ids` has no consumer after the transformation; every other local
-  IR, LFM2.5/LFM3 and the MTP heads included, has one. Multimodal exports
+  transformation on master, after 2026.5.1. The loader rejects an IR that
+  declares `position_ids` but has no consumer for it after the transformation;
+  every other local IR, LFM2.5/LFM3 and the MTP heads included, has one.
+  NoPE models (Nemotron-H) declare no `position_ids`, and the transformation
+  adds an unused one, so they pass. Multimodal exports
   (`openvino_language_model.xml`) take `position_ids` and are not affected.
 - LoRA, pin memory, and multi-socket execution are not supported.
 - `prompt_logprobs` is not supported: the gather-before-matmul transformation

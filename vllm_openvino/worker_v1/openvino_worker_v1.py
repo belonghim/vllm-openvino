@@ -46,6 +46,7 @@ from vllm_openvino.utils import (
     ov_cache_dtype,
 )
 from vllm_openvino.model_executor.model_loader.openvino import (
+    SSM_STATE_TABLES,
     detect_model_type_and_shapes,
 )
 
@@ -218,7 +219,7 @@ class OpenVINOWorkerV1(WorkerBase):
                 # (e.g. f32 -> bf16); the preloaded (pre-transform) dtype is stale.
                 new_conv_cache_config.append(input_port.get_partial_shape())
                 new_conv_cache_dtypes.append(input_port.get_element_type().to_string())
-            elif input_name.startswith("gated_delta_state_table."):
+            elif input_name.startswith(SSM_STATE_TABLES):
                 new_ssm_cache_config.append(input_port.get_partial_shape())
                 new_ssm_cache_dtypes.append(input_port.get_element_type().to_string())
         # The MTP layer's KV cache is one more attention layer on the same
