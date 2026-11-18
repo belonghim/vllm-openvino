@@ -288,12 +288,15 @@ def format_memory_size(size: float) -> str:
 # KV precisions ("u8", "i8", ...) live in cache_config.openvino_kv_dtype;
 # cache_config.cache_dtype carries the closest valid vLLM literal instead.
 # Unknown IR element types (e.g. "nf4") map to "auto" ("backend chooses").
+# Float precisions map to "auto" too: vLLM 0.34 rejects a float16/bfloat16
+# cache_dtype that differs from the model dtype, and page sizes come from the
+# OpenVINO cache shapes, not from this literal.
 VLLM_CACHE_DTYPE_BY_OV: dict[str, str] = {
     "u8": "int8_per_token_head",
     "i8": "int8_per_token_head",
-    "f16": "float16",
-    "fp16": "float16",
-    "bf16": "bfloat16",
+    "f16": "auto",
+    "fp16": "auto",
+    "bf16": "auto",
     "f32": "auto",
     "fp32": "auto",
 }

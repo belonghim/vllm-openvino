@@ -134,7 +134,10 @@ x86_64/ARM64: with the variable unset the loader passes no
 `u8`/`f16`/`bf16`; on a CPU whose runtime precision is bf16 the CPU plugin
 stores `bf16` for an `f16` request (`scaled_attn.cpp`
 `side_cache_precision`), and `f32`/`i8` are rejected by CPU PagedAttention and
-fall back to the default with a warning. On Qwen2.5-Coder-0.5B, Qwen3-1.7B,
+fall back to the default with a warning. vLLM sees `cache_dtype="auto"` for
+float caches: 0.34 rejects a `float16`/`bfloat16` cache dtype that differs from
+the model dtype (bf16 here), which made `f16` fail at startup.
+On Qwen2.5-Coder-0.5B, Qwen3-1.7B,
 TinyLlama-1.1B and Phi-3.5-mini, concurrency-8 throughput was 4.9-7.0x the
 removed sequential path and single-stream -7.8% to +4%. Greedy output matched
 the stateful IR on TinyLlama and differed on Qwen-family models with u8 and
