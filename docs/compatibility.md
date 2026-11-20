@@ -507,11 +507,22 @@ OpenVINO GenAI's MTP strategy (`mtp_model_transforms.cpp`):
   verification.
 
 The full lm_head (248,320 x 2,048 u8, 508 MB on Qwen3.5-2B) made a k=1 draft
-step 18 ms against 49 ms for the main model. `VLLM_OPENVINO_MTP_DRAFT_VOCAB`
-(default 32768) builds the draft lm_head from the first N rows of the
+step 18 ms against 49 ms for the main model. The draft lm_head keeps token
+ids below `VLLM_OPENVINO_MTP_DRAFT_VOCAB` (default 32768) plus every token
+whose text contains a `VLLM_OPENVINO_MTP_DRAFT_CHARS` character (default
+`가-힣`, Hangul syllables), copied at load time from the rows of the
 compressed weight and its per-row scale and zero point, so it stays a
-compressed matmul (6 ms). Drafts are verified, so this changes speed, not
-output. A `Gather` on the compressed weight was slower than the full lm_head.
+compressed matmul (6 ms at 32k). The drafter maps draft logits back to token
+ids and spreads q over them for verification. Drafts are verified, so this
+changes speed, not output. A `Gather` on the compressed weight was slower
+than the full lm_head.
+
+The low ids alone cover English and code but not Korean: byte-level BPE
+orders tokens by merge rank, and only 36 of Qwen3.5's 6,807 Hangul tokens are
+below 32k (median id 189k). On Qwen3.5-2B's own outputs the first 32k ids
+covered 45% of Korean tokens and 90% of English ones; adding the Hangul
+tokens (39,525 rows) covers 96% of Korean and leaves English unchanged.
+Tokenizing the candidate tokens adds about 1.7 s to an MTP start.
 
 Measured (8 CPUs, greedy, 256 tokens, mostly English/code prompts; tok/s for
 1 request / 4 / 8 concurrent):
@@ -539,8 +550,20 @@ sum(min(p, q))), and 600 seeded `temperature=1.0` requests gave per-position
 output distributions as far from two non-speculative runs as those runs are
 from each other.
 
-On Korean prompts the gain shrinks (Qwen3.5-2B k=1: 20.6 -> 21.7, acceptance
-0.59 whole vocabulary, 0.39 at 32k). Verifying two tokens costs 1.43x a decode
+Korean prompts (Qwen3.5-2B k=1, 256 tokens, thinking off; tok/s for 1
+request greedy / 1 sampled / 4 / 8 concurrent greedy, acceptance greedy,
+sampled):
+
+| draft vocabulary | 1 greedy | 1 sampled | 4 | 8 | acceptance |
+|---|---|---|---|---|---|
+| no speculation | 21.1 | 20.6 | 58.6 | 77.2 | - |
+| first 32k ids | 23.5-24.3 | 20.9-21.1 | 56.4 | 71.9 | 0.34, 0.32 |
+| first 32k + Hangul | 27.2-27.9 | 24.9-25.0 | 63.8 | 80.9 | 0.58, 0.62 |
+
+English on the same runs was within noise between the two vocabularies
+(29.3-30.7 tok/s single, 68.9-69.8 at 4, 88.2-89.5 at 8, acceptance 0.71
+on both). Keeping 32k rows in total (first 26k + Hangul) lowered Korean
+sampled acceptance to 0.54. Verifying two tokens costs 1.43x a decode
 step on the MoE model against ~1.05x on the dense one, so concurrency erases
 the gain sooner there. Use k=1 for mixed load; k=2 helps a single stream and
 loses at 8 concurrent requests.

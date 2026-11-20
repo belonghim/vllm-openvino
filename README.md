@@ -54,6 +54,7 @@ TORCH_COMPILE_DISABLE=1 OMP_WAIT_POLICY=PASSIVE vllm serve --model /models/<mode
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | Hybrid P/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
 | `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER` | Hybrid-PA prefix caching block in 32-token KV blocks (8 = 256 tokens). `0` = OpenVINO GenAI's automatic rule. Smaller = finer prefix hits, more memory per token | `8` |
 | `VLLM_OPENVINO_MTP_DRAFT_VOCAB` | MTP draft lm_head covers token ids below this value; changes speed, not output. `0` = whole vocabulary | `32768` |
+| `VLLM_OPENVINO_MTP_DRAFT_CHARS` | Regex character class; the MTP draft lm_head also covers tokens whose text contains one of its characters (e.g. `가-힣ぁ-ヿ` to add kana). Empty = low ids only | `가-힣` |
 | `VLLM_OPENVINO_FAST_SAMPLER` | Partial top-k/top-p and sparse repetition penalty instead of full-vocabulary routines (same output) | `1` |
 | `VLLM_OPENVINO_CACHE_DIR` | Compiled-model disk cache; unset = `~/.cache/vllm-openvino` if writable | auto |
 | `TORCH_COMPILE_DISABLE` | Must be `1` (set in the image); torch.compile is incompatible with OpenVINO | — |
@@ -122,7 +123,7 @@ The serving path is chosen from the IR. Both need `ScaledDotProductAttention` op
 - Chunked prefill and prefix caching
 - Structured outputs (`structured_outputs`, `response_format`, forced tool calls)
 - N-gram speculative decoding (`--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":5,"prompt_lookup_max":8}'`): speeds up copy-heavy output (code edits, quoting, RAG). Drafts for greedy and sampled requests without penalties, logprobs or structured output; sampled drafts are verified by speculative sampling, so output follows the target model's distribution
-- MTP speculative decoding (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`) on Qwen3.5/3.6 IRs that ship `openvino_mtp_model.xml`: single-stream Qwen3.5-2B 20.8 -> 27.4 tok/s greedy and 20.5 -> 25.5 sampled (`temperature=0.7, top_k=20, top_p=0.8`), Qwen3.6-35B-A3B 10.8 -> 13.8 tok/s; the gain fades by 8 concurrent requests and is small on Korean text. Gemma-4 MTP is not supported
+- MTP speculative decoding (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`) on Qwen3.5/3.6 IRs that ship `openvino_mtp_model.xml`: single-stream Qwen3.5-2B 20.8 -> 27.4 tok/s greedy and 20.5 -> 25.5 sampled (`temperature=0.7, top_k=20, top_p=0.8`), Qwen3.6-35B-A3B 10.8 -> 13.8 tok/s, Korean 21.1 -> 27.9 greedy and 20.6 -> 25.0 sampled; the gain fades by 8 concurrent requests. Gemma-4 MTP is not supported
 - `thinking_token_budget` (needs `--reasoning-parser`)
 - Gemma 3 and Gemma 4, text and image
 - Qwen3.5/3.6 text and image, LFM2.5 (Hybrid-PA)

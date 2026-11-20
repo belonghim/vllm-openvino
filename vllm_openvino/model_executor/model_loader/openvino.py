@@ -2,6 +2,7 @@
 
 # ruff: noqa: SIM117
 import os
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -157,11 +158,11 @@ def apply_gather_before_matmul_transformation(model: ov.Model):
         model.add_parameters([indices])
 
 
-def _slice_weight_rows(weight: ov.Output, num_rows: int) -> ov.Output | None:
-    """Copy of a [rows, hidden] weight subgraph keeping its first num_rows
-    rows: per-row constants (compressed weight, scales, zero points) are cut,
-    so the copy stays a compressed weight. None if the subgraph has other
-    ops than element-wise decompression or sub-byte constants."""
+def _slice_weight_rows(weight: ov.Output, rows: np.ndarray) -> ov.Output | None:
+    """Copy of a [rows, hidden] weight subgraph keeping the given rows:
+    per-row constants (compressed weight, scales, zero points) are cut, so
+    the copy stays a compressed weight. None if the subgraph has other ops
+    than element-wise decompression or sub-byte constants."""
     total_rows = weight.get_partial_shape()[0].get_length()
     builders = {
         "Convert": lambda node, a: ov.opset8.convert(
@@ -178,7 +179,7 @@ def _slice_weight_rows(weight: ov.Output, num_rows: int) -> ov.Output | None:
                 return output
             if node.get_element_type().bitwidth < 8:
                 return None
-            new = ov.op.Constant(node.get_data()[:num_rows].copy())
+            new = ov.op.Constant(node.get_data()[rows])
         elif node.get_type_name() in builders:
             inputs = [clone(node.input_value(i))
                       for i in range(node.get_input_size())]
@@ -189,16 +190,40 @@ def _slice_weight_rows(weight: ov.Output, num_rows: int) -> ov.Output | None:
             return None
         return new.output(0)
 
-    return clone(weight) if num_rows < total_rows else None
+    return clone(weight) if len(rows) < total_rows else None
 
 
-def prepare_mtp_models(model: ov.Model, mtp_model: ov.Model) -> None:
+def _draft_token_ids(model_config: ModelConfig,
+                     num_rows: int) -> np.ndarray | None:
+    """Ascending token ids of the MTP draft lm_head: ids below
+    VLLM_OPENVINO_MTP_DRAFT_VOCAB plus higher-id tokens whose text contains
+    a VLLM_OPENVINO_MTP_DRAFT_CHARS character. None = whole vocabulary."""
+    first = envs.VLLM_OPENVINO_MTP_DRAFT_VOCAB
+    if not first or first >= num_rows:
+        return None
+    ids = np.arange(first)
+    if envs.VLLM_OPENVINO_MTP_DRAFT_CHARS:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_config.tokenizer,
+            trust_remote_code=model_config.trust_remote_code)
+        pattern = re.compile(f"[{envs.VLLM_OPENVINO_MTP_DRAFT_CHARS}]")
+        texts = tokenizer.batch_decode(
+            [[i] for i in range(first, min(len(tokenizer), num_rows))])
+        ids = np.concatenate([ids, [first + n for n, text in enumerate(texts)
+                                    if pattern.search(text)]]).astype(np.int64)
+    return ids
+
+
+def prepare_mtp_models(model: ov.Model, mtp_model: ov.Model,
+                       model_config: ModelConfig) -> np.ndarray | None:
     """MTP drafting as OpenVINO GenAI's mtp_model_transforms: the main model
     also returns the lm_head input of every token (``last_hidden_state``),
     and the MTP model gets the main model's lm_head on its own hidden state,
     gathered at ``sampled_tokens_indices`` like the main logits. Both must
     already be PagedAttention-transformed, the main model also
-    gather-before-matmul transformed."""
+    gather-before-matmul transformed. Returns the token id of each draft
+    logit, None when the draft covers the whole vocabulary."""
     lm_head, _ = find_llm_matmul(model)
     hidden = lm_head.input_value(0).get_node().input_value(0)
     hidden_result = ov.opset8.result(hidden)
@@ -210,9 +235,18 @@ def prepare_mtp_models(model: ov.Model, mtp_model: ov.Model) -> None:
     gathered = ov.opset8.gather(
         mtp_hidden, indices, ov.op.Constant(ov.Type.i64, ov.Shape([1]), [0]))
     weight = lm_head.input_value(1)
-    draft_vocab = envs.VLLM_OPENVINO_MTP_DRAFT_VOCAB
-    if draft_vocab and lm_head.get_transpose_b():
-        weight = _slice_weight_rows(weight, draft_vocab) or weight
+    draft_ids = None
+    if lm_head.get_transpose_b():
+        draft_ids = _draft_token_ids(
+            model_config, weight.get_partial_shape()[0].get_length())
+        sliced = None if draft_ids is None else _slice_weight_rows(
+            weight, draft_ids)
+        if sliced is None:
+            draft_ids = None
+        else:
+            weight = sliced
+            logger.info("MTP draft lm_head: %d of %d tokens", len(draft_ids),
+                        lm_head.input_value(1).get_partial_shape()[0].get_length())
     logits = ov.opset8.matmul(gathered, weight, False,
                               lm_head.get_transpose_b())
     logits_result = ov.opset8.result(logits)
@@ -221,6 +255,7 @@ def prepare_mtp_models(model: ov.Model, mtp_model: ov.Model) -> None:
     mtp_model.add_results([logits_result])
     model.validate_nodes_and_infer_types()
     mtp_model.validate_nodes_and_infer_types()
+    return draft_ids
 
 
 class OpenVINOInputBuilder(ABC):
@@ -354,10 +389,13 @@ class OpenVINOCausalLM(nn.Module):
         apply_gather_before_matmul_transformation(ov_model)
         ov_model.validate_nodes_and_infer_types()
         mtp_model = None
+        self.mtp_draft_ids: torch.Tensor | None = None
         if use_mtp:
             mtp_model = ov_core.read_model(str(model_dir / MTP_IR))
             apply_paged_attention_transformation(mtp_model, ATTENTION_ONLY)
-            prepare_mtp_models(ov_model, mtp_model)
+            draft_ids = prepare_mtp_models(ov_model, mtp_model, model_config)
+            if draft_ids is not None:
+                self.mtp_draft_ids = torch.from_numpy(draft_ids)
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
         perf_mode = envs.VLLM_OPENVINO_PERFORMANCE_MODE

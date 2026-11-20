@@ -112,9 +112,11 @@ class MtpProposer:
                      ) -> tuple[list[int], list[torch.Tensor | None]]:
         """Greedy requests draft the argmax; random requests draw from the
         distribution the target sampler applies to these logits, so the
-        target can verify the draft against it."""
+        target can verify the draft against it. Draft logits of a reduced
+        vocabulary map back to token ids through ``mtp_draft_ids``, and q
+        is spread over token ids."""
         logits = torch.from_numpy(logits)
-        tokens = logits.argmax(-1).tolist()
+        tokens = logits.argmax(-1)
         probs: list[torch.Tensor | None] = [None] * len(tokens)
         sel = [n for n, row in enumerate(batch_rows) if row in random_rows]
         if sel:
@@ -123,10 +125,16 @@ class MtpProposer:
                 torch.tensor([batch_rows[n] for n in sel]))
             for m, n in enumerate(sel):
                 probs[n] = q[m]
-                tokens[n] = int(torch.multinomial(
+                tokens[n] = torch.multinomial(
                     q[m], 1,
-                    generator=sampling_metadata.generators.get(batch_rows[n])))
-        return tokens, probs
+                    generator=sampling_metadata.generators.get(batch_rows[n]))
+        ids = self.model.mtp_draft_ids
+        if ids is not None:
+            tokens = ids[tokens]
+            probs = [None if q is None else
+                     q.new_zeros(int(ids[-1]) + 1).index_copy_(0, ids, q)
+                     for q in probs]
+        return tokens.tolist(), probs
 
     def _embed(self, token_ids: list[int]) -> np.ndarray:
         return self.model._prepare_embeddings(
