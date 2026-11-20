@@ -65,6 +65,17 @@ Tracked upstream:
   Qwen3-1.7B and Qwen3.5-0.8B planned the same blocks as on 0.33.0 with
   identical greedy output, MTP drafted, and the smoke test passed on both
   frontends. That main pins `torchvision==0.29.2`.
+- [#63830](https://github.com/vllm-project/vllm/pull/63830) (main, after
+  0.34.0) removes `mamba_cache_mode`; prefix caching alone now selects Mamba
+  state caching. The platform's `mamba_cache_mode = "none"` override is
+  guarded by `hasattr` and becomes a no-op. Hybrid-PA is unaffected because
+  it exposes only attention specs: `has_mamba_layers` stays false, so the
+  scheduler never reads `mamba_block_size`, and the core's Mamba block-size
+  resolution (#67994) finds no Mamba spec. Async scheduling depth (#64145)
+  leaves `async_scheduling=False` in force. On main `6abe321bd` the smoke test
+  passed (preemption, prefix hit next to MTP drafts) at or above 0.34.0's
+  throughput, and Qwen3.5-0.8B and Qwen3-1.7B planned the same blocks with
+  identical greedy output, sequential and concurrent.
 - [#53558](https://github.com/vllm-project/vllm/pull/53558) (in 0.33.0) lets a
   platform supply a `KVCacheConfigBuilder`. The plugin keeps the default:
   Hybrid-PA exposes only attention specs and allocates conv/SSM state itself.
