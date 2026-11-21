@@ -166,7 +166,13 @@ Gemma-4 inputs keep their rank. `per_layer_inputs` is fed as
 `[tokens, 1, layers, hidden]` (as in OpenVINO GenAI's `ModelRunner`); 26B-A4B
 has hidden 0, so reshapes name the token count instead of `-1`. Without it the
 first infer failed in a sliding-window layer (`Eltwise shape infer ... dim
-index: 0 mismatch`). `token_type_ids` is fed as `[tokens, 1]` with the step's
+index: 0 mismatch`). The transformation leaves the parameter
+`[?, ?, ?, 256]` on E2B, so its dynamic dim 1 broadcasts into every layer
+(2,570 ops with two or more dynamic dims, some PA queries `[?, ?]`);
+openvinotoolkit/openvino#36908 (open) pins it to 1. Pinning it in the loader
+gave identical output and no measurable change on CPU (E2B single stream,
+4 concurrent, 2k-token prefill and an image request, alternated runs), so the
+plugin leaves it to the transformation. `token_type_ids` is fed as `[tokens, 1]` with the step's
 real per-token types (1 on image embedding positions); the PA kernel reads it
 (input 25), so tokens inside a contiguous type-1 run attend bidirectionally
 and text stays causal. Adjacent runs with no separating token merge into one
@@ -586,12 +592,15 @@ loses at 8 concurrent requests.
 Gemma-4 MTP is not supported. Its drafter is a separate 4-layer model
 (`google/gemma-4-*-it-assistant`) whose attention layers have only Q
 projections and read K/V from the target's last full-attention and last
-sliding-window layers. No OpenVINO IR of it exists (optimum-intel #1763 and
-#1911 are unmerged), and OpenVINO GenAI 2026.4 runs it only in its stateful
+sliding-window layers. OpenVINO GenAI 2026.4 runs it only in its stateful
 SDPA pipeline at batch 1, on a target exported with extra outputs
-(`mtp_last_hidden_state`, `mtp_{full,sliding}_attention_{key,value}`). A PA
-version would need that export plus a drafter whose attention reads the
-target layers' paged u8 cache. Use n-gram on Gemma-4.
+(`mtp_last_hidden_state`, `mtp_{full,sliding}_attention_{key,value}`).
+openvinotoolkit/openvino#38519 (in the image's nightly, as
+`paged_attention_transformation(..., is_draft_model=True)`) turns the
+drafter's SDPA into PagedAttention, and openvino.genai#4686 (open) builds
+continuous-batching Gemma-4 MTP on it. The export is still missing:
+optimum-intel #1763 is open (#1911 closed unmerged) and genai#4686 exports
+with its fork. Revisit once #1763 merges; until then use n-gram on Gemma-4.
 
 ## Performance Profile
 
