@@ -563,7 +563,22 @@ sampled):
 English on the same runs was within noise between the two vocabularies
 (29.3-30.7 tok/s single, 68.9-69.8 at 4, 88.2-89.5 at 8, acceptance 0.71
 on both). Keeping 32k rows in total (first 26k + Hangul) lowered Korean
-sampled acceptance to 0.54. Verifying two tokens costs 1.43x a decode
+sampled acceptance to 0.54. At k=2 the Hangul draft gave 30.0 tok/s greedy
+and 24.2 sampled (acceptance 0.50, 0.42 per draft) against 22.0 and 19.7 at
+32k, so k=2 helps Korean greedy single streams but not sampled ones.
+
+Qwen3.6-35B-A3B (k=1, 32 GiB, `--max-num-seqs 4`, 4 prompts, two runs on a
+loaded host; tok/s for 1 request greedy / 1 sampled / 4 concurrent greedy):
+
+| draft vocabulary | Korean | English | acceptance ko, en |
+|---|---|---|---|
+| no speculation | 11.0 / 11.1 / 19.4 | 11.3 / - / 17.8 | - |
+| first 32k ids | 9.3-11.2 / 10.0-10.1 / 16.8-17.1 | 13.9-14.0 / - / 19.3-19.4 | 0.38, 0.80 |
+| first 32k + Hangul | 11.7-13.7 / 12.4-12.6 / 19.3-20.1 | 13.6-13.7 / - / 18.6-19.7 | 0.70, 0.80 |
+
+The 32k draft was slower than no speculation on Korean; with the Hangul
+tokens Korean gains at one request and breaks even at four, while English
+single streams lose about 2% to the 6.8k extra rows. Verifying two tokens costs 1.43x a decode
 step on the MoE model against ~1.05x on the dense one, so concurrency erases
 the gain sooner there. Use k=1 for mixed load; k=2 helps a single stream and
 loses at 8 concurrent requests.
