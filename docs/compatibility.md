@@ -169,7 +169,7 @@ first infer failed in a sliding-window layer (`Eltwise shape infer ... dim
 index: 0 mismatch`). The transformation leaves the parameter
 `[?, ?, ?, 256]` on E2B, so its dynamic dim 1 broadcasts into every layer
 (2,570 ops with two or more dynamic dims, some PA queries `[?, ?]`);
-openvinotoolkit/openvino#36908 (open) pins it to 1. Pinning it in the loader
+openvinotoolkit/openvino#36908 pinned it to 1 but was closed unmerged. Pinning it in the loader
 gave identical output and no measurable change on CPU (E2B single stream,
 4 concurrent, 2k-token prefill and an image request, alternated runs), so the
 plugin leaves it to the transformation. `token_type_ids` is fed as `[tokens, 1]` with the step's
