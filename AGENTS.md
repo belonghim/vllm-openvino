@@ -47,6 +47,7 @@
 
 - 코드를 수정하면 먼저 `python3 -m py_compile`을 실행한다.
 - 런타임 변경은 빌드 없이 podman 소스 마운트로 검증한다. `pyproject.toml`이나 `Containerfile`을 바꾸면 `podman build`까지 돌린다.
+- `scripts/smoke-test.sh`가 회귀 판정의 기준이다. greedy 출력 해시가 바뀌면(`OUTPUT CHANGED`) OpenVINO·vLLM·IR을 바꾼 경우가 아닌 한 정확도 회귀로 본다 — 이 백엔드의 회귀는 HTTP 200과 정상 속도를 유지한 채 토큰만 틀리게 나오기 때문이다. 모델 없이 검증되는 러너 로직은 `scripts/check-logic.py`에 둔다.
 - 단일·연속·동시 요청을 실제 API로 확인한다. 요청은 `localhost`가 아니라 `127.0.0.1`로 보낸다(IPv6로 풀리면 연결이 끊긴다).
 - 성능 비교는 `--cpus=8 --memory=16g`로 CPU 수와 메모리를 고정한다. 호스트 부하가 처리량을 움직이므로, 회귀 판정은 같은 호스트에서 직전 커밋과 번갈아 측정해 비교한다.
 - upstream의 깨지는 변경은 릴리스 전에 잡는다. 관련 PR이 머지되면 `--build-arg VLLM_SPEC=<per-commit 휠>`로 이미지를 빌드해 smoke-test를 돌린다(`docs/upgrade-checklist.md`).
@@ -81,4 +82,4 @@ podman run --replace -d --name vllm-server -p 8080:8080 --cpus=8 --memory=16g \
 - **Gemma-4 PA 입력은 rank를 유지해 넣는다** — `per_layer_inputs` `[tokens, 1, layers, hidden]`, `token_type_ids` `[tokens, 1]`. 빠지면 sliding-window 레이어에서 `Eltwise ... dim index: 0 mismatch`.
 - **비전 merger에는 `hidden_states`, `attention_mask`, `rotary_pos_emb` 세 입력을 모두 넘긴다** — 하나만 넘기면 SDPA shape 불일치.
 - **HuggingFace 원본은 로딩하지 않는다** — OpenVINO IR만 지원한다. IR 파일명과 모델별 mm 입력 키는 `docs/compatibility.md`의 Model Files 참조.
-- **미지원**: Pin memory, LoRA, TP·PP. 멀티소켓은 이득이 작으니 한 소켓 cpuset에 바인딩한다(README CPU placement).
+- **미지원**: GPU 디바이스, Pin memory, LoRA, TP·PP. 멀티소켓은 이득이 작으니 한 소켓 cpuset에 바인딩한다(README CPU placement).

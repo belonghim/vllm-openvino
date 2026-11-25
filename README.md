@@ -6,7 +6,7 @@
 
 An OpenVINO backend for vLLM: vLLM's scheduler and OpenAI-compatible API server run OpenVINO IR models on Intel CPUs. On the same IR and 8 CPUs it matched OpenVINO Model Server up to 8 concurrent requests and kept batching past 8 (Qwen3-1.7B, 16 concurrent: 254 vs 146-157 tok/s), and single-stream decode was 1.5x faster than vLLM's own CPU backend on a w4a16 checkpoint. See `docs/compatibility.md` ("Comparison with OVMS and vLLM's CPU Backend").
 
-Models must be pre-exported to OpenVINO IR with [optimum-intel](https://github.com/huggingface/optimum-intel). GPU code paths exist (`VLLM_OPENVINO_DEVICE=GPU`) but are not validated; every measurement here is CPU-only.
+Models must be pre-exported to OpenVINO IR with [optimum-intel](https://github.com/huggingface/optimum-intel). Only the OpenVINO CPU device is supported.
 
 ## Requirements
 
@@ -18,7 +18,8 @@ Models must be pre-exported to OpenVINO IR with [optimum-intel](https://github.c
 ### Container
 
 ```bash
-podman build -f Containerfile -t quay.io/joopark/vllm-openvino .
+podman build -f Containerfile --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
+  -t quay.io/joopark/vllm-openvino .
 
 podman run -d --name vllm-server -p 8080:8080 \
   -v ~/models:/models:Z \
@@ -41,7 +42,6 @@ TORCH_COMPILE_DISABLE=1 OMP_WAIT_POLICY=PASSIVE vllm serve --model /models/<mode
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `VLLM_OPENVINO_DEVICE` | `CPU`, `GPU`, `GPU.1`, ... | `CPU` |
 | `VLLM_OPENVINO_KVCACHE_SPACE` | KV cache size in GiB, fractions allowed. `0` sizes the pool from the memory limit after model load (see [Memory](#memory)) | `0` |
 | `VLLM_OPENVINO_KV_CACHE_PRECISION` | `u8`, `f16`, `bf16`; unset = OpenVINO's default (`u8` on CPU). `bf16` fails at startup on CPUs without AVX-512-BF16 (`expect kvcache type f32`); use `f16` there | unset |
 | `VLLM_OPENVINO_PERFORMANCE_MODE` | `THROUGHPUT` or `LATENCY` | `THROUGHPUT` |
@@ -109,7 +109,7 @@ Sampling runs in the plugin's CPU sampler, which gives the same tokens and logpr
 
 ### Benchmarking
 
-`./scripts/benchmark.sh <model_path> [num_requests]` runs a warmed-up benchmark against the local endpoint. `./scripts/socket-experiment.sh <model_name> [seconds]` compares single-socket and split CPU sets.
+`./scripts/smoke-test.sh` is the regression check (see `docs/upgrade-checklist.md`). `./scripts/benchmark.sh <model_path> [num_requests]` runs a warmed-up benchmark against the local endpoint. `./scripts/socket-experiment.sh <model_name> [seconds]` compares single-socket and split CPU sets.
 
 ## Serving Modes
 

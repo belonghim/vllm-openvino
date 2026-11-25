@@ -71,13 +71,12 @@ def _env_int(name: str, default: str) -> int:
 
 
 environment_variables: dict[str, Callable[[], Any]] = {
-    # OpenVINO device selection
-    # default is CPU
+    # OpenVINO device; only CPU is supported
     "VLLM_OPENVINO_DEVICE":
     lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
-    # in GiB (fractions allowed), default is 0 (auto: sized from the memory limit on CPU)
+    # in GiB (fractions allowed), default is 0 (auto: sized from the memory limit)
     "VLLM_OPENVINO_KVCACHE_SPACE":
     lambda: _env_float("VLLM_OPENVINO_KVCACHE_SPACE", "0"),
 

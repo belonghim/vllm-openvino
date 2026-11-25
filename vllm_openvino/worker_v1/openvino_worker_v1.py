@@ -11,7 +11,7 @@ import openvino.properties as ov_props
 import torch
 import torch.distributed
 import torch.nn as nn
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 
@@ -20,7 +20,6 @@ from vllm.lora.request import LoRARequest
 from vllm.utils.torch_utils import set_random_seed
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
 from vllm.v1.worker.utils import bind_kv_cache
@@ -35,15 +34,13 @@ from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 
 import vllm_openvino.envs as envs
 from vllm_openvino.worker_v1.openvino_model_runner_v1 import (
-    OpenVINOModelRunnerV1, make_model_runner_output, num_state_slots)
+    OpenVINOModelRunnerV1, num_state_slots)
 from vllm_openvino.kv_cache import OpenVINOCacheEngine, str_to_ov_type
+from vllm_openvino.platform import find_model_ir_path
 from vllm_openvino.utils import (
     canonical_vllm_cache_dtype,
-    determine_num_available_blocks,
-    get_max_allocatable_memory_gpu,
     format_memory_size,
     image_input_enabled,
-    ov_cache_dtype,
 )
 from vllm_openvino.model_executor.model_loader.openvino import (
     SSM_STATE_TABLES,
@@ -62,18 +59,10 @@ str_to_torch_type: dict[str, torch.dtype] = {
     "fp32": torch.float32
 }
 
-USED_MEMORY_THRESHOLD = 1.1  # 10% overhead for unaccounted memory
 # Largest dummy image prompt the warmup encodes regardless of the step size.
 # Bigger maximum-size dummies (Qwen3.5: 16k tokens) need a quadratic merger
 # mask far beyond realistic images and are skipped.
 IMAGE_WARMUP_MAX_TOKENS = 2048
-
-
-def _resolve_cache_dtype(dtype: str | None) -> str:
-    # None means "backend chooses"; OV defaults to fp16.
-    if dtype is None:
-        return "fp16"
-    return dtype
 
 
 class OpenVINOWorkerV1(WorkerBase):
@@ -131,7 +120,6 @@ class OpenVINOWorkerV1(WorkerBase):
         # initialize_cache.
         self.cache_engine: OpenVINOCacheEngine
         self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]]
-        self.num_swap_blocks = 0
 
         # Cache shape metadata (needed before determine_available_memory()).
         self.key_cache_config = []
@@ -145,7 +133,6 @@ class OpenVINOWorkerV1(WorkerBase):
         self._preloaded_ov_model = None
         self._la_state_bytes = 0
         self._kv_blocks_per_block = 1
-        self._warmed_up = False
         self.cache_dtype: str | None = None
 
         # Preload SSM/conv cache shapes from model IR so memory sizing includes
@@ -160,15 +147,8 @@ class OpenVINOWorkerV1(WorkerBase):
     def _preload_state_cache_shapes(self) -> None:
         """Read the IR once and keep its type and SSM/conv state shapes for
         the loader, which transforms the same ov.Model in place."""
-        model_dir = Path(self.model_config.model)
-        if not model_dir.is_dir():
-            return
-
-        if (model_dir / "openvino_language_model.xml").exists():
-            ir_path = model_dir / "openvino_language_model.xml"
-        elif (model_dir / "openvino_model.xml").exists():
-            ir_path = model_dir / "openvino_model.xml"
-        else:
+        ir_path = find_model_ir_path(self.model_config.model)
+        if ir_path is None:
             return
 
         try:
@@ -197,9 +177,6 @@ class OpenVINOWorkerV1(WorkerBase):
         self.conv_cache_config = [shape for shape, dtype in ssm_shapes.get("conv", [])]
         self.ssm_cache_dtypes = [dtype for shape, dtype in ssm_shapes.get("ssm", [])]
         self.conv_cache_dtypes = [dtype for shape, dtype in ssm_shapes.get("conv", [])]
-
-        num_cache_groups = 1
-        self.model_runner.configure_cache_groups(num_cache_groups)
 
         new_key_cache_config = []
         new_value_cache_config = []
@@ -287,32 +264,10 @@ class OpenVINOWorkerV1(WorkerBase):
         )
 
     def _kv_cache_dtype(self) -> str:
-        return _resolve_cache_dtype(
-            self.cache_dtype
-            or getattr(self.cache_config, 'openvino_kv_dtype', None))
-
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache. Swappable CPU memory is only
-        supported on GPU.
-
-        For CPU, we use the num_gpu_blocks to
-        determine how many non-swappable CPU blocks to allocate.
-        """
-
-        num_device_blocks = num_gpu_blocks
-        num_swap_blocks = num_cpu_blocks
-
-        if current_platform.is_openvino_cpu() and num_swap_blocks != 0:
-            raise ValueError(
-                f"{type(self).__name__} does not support swappable cache for CPU")
-
-        self._validate_num_blocks(num_device_blocks)
-        self.cache_config.num_gpu_blocks = num_device_blocks
-        self.cache_config.num_cpu_blocks = num_swap_blocks
-
-        # Initialize the cache.
-        self._init_cache_engine()
+        # Before the IR is compiled neither is known; OpenVINO defaults to f16.
+        return (self.cache_dtype
+                or getattr(self.cache_config, 'openvino_kv_dtype', None)
+                or "fp16")
 
     def _validate_num_blocks(self, num_blocks: int) -> None:
         """Raise errors if the num_blocks is invalid."""
@@ -332,7 +287,6 @@ class OpenVINOWorkerV1(WorkerBase):
                 "when initializing the engine.")
 
     def _init_cache_engine(self) -> None:
-        ov_device = envs.VLLM_OPENVINO_DEVICE
         detected_dtype = self._kv_cache_dtype()
         # IR-detected precision wins; cache_dtype stays a vLLM CacheDType
         # literal (validated during KV cache layout resolution).
@@ -362,11 +316,6 @@ class OpenVINOWorkerV1(WorkerBase):
             self.cache_config,
             self.key_cache_config,
             self.value_cache_config,
-            self.model_config,
-            self.parallel_config,
-            self.device_config,
-            self.ov_core,
-            ov_device,
             self.ssm_cache_config,
             self.conv_cache_config,
             self.ssm_cache_dtypes,
@@ -396,15 +345,14 @@ class OpenVINOWorkerV1(WorkerBase):
             # The step after the last request finishes schedules nothing but
             # carries finished_req_ids once; update states as upstream does.
             self.model_runner._update_states(scheduler_output)
-            return make_model_runner_output(
-                {},
+            return ModelRunnerOutput(
                 req_ids=[],
                 sampled_token_ids=[],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=None,
             )
-        new_block_ids_to_zero = getattr(scheduler_output, 'new_block_ids_to_zero', None)
+        new_block_ids_to_zero = scheduler_output.new_block_ids_to_zero
         if new_block_ids_to_zero and self.kv_cache:
             num_blocks = self.kv_cache[0][0].shape[0]
             ratio = self._kv_blocks_per_block
@@ -460,179 +408,6 @@ class OpenVINOWorkerV1(WorkerBase):
             self.value_cache_config,
             block_size=self.cache_config.block_size,
         )
-
-    def profile_run(self) -> int:
-        ov_device = envs.VLLM_OPENVINO_DEVICE
-
-        if current_platform.is_openvino_cpu():
-            raise RuntimeError("profile_run is not supported on CPU device")
-
-        import openvino.properties.device as device
-        import openvino.properties.intel_gpu as intel_gpu
-
-        ov_core = self.ov_core
-        cache_config = self.cache_config
-        model_config = self.model_config
-        parallel_config = self.parallel_config
-        device_config = self.device_config
-        mm_registry = MULTIMODAL_REGISTRY
-
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        def model_profile_run():
-            top_k = model_config.get_vocab_size() - 1
-            sampling_params = SamplingParams(top_p=0.99, top_k=top_k)
-
-            max_num_batched_tokens = \
-                self.scheduler_config.max_num_batched_tokens
-            max_num_seqs = self.scheduler_config.max_num_seqs
-            tmp_cache_config = CacheConfig(
-                block_size=cache_config.block_size,
-                gpu_memory_utilization=cache_config.gpu_memory_utilization,
-                swap_space_bytes=cache_config.swap_space_bytes,
-                cache_dtype=cache_config.cache_dtype)
-            tmp_cache_config.openvino_kv_dtype = \
-                cache_config.openvino_kv_dtype
-            tmp_cache_config.num_gpu_blocks = 1
-            tmp_cache_config.num_cpu_blocks = 0
-
-            profiling_cache_engine = OpenVINOCacheEngine(
-                tmp_cache_config,
-                self.key_cache_config,
-                self.value_cache_config,
-                model_config,
-                parallel_config,
-                device_config,
-                ov_core,
-                ov_device,
-                self.ssm_cache_config,
-                self.conv_cache_config,
-                self.ssm_cache_dtypes,
-                self.conv_cache_dtypes,
-            )
-            prev_kv_caches = self.model_runner.kv_caches
-            prev_ssm_caches = getattr(self.model_runner, 'ssm_caches', None)
-            prev_conv_caches = getattr(self.model_runner, 'conv_caches', None)
-            self.model_runner.kv_caches = profiling_cache_engine.kv_cache
-            self.model_runner.ssm_caches = profiling_cache_engine.ssm_cache
-            self.model_runner.conv_caches = profiling_cache_engine.conv_cache
-
-            total_num_scheduled_tokens = 0
-            num_scheduled_tokens = {}
-            reqs = []
-            block_size = cache_config.block_size
-            num_blocks = 0
-
-            for group_id in range(max_num_seqs):
-                seq_len = (max_num_batched_tokens // max_num_seqs +
-                           (group_id < max_num_batched_tokens % max_num_seqs))
-                seq_num_blocks = (seq_len + block_size - 1) // block_size
-
-                dummy_data = mm_registry.get_decoder_dummy_data(model_config, seq_len)
-
-                block_table = list(range(num_blocks, num_blocks + seq_num_blocks))
-                num_blocks += seq_num_blocks
-                prompt_token_ids = list(dummy_data.seq_data.prompt_token_ids)
-                reqs.append(NewRequestData(
-                    req_id=str(group_id),
-                    prompt_token_ids=prompt_token_ids,
-                    prefill_token_ids=prompt_token_ids,
-                    mm_features=[],
-                    sampling_params=sampling_params,
-                    pooling_params=None,
-                    block_ids=(block_table,),
-                    num_computed_tokens=0,
-                    lora_request=None,
-                ))
-                num_scheduled_tokens[str(group_id)] = seq_len
-                total_num_scheduled_tokens += seq_len
-
-            from vllm.v1.core.sched.output import CachedRequestData
-            scheduler_output = SchedulerOutput(
-                scheduled_new_reqs=reqs,
-                scheduled_cached_reqs=CachedRequestData.make_empty(),
-                num_scheduled_tokens=num_scheduled_tokens,
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
-                scheduled_spec_decode_tokens={},
-                scheduled_encoder_inputs={},
-                finished_req_ids=set(),
-                free_encoder_mm_hashes=[],
-            )
-            self.model_runner.block_size = tmp_cache_config.block_size
-
-            bind_kv_cache({}, self.compilation_config.static_forward_context, [])
-            try:
-                self.model_runner.execute_model(scheduler_output)
-                self.model_runner.sample_tokens(None)
-            finally:
-                bind_kv_cache({}, self.compilation_config.static_forward_context, [])
-                self.model_runner.kv_caches = prev_kv_caches
-                self.model_runner.ssm_caches = prev_ssm_caches
-                self.model_runner.conv_caches = prev_conv_caches
-                del profiling_cache_engine
-
-        logger.info(
-            "Start profiling run with dummy inputs to evaluate "
-            "memory usage for %s. It might take a while.", ov_device)
-        model_profile_run()
-
-        gpu_device_type = ov_core.get_property(ov_device, device.type)
-        memory_statistics = \
-            ov_core.get_property(ov_device, intel_gpu.memory_statistics)
-        memory_utilization = cache_config.gpu_memory_utilization
-
-        if gpu_device_type == device.Type.INTEGRATED and \
-            memory_utilization >= 0.9:
-            logger.warning(
-                "iGPU is used with high gpu_memory_utilization=%f "
-                "value. This may cause low performance due to "
-                "occupying the majority of available system "
-                "memory. Please consider decreasing "
-                "gpu_memory_utilization or explicitly setting "
-                "`VLLM_OPENVINO_KVCACHE_SPACE` (GB) environment "
-                "variable.", memory_utilization)
-
-        # sum up all used device memory
-        device_memory_types = ["cl_mem", "usm_device"]
-        used_device_mem = \
-            sum(memory_statistics.get(key, 0) for key in device_memory_types)
-
-        if gpu_device_type == device.Type.INTEGRATED:
-            used_device_mem += memory_statistics.get("usm_host", 0)
-
-        # there could be unaccounted extra memory reserved by kernels, kept
-        # in memory pools, etc
-        # therefore, add a threshold to account for this
-        used_memory_threshold = USED_MEMORY_THRESHOLD
-        used_device_mem *= used_memory_threshold
-
-        total_device_memory = \
-            ov_core.get_property(ov_device, intel_gpu.device_total_mem_size)
-
-        total_device_memory_str = format_memory_size(total_device_memory)
-        used_device_memory_str = format_memory_size(used_device_mem)
-
-        logger.info(
-            "Total %s memory: %s. "
-            "Amount of memory required to run the model with "
-            "max_num_batched_tokens=%d: %s.", ov_device,
-            total_device_memory_str,
-            self.scheduler_config.max_num_batched_tokens,
-            used_device_memory_str)
-
-        if used_device_mem >= total_device_memory * memory_utilization:
-            raise RuntimeError(
-                f"The required memory size {used_device_memory_str} for model "
-                f"is higher than the available device "
-                f"memory {total_device_memory_str} * {memory_utilization} utilization. "
-                f"Please consider to decrease `max_num_batched_tokens` or increase "
-                f"`gpu_memory_utilization`")
-
-        # Reset input batch
-        self.model_runner.configure_cache_groups(self.model_runner.num_cache_groups)
-
-        available_memory = total_device_memory * memory_utilization - used_device_mem
-        return min(available_memory, get_max_allocatable_memory_gpu(ov_core, ov_device, self.key_cache_config, self.value_cache_config))
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
@@ -720,74 +495,64 @@ class OpenVINOWorkerV1(WorkerBase):
         # limit because the kernel reclaims the memory-mapped weights under
         # pressure (on the 26B VmRSS reads 30.6 GB of which 16.9 GB is
         # anonymous).
-        if current_platform.is_openvino_cpu():
-            from vllm_openvino.utils import (  # noqa: PLC0415
-                get_process_rss_bytes, get_process_anon_rss_bytes,
-                detect_memory_limit, format_memory_size)
-            from vllm_openvino.platform import (  # noqa: PLC0415
-                KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES,
-                apiserver_overhead_bytes, auto_kv_cache_bytes)
-            self._warm_up_before_sizing()
-            rss = get_process_anon_rss_bytes() or get_process_rss_bytes()
-            effective_limit = detect_memory_limit()
-            if rss > 0:
-                logger.info(
-                    "[OV-WORKER] Post-load anon RSS %s, VmRSS %s",
-                    format_memory_size(rss),
-                    format_memory_size(get_process_rss_bytes()))
-            else:
+        from vllm_openvino.utils import (  # noqa: PLC0415
+            get_process_rss_bytes, get_process_anon_rss_bytes,
+            detect_memory_limit, format_memory_size)
+        from vllm_openvino.platform import (  # noqa: PLC0415
+            KV_CACHE_MEMORY_MARGIN_BYTES, KV_CACHE_MIN_BYTES,
+            apiserver_overhead_bytes, auto_kv_cache_bytes)
+        self._warm_up_before_sizing()
+        rss = get_process_anon_rss_bytes() or get_process_rss_bytes()
+        effective_limit = detect_memory_limit()
+        if rss > 0:
+            logger.info(
+                "[OV-WORKER] Post-load anon RSS %s, VmRSS %s",
+                format_memory_size(rss),
+                format_memory_size(get_process_rss_bytes()))
+        else:
+            logger.warning(
+                "[OV-WORKER] Could not measure process memory after model "
+                "load; keeping the startup KV pool estimate (%s), which "
+                "does not include the CPU plugin's weight repack. Set "
+                "VLLM_OPENVINO_KVCACHE_SPACE explicitly if the container "
+                "is close to its memory limit.",
+                format_memory_size(
+                    self.cache_config.openvino_kvcache_space_bytes))
+        if rss > 0 and envs.VLLM_OPENVINO_KVCACHE_SPACE == 0:
+            kvcache_before = self.cache_config.openvino_kvcache_space_bytes
+            kvcache_after = auto_kv_cache_bytes(rss, self.model_config)
+            self.cache_config.openvino_kvcache_space_bytes = kvcache_after
+            logger.info(
+                "[OV-WORKER] Auto-sized KV pool %s -> %s",
+                format_memory_size(kvcache_before),
+                format_memory_size(kvcache_after))
+        elif rss > 0 and effective_limit is not None:
+            api_overhead = apiserver_overhead_bytes(self.model_config)
+            available = (effective_limit - rss - api_overhead
+                         - KV_CACHE_MEMORY_MARGIN_BYTES)
+            kvcache_now = self.cache_config.openvino_kvcache_space_bytes
+            if kvcache_now > available:
+                fitted = max(KV_CACHE_MIN_BYTES, available)
                 logger.warning(
-                    "[OV-WORKER] Could not measure process memory after model "
-                    "load; keeping the startup KV pool estimate (%s), which "
-                    "does not include the CPU plugin's weight repack. Set "
-                    "VLLM_OPENVINO_KVCACHE_SPACE explicitly if the container "
-                    "is close to its memory limit.",
-                    format_memory_size(
-                        self.cache_config.openvino_kvcache_space_bytes))
-            if rss > 0 and envs.VLLM_OPENVINO_KVCACHE_SPACE == 0:
-                kvcache_before = self.cache_config.openvino_kvcache_space_bytes
-                kvcache_after = auto_kv_cache_bytes(rss, self.model_config)
-                self.cache_config.openvino_kvcache_space_bytes = kvcache_after
-                logger.info(
-                    "[OV-WORKER] Auto-sized KV pool %s -> %s",
-                    format_memory_size(kvcache_before),
-                    format_memory_size(kvcache_after))
-            elif rss > 0 and effective_limit is not None:
-                api_overhead = apiserver_overhead_bytes(self.model_config)
-                available = (effective_limit - rss - api_overhead
-                             - KV_CACHE_MEMORY_MARGIN_BYTES)
-                kvcache_now = self.cache_config.openvino_kvcache_space_bytes
-                if kvcache_now > available:
-                    fitted = max(KV_CACHE_MIN_BYTES, available)
-                    logger.warning(
-                        "[OV-WORKER] Post-load anon RSS %s + %s APIServer "
-                        "overhead (limit %s) "
-                        "leaves only %s for KV cache (initially %s); reducing "
-                        "pool to avoid OOM. Increase container memory limit or "
-                        "set VLLM_OPENVINO_KVCACHE_SPACE.",
-                        format_memory_size(rss),
-                        format_memory_size(api_overhead),
-                        format_memory_size(effective_limit),
-                        format_memory_size(max(0, available)),
-                        format_memory_size(kvcache_now))
-                    self.cache_config.openvino_kvcache_space_bytes = fitted
+                    "[OV-WORKER] Post-load anon RSS %s + %s APIServer "
+                    "overhead (limit %s) "
+                    "leaves only %s for KV cache (initially %s); reducing "
+                    "pool to avoid OOM. Increase container memory limit or "
+                    "set VLLM_OPENVINO_KVCACHE_SPACE.",
+                    format_memory_size(rss),
+                    format_memory_size(api_overhead),
+                    format_memory_size(effective_limit),
+                    format_memory_size(max(0, available)),
+                    format_memory_size(kvcache_now))
+                self.cache_config.openvino_kvcache_space_bytes = fitted
         conv_reservation = (self._conv_reservation_bytes()
                             if self._is_hybrid_pa_model() else 0)
         original_space_bytes = self.cache_config.openvino_kvcache_space_bytes
-        if conv_reservation:
-            self.cache_config.openvino_kvcache_space_bytes = max(
-                0, original_space_bytes - conv_reservation)
-        try:
-            num_device_blocks, num_swap_blocks = determine_num_available_blocks(
-                current_platform, self.cache_config, cache_block_size, self.profile_run)
-        finally:
-            self.cache_config.openvino_kvcache_space_bytes = original_space_bytes
+        num_device_blocks = int(
+            max(0, original_space_bytes - conv_reservation) // cache_block_size)
         logger.info(
-            "[OV-WORKER] determine_available_memory: num_device_blocks=%d, "
-            "num_swap_blocks=%d",
-            num_device_blocks, num_swap_blocks,
-        )
-        self.num_swap_blocks = num_swap_blocks
+            "[OV-WORKER] determine_available_memory: num_device_blocks=%d",
+            num_device_blocks)
         self._warn_if_pool_cannot_serve_one_request(
             num_device_blocks, cache_block_size, original_space_bytes,
             conv_reservation)
@@ -867,48 +632,42 @@ class OpenVINOWorkerV1(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate OpenVINO KV cache with the specified kv_cache_config."""
-        self.initialize_cache(kv_cache_config.num_blocks, self.num_swap_blocks)
+        self._validate_num_blocks(kv_cache_config.num_blocks)
+        self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+        self._init_cache_engine()
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
-        # OpenVINO compiles in load_model(); callers ignore the return value.
-        if not self._warmed_up:
-            warmup_start = time.perf_counter()
-            self._warm_up_paged_attention([0] * 17, [])
-            self.model_runner._step_stats.reset()
-            logger.info("[OV-WARMUP] PagedAttention warmup took %.2f s",
-                        time.perf_counter() - warmup_start)
-        if current_platform.is_openvino_cpu():
-            from vllm_openvino.utils import (  # noqa: PLC0415
-                get_process_anon_rss_bytes, get_cgroup_memory_usage_bytes,
-                format_memory_size)
-            from vllm_openvino.platform import (  # noqa: PLC0415
-                apiserver_overhead_bytes)
-            rss_after = get_process_anon_rss_bytes()
-            cgroup_after = get_cgroup_memory_usage_bytes()
-            if rss_after > 0:
-                logger.info(
-                    "[OV-WARMUP] Anon RSS after warmup: %s (EngineCore), "
-                    "%s (container anon)",
-                    format_memory_size(rss_after),
-                    format_memory_size(cgroup_after)
-                    if cgroup_after > 0 else "unknown")
-            if rss_after > 0 and cgroup_after > rss_after:
-                observed = cgroup_after - rss_after
-                logger.info(
-                    "[OV-WARMUP] APIServer footprint: observed %s, "
-                    "budgeted %s.",
-                    format_memory_size(observed),
-                    format_memory_size(
-                        apiserver_overhead_bytes(self.model_config)))
+        # OpenVINO compiles in load_model() and determine_available_memory()
+        # runs the warmup; callers ignore the return value.
+        from vllm_openvino.utils import (  # noqa: PLC0415
+            get_process_anon_rss_bytes, get_cgroup_memory_usage_bytes,
+            format_memory_size)
+        from vllm_openvino.platform import (  # noqa: PLC0415
+            apiserver_overhead_bytes)
+        rss_after = get_process_anon_rss_bytes()
+        cgroup_after = get_cgroup_memory_usage_bytes()
+        if rss_after > 0:
+            logger.info(
+                "[OV-WARMUP] Anon RSS after warmup: %s (EngineCore), "
+                "%s (container anon)",
+                format_memory_size(rss_after),
+                format_memory_size(cgroup_after)
+                if cgroup_after > 0 else "unknown")
+        if rss_after > 0 and cgroup_after > rss_after:
+            observed = cgroup_after - rss_after
+            logger.info(
+                "[OV-WARMUP] APIServer footprint: observed %s, "
+                "budgeted %s.",
+                format_memory_size(observed),
+                format_memory_size(
+                    apiserver_overhead_bytes(self.model_config)))
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def _warm_up_before_sizing(self) -> None:
         """Run the PA warmup against a throwaway 1-block cache.
 
         Called before the post-load memory measurement so the measured baseline
-        includes the CPU plugin's first-infer weight repack. Sets ``_warmed_up``
-        so ``compile_or_warm_up_model`` does not repeat the warmup; on devices
-        where this never runs (GPU), that is where the warmup happens.
+        includes the CPU plugin's first-infer weight repack.
         """
         prompt_len = min(self.scheduler_config.max_num_batched_tokens,
                          self.model_config.max_model_len - 2)
@@ -938,11 +697,6 @@ class OpenVINOWorkerV1(WorkerBase):
             tmp_cache_config,
             self.key_cache_config,
             self.value_cache_config,
-            self.model_config,
-            self.parallel_config,
-            self.device_config,
-            self.ov_core,
-            envs.VLLM_OPENVINO_DEVICE,
             self.ssm_cache_config,
             self.conv_cache_config,
             self.ssm_cache_dtypes,
@@ -975,7 +729,6 @@ class OpenVINOWorkerV1(WorkerBase):
                 prev_kv, prev_ssm, prev_conv)
             runner.block_size = prev_block_size
             runner._conv_slot_free = prev_free_slots
-            self._warmed_up = True
             del engine  # release the throwaway cache before the measurement
 
     def _image_warmup_prompt(self) -> tuple[list[int], list[MultiModalFeatureSpec]]:
@@ -1009,8 +762,7 @@ class OpenVINOWorkerV1(WorkerBase):
             num_prefill = min(num_prefill, max_prefill_tokens)
         params = SamplingParams(temperature=0.0, max_tokens=2)
         num_warmup_blocks = math.ceil((num_prefill + 1) / runner.block_size)
-        block_ids = tuple(list(range(num_warmup_blocks))
-                          for _ in range(runner.num_cache_groups))
+        block_ids = (list(range(num_warmup_blocks)), )
 
         def step(req_id, num_computed, num_tokens, finished, features):
             new_req = NewRequestData(

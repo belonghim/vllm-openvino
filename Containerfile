@@ -21,7 +21,8 @@ RUN pip install -U pip setuptools wheel && \
         humming-kernels pynvvideocodec quack-kernels \
         tokenspeed-mla tokenspeed-triton tilelang && \
     pip cache purge && \
-    SP=/opt/vllm-env/lib/python3.12/site-packages && \
+    SP=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])') && \
+    test -d "$SP/vllm" && \
     rm -rf $SP/vllm/vllm_flash_attn $SP/vllm/third_party/deep_gemm $SP/vllm/_flashkda_C.abi3.so $SP/nccl && \
     { find /opt/vllm-env -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true; }
 WORKDIR /opt/vllm
@@ -36,4 +37,7 @@ WORKDIR /opt/app-root
 COPY vllm_openvino ./vllm_openvino
 RUN mkdir /tmp/hf_home && chgrp -R 0 . && chmod -R g+rwX .
 ENV PYTHONPATH=/opt/app-root VLLM_CACHE_ROOT=/tmp/vllm HOME=/tmp HF_HOME=/tmp/hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TORCH_COMPILE_DISABLE=1 OMP_WAIT_POLICY=PASSIVE
+# --build-arg GIT_SHA=$(git rev-parse --short HEAD) records the plugin commit.
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=$GIT_SHA
 ENTRYPOINT ["vllm", "serve"]

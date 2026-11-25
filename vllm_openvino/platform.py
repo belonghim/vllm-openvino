@@ -34,8 +34,6 @@ except ImportError as e:
 
 
 def _cap_torch_threads() -> None:
-    if envs.VLLM_OPENVINO_DEVICE.upper() != "CPU":
-        return
     if "OMP_NUM_THREADS" in os.environ:
         return
     limit, reason = cpu_thread_limit()
@@ -116,8 +114,7 @@ def auto_kv_cache_bytes(resident_bytes: int, model_config) -> int:
     return max(KV_CACHE_MIN_BYTES, budget)
 
 
-def _find_model_ir_path(model_path: str) -> "Path | None":
-    from pathlib import Path
+def find_model_ir_path(model_path: str) -> Path | None:
     model_dir = Path(model_path)
     if not model_dir.is_dir():
         return None
@@ -141,7 +138,7 @@ def _ir_serving_traits(model_path: str) -> tuple[bool, bool] | None:
     variable_id, not anywhere in the file (gemma-4's IR has 278 unrelated
     "conv" hits from `type="Convert"` ops).
     """
-    ir_path = _find_model_ir_path(model_path)
+    ir_path = find_model_ir_path(model_path)
     if ir_path is None:
         return None
     try:
@@ -159,8 +156,7 @@ def _ir_serving_traits(model_path: str) -> tuple[bool, bool] | None:
 
 # Constants for memory and block size configuration
 GIB_BYTES = 1024 ** 3
-CPU_BLOCK_SIZE = 32  # Matches vLLM CPU default; larger blocks amortize overhead
-GPU_BLOCK_SIZE = 16  # Matches vLLM GPU default; smaller blocks for finer granularity
+KV_BLOCK_SIZE = 32  # tokens per OpenVINO PagedAttention block on CPU
 # Covers prefill and allocator transients that peak ~1 GiB above the steady state.
 KV_CACHE_MEMORY_MARGIN_BYTES = GIB_BYTES * 11 // 5
 KV_CACHE_MIN_BYTES = GIB_BYTES // 4  # below this a pool cannot serve usefully
@@ -173,7 +169,7 @@ VISION_APISERVER_OVERHEAD_BYTES = GIB_BYTES * 11 // 4
 
 class OpenVinoPlatform(Platform):
     # PlatformEnum.CPU is used because PlatformEnum.OPENVINO does not exist in
-    # vLLM upstream. See upstream-compatibility vault note before changing.
+    # vLLM upstream.
     _enum = PlatformEnum.CPU
     device_name: str = "openvino"
     device_type: str = "cpu"
@@ -195,14 +191,6 @@ class OpenVinoPlatform(Platform):
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def is_openvino_cpu(cls) -> bool:
-        return "CPU" in envs.VLLM_OPENVINO_DEVICE
-
-    @classmethod
-    def is_openvino_gpu(cls) -> bool:
-        return "GPU" in envs.VLLM_OPENVINO_DEVICE
-
-    @classmethod
     def import_ir_kernels(cls) -> None:
         pass
 
@@ -215,8 +203,7 @@ class OpenVinoPlatform(Platform):
         from vllm import envs as vllm_envs
 
         for env, value in os.environ.items():
-            if (env == "VLLM_USE_V2_MODEL_RUNNER"
-                    and env not in vllm_envs.environment_variables):
+            if env == "VLLM_USE_V2_MODEL_RUNNER":
                 # Removed with MRV1 (vllm#63373); mirror upstream's check,
                 # which this override replaces.
                 if value != "1":
@@ -289,6 +276,10 @@ class OpenVinoPlatform(Platform):
             raise ImportError(
                 "OpenVINO is required but not installed. "
                 "Install with: pip install openvino>=2026.4.1")
+        if envs.VLLM_OPENVINO_DEVICE != "CPU":
+            raise ValueError(
+                f"VLLM_OPENVINO_DEVICE={envs.VLLM_OPENVINO_DEVICE} is not "
+                "supported: the OpenVINO backend runs on CPU only.")
 
         _cap_torch_threads()
 
@@ -361,10 +352,6 @@ class OpenVinoPlatform(Platform):
             cache_config.mamba_cache_mode = "none"
             cache_config.mamba_block_size = None
 
-        # check and update cache config
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = GPU_BLOCK_SIZE
-
         precision_key = envs.VLLM_OPENVINO_KV_CACHE_PRECISION
         cache_dtype = envs.KV_CACHE_PRECISION_MAP.get((precision_key or "").lower())
         if precision_key and cache_dtype is None:
@@ -387,43 +374,32 @@ class OpenVinoPlatform(Platform):
         cache_config.openvino_kv_dtype = cache_dtype
         cache_config.cache_dtype = canonical_vllm_cache_dtype(cache_dtype)
 
-        target_block_size = CPU_BLOCK_SIZE if OpenVinoPlatform.is_openvino_cpu() else GPU_BLOCK_SIZE
-        if cache_config.block_size != target_block_size:
+        if cache_config.block_size not in (None, KV_BLOCK_SIZE):
             logger.info(
-                "[OV-PLATFORM] OpenVINO optimal block size is %d, "
-                "overriding %s to %d",
-                target_block_size, cache_config.block_size, target_block_size)
-            cache_config.block_size = target_block_size
+                "[OV-PLATFORM] OpenVINO KV block size is %d, overriding %s",
+                KV_BLOCK_SIZE, cache_config.block_size)
+        cache_config.block_size = KV_BLOCK_SIZE
 
         kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
-        if kv_cache_space >= 0:
-            if kv_cache_space == 0 and OpenVinoPlatform.is_openvino_cpu():
-                cache_config.openvino_kvcache_space_bytes = auto_kv_cache_bytes(  # type: ignore
-                    model_weights_bytes(model_config.model)
-                    + CONTAINER_RUNTIME_BASELINE_BYTES,
-                    model_config)
-                logger.info(
-                    "[OV-PLATFORM] VLLM_OPENVINO_KVCACHE_SPACE is not set; the "
-                    "KV pool is sized from the memory limit after model load "
-                    "(startup estimate %s).",
-                    format_memory_size(
-                        cache_config.openvino_kvcache_space_bytes))
-            elif kv_cache_space == 0:
-                cache_config.openvino_kvcache_space_bytes = 0  # type: ignore
-                logger.info(
-                    "[OV-PLATFORM] VLLM_OPENVINO_KVCACHE_SPACE is not set for GPU "
-                    "device. KV cache size will be determined automatically via "
-                    "profiling run.")
-            else:
-                kv_cache_bytes = int(kv_cache_space * GIB_BYTES)
-                if OpenVinoPlatform.is_openvino_cpu():
-                    kv_cache_bytes = _fit_kv_cache_to_memory_limit(
-                        kv_cache_bytes, model_config)
-                cache_config.openvino_kvcache_space_bytes = kv_cache_bytes  # type: ignore
-        else:
+        if kv_cache_space < 0:
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE "
                 f"{kv_cache_space}, expect a non-negative number of GiB.")
+        if kv_cache_space == 0:
+            cache_config.openvino_kvcache_space_bytes = auto_kv_cache_bytes(  # type: ignore
+                model_weights_bytes(model_config.model)
+                + CONTAINER_RUNTIME_BASELINE_BYTES,
+                model_config)
+            logger.info(
+                "[OV-PLATFORM] VLLM_OPENVINO_KVCACHE_SPACE is not set; the "
+                "KV pool is sized from the memory limit after model load "
+                "(startup estimate %s).",
+                format_memory_size(
+                    cache_config.openvino_kvcache_space_bytes))
+        else:
+            cache_config.openvino_kvcache_space_bytes = (  # type: ignore
+                _fit_kv_cache_to_memory_limit(
+                    int(kv_cache_space * GIB_BYTES), model_config))
 
         # Disable torch compilation — OpenVINO compiles its own models
         from vllm.config import CompilationMode
@@ -432,7 +408,3 @@ class OpenVinoPlatform(Platform):
 
         if vllm_config.lora_config is not None:
             raise ValueError("OpenVINO backend doesn't support LoRA")
-        if not (cls.is_openvino_cpu() or cls.is_openvino_gpu()
-                or "empty" in envs.VLLM_OPENVINO_DEVICE):
-            raise ValueError(
-                "OpenVINO backend supports only CPU, GPU and empty devices")

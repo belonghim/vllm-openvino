@@ -23,12 +23,15 @@ IMAGE=vllm-openvino:next ./scripts/smoke-test.sh
    KV-cache interface signatures.
 4. Check platform registration and worker selection.
 5. The plugin runs its own runner and keeps its own copies of the MRV1 pieces
-   it used; the runner and worker accept both 0.33.0's scheduler output and
-   the MRV2 one that MRV1 removal (#63373) leaves (see "Upstream vLLM
-   Compatibility" in `compatibility.md`). The plugin consumes
-   `WorkerBase`, `bind_kv_cache`, `SchedulerOutput`, `ModelRunnerOutput` and
-   other `vllm.v1.*` symbols without running the built-in runner; check them
-   against the new wheel before bumping:
+   it used; the runner and worker accept the supported version's scheduler
+   output only (see "Upstream vLLM Compatibility" in `compatibility.md`), so
+   drop a compatibility branch once its version is no longer supported. The
+   plugin consumes `WorkerBase`, `bind_kv_cache`, `SchedulerOutput`,
+   `ModelRunnerOutput` and other `vllm.*` symbols without running the built-in
+   runner, and borrows private M-RoPE methods from vLLM's Qwen3-VL and
+   MiniCPM-V models. `check-vllm-imports.py` resolves every such import,
+   method and dataclass field (add new ones to its `ATTRS`); the smoke test
+   runs it, or check a new wheel directly:
 
    ```bash
    podman run --rm -v "$PWD:/w:Z" -w /w --entrypoint python <new-image> scripts/check-vllm-imports.py
@@ -83,7 +86,9 @@ The image pins OpenVINO nightly `2026.5.0.dev20261030` from
 `storage.openvinotoolkit.org/simple/wheels/nightly` for the MoE prefill fix
 (#39086) and 2026.5-exported IRs (LFM3). Move to the 2026.5 release once it
 ships and drop the nightly index. When upgrading, re-check LFM2.5-8B-A1B
-prefill TTFT.
+prefill TTFT. Keep a copy of the pinned nightly wheel
+(`pip download --no-deps openvino==<version>` with the nightly index): the
+image cannot be rebuilt once the index drops it.
 
 ## Validation
 
@@ -93,9 +98,15 @@ prefill TTFT.
 4. For runtime changes, verify single, sequential, and concurrent requests.
 5. Compare logs for import errors, signature errors, cache allocation errors,
    and unexpected path selection.
-6. Run `scripts/smoke-test.sh`. It starts each serving path (PagedAttention,
-   Hybrid-PA) and checks sequential throughput against the baseline
-   and a concurrent burst, then forces preemption with a small pool and checks
+6. Run `scripts/smoke-test.sh`. It first runs `check-vllm-imports.py` and
+   `check-logic.py` (the runner's model-free logic against brute-force
+   references) in the image, then starts each serving path (PagedAttention,
+   Hybrid-PA with block checkpoints, Hybrid-PA with prefix caching off and
+   MTP drafts) and checks greedy sequential throughput and an output hash
+   against the baseline and a concurrent burst. `OUTPUT CHANGED` is expected
+   after an OpenVINO, vLLM or IR change (review the text, then
+   `--update-baseline`); with none of those it is a correctness regression.
+   It then forces preemption with a small pool and checks
    that every resumed request completes, and runs a same-step prefix hit next
    to MTP drafts on Hybrid-PA. Set `IMAGE=<candidate-image>` to run
    it against an image built for the new version. Throughput moves with host

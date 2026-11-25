@@ -2,11 +2,7 @@
 """An OpenVINO KV cache implementation for V1 KVCache interface."""
 from vllm_openvino import envs
 from vllm_openvino.utils import ov_cache_dtype
-from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
-from vllm.logger import init_logger
-from vllm.platforms import current_platform
-
-logger = init_logger(__name__)
+from vllm.config import CacheConfig
 
 try:
     import openvino as ov
@@ -25,9 +21,7 @@ str_to_ov_type: dict[str, ov.Type] = {
 class OpenVINOCacheEngine:
     """Manages the KV cache for OpenVINO backend, implementing the V1 KVCache interface.
 
-    This class is responsible for initializing and managing CPU KV
-    caches. It also provides methods for performing KV cache operations, such
-    as copying.
+    Allocates the CPU KV caches and the Hybrid-PA conv/SSM state caches.
     """
 
     def __init__(
@@ -35,11 +29,6 @@ class OpenVINOCacheEngine:
         cache_config: CacheConfig,
         key_cache_config: list[ov.PartialShape],
         value_cache_config: list[ov.PartialShape],
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        device_config: DeviceConfig,
-        ov_core: ov.Core,
-        ov_device: str,
         ssm_cache_config: list[ov.PartialShape] | None = None,
         conv_cache_config: list[ov.PartialShape] | None = None,
         ssm_cache_dtypes: list[str] | None = None,
@@ -48,15 +37,7 @@ class OpenVINOCacheEngine:
         kv_blocks_per_block: int = 1,
         zero_state: bool = True,
     ) -> None:
-        # vLLM's device_config.device_type is always "cpu" for OpenVINO backend,
-        # even when VLLM_OPENVINO_DEVICE targets GPU (device selection managed separately).
-        if device_config.device_type != "cpu":
-            raise ValueError(
-                f"OpenVINO backend requires device_type='cpu' in DeviceConfig, "
-                f"got '{device_config.device_type}'")
         self.cache_config = cache_config
-        self.model_config = model_config
-        self.parallel_config = parallel_config
 
         self.key_cache_config = key_cache_config
         self.value_cache_config = value_cache_config
@@ -67,9 +48,8 @@ class OpenVINOCacheEngine:
         self.num_layers = len(self.value_cache_config)
 
         self.block_size = cache_config.block_size
-        # Note: In CacheConfig, num_gpu_blocks actual is num_cpu_blocks
-        # for OpenVINO backend with a CPU target device, because we want
-        # to reuse KV cache management in the scheduler.
+        # CacheConfig.num_gpu_blocks is the scheduler's block count; here the
+        # blocks are CPU memory.
         self.num_device_blocks = cache_config.num_gpu_blocks * kv_blocks_per_block
         self.zero_state = zero_state
 
@@ -86,22 +66,15 @@ class OpenVINOCacheEngine:
 
         # Initialize the cache.
         self.kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = self._allocate_kv_cache(
-            self.num_device_blocks, ov_core,
-            ov_device)
+            self.num_device_blocks)
 
         # Hybrid-PA conv/SSM state: one slot per running sequence, or one
         # checkpoint per scheduler block with prefix caching.
         ssm_blocks = num_ssm_blocks if num_ssm_blocks is not None else 0
-        self.ssm_cache: list[ov.Tensor] = self._allocate_ssm_cache(
-            ssm_blocks, ov_core, ov_device)
-        self.conv_cache: list[ov.Tensor] = self._allocate_conv_cache(
-            ssm_blocks, ov_core, ov_device)
-
-        # Cache k_cache and v_cache lists to avoid rebuilding on every call.
-        # self.kv_cache structure is immutable after init (only tensor data changes),
-        # so caching is safe.
-        self._k_cache: list[ov.Tensor] = [tensor[0] for tensor in self.kv_cache]
-        self._v_cache: list[ov.Tensor] = [tensor[1] for tensor in self.kv_cache]
+        self.ssm_cache: list[ov.Tensor] = self._allocate_state_cache(
+            ssm_blocks, self.ssm_cache_config, self.ssm_cache_dtypes)
+        self.conv_cache: list[ov.Tensor] = self._allocate_state_cache(
+            ssm_blocks, self.conv_cache_config, self.conv_cache_dtypes)
 
     def _make_cache_dims(self, num_blocks: int, pshape: "ov.PartialShape") -> list[int]:
         return [
@@ -112,8 +85,6 @@ class OpenVINOCacheEngine:
     def _allocate_kv_cache(
         self,
         num_blocks: int,
-        ov_core: ov.Core,
-        ov_device: str,
     ) -> list[tuple[ov.Tensor, ov.Tensor]]:
         """Allocates KV cache."""
         kv_cache: list[tuple[ov.Tensor, ov.Tensor]] = []
@@ -125,23 +96,14 @@ class OpenVINOCacheEngine:
             value_dims = self._make_cache_dims(num_blocks, value_cache_pshape)
             value_cache_shape = ov.PartialShape(value_dims).to_shape()
 
-            if current_platform.is_openvino_cpu():
-                key_blocks = ov.Tensor(self.ov_cache_dtype, key_cache_shape)
-                value_blocks = ov.Tensor(self.ov_cache_dtype, value_cache_shape)
-                kv_cache.append((key_blocks, value_blocks))
-            else:
-                remote_context = ov_core.get_default_context(ov_device)
-                key_blocks = remote_context.create_tensor(self.ov_cache_dtype, key_cache_shape, {})
-                value_blocks = remote_context.create_tensor(self.ov_cache_dtype, value_cache_shape, {})
-                kv_cache.append((key_blocks, value_blocks))
+            kv_cache.append((ov.Tensor(self.ov_cache_dtype, key_cache_shape),
+                             ov.Tensor(self.ov_cache_dtype, value_cache_shape)))
 
         return kv_cache
 
     def _allocate_state_cache(
         self,
         num_blocks: int,
-        ov_core: ov.Core,
-        ov_device: str,
         cache_config: list["ov.PartialShape"],
         cache_dtypes: list[str],
     ) -> list[ov.Tensor]:
@@ -155,42 +117,11 @@ class OpenVINOCacheEngine:
             dtype_str = cache_dtypes[idx] if idx < len(cache_dtypes) else "f32"
             ov_type = str_to_ov_type.get(dtype_str, ov.Type.f32)
 
-            if current_platform.is_openvino_cpu():
-                tensor = ov.Tensor(ov_type, shape)
-                if self.zero_state:
-                    tensor.data.fill(0)
-            else:
-                remote_context = ov_core.get_default_context(ov_device)
-                tensor = remote_context.create_tensor(ov_type, shape, {})
-                try:
-                    if self.zero_state:
-                        tensor.data.fill(0)
-                except (AttributeError, RuntimeError) as e:
-                    logger.warning("[OV-CACHE] GPU state tensor zero-init failed: %s", e)
+            tensor = ov.Tensor(ov_type, shape)
+            if self.zero_state:
+                tensor.data.fill(0)
             cache.append(tensor)
         return cache
-
-    def _allocate_ssm_cache(
-        self,
-        num_blocks: int,
-        ov_core: ov.Core,
-        ov_device: str,
-    ) -> list[ov.Tensor]:
-        return self._allocate_state_cache(
-            num_blocks, ov_core, ov_device,
-            self.ssm_cache_config, self.ssm_cache_dtypes,
-        )
-
-    def _allocate_conv_cache(
-        self,
-        num_blocks: int,
-        ov_core: ov.Core,
-        ov_device: str,
-    ) -> list[ov.Tensor]:
-        return self._allocate_state_cache(
-            num_blocks, ov_core, ov_device,
-            self.conv_cache_config, self.conv_cache_dtypes,
-        )
 
     @staticmethod
     def get_cache_block_size(
@@ -236,14 +167,4 @@ class OpenVINOCacheEngine:
                     dtype, ov.Type.f32).size
 
         return total_bytes
-
-    # --- KVCache Interface Methods ---
-
-    def get_k_cache(self) -> list[ov.Tensor]:
-        """Returns the key cache tensors."""
-        return self._k_cache
-
-    def get_v_cache(self) -> list[ov.Tensor]:
-        """Returns the value cache tensors."""
-        return self._v_cache
 

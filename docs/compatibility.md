@@ -39,8 +39,8 @@ Tracked upstream:
 - [#63373](https://github.com/vllm-project/vllm/pull/63373) (in 0.34.0) removes MRV1 (`gpu_input_batch.py`,
   `cpu_model_runner.py`, the V1 `Sampler`, `VLLM_USE_V2_MODEL_RUNNER`) and
   makes `CpuPlatform` refuse x86 without Triton (the plugin's platform is not
-  `CpuPlatform`). It also moves the scheduler-worker interface to MRV2's, which
-  the runner and worker accept alongside 0.33.0's: `CachedRequestData` loses
+  `CpuPlatform`). It also moves the scheduler-worker interface to MRV2's, the
+  only one the runner and worker accept: `CachedRequestData` loses
   `resumed_req_ids` and `all_token_ids`, `ModelRunnerOutput` loses
   `req_id_to_index`, `NewRequestData.prefill_token_ids` becomes required, and
   a preempted request resumes through `scheduled_new_reqs` with
@@ -267,7 +267,7 @@ numerics).
 
 ## Runtime Constraints
 
-- CPU KV block size is `32`; GPU KV block size is `16`. Hybrid-PA with prefix
+- Only the OpenVINO CPU device is supported. KV block size is `32`. Hybrid-PA with prefix
   caching uses a larger scheduler block (a multiple of the KV block size).
 - `VLLM_OPENVINO_CPU_THREADS_NUM=0` uses the cgroup CPU quota when it is
   tighter than the visible cores and also caps the Torch/OMP pools unless

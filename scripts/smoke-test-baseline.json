@@ -1,30 +1,41 @@
 {
   "_meta": {
-    "git_sha": "9d7977f"
+    "git_sha": "9d41274"
   },
   "Qwen3-1.7B-int4-ov": {
-    "total_ms": 61980,
+    "total_ms": 56149,
     "total_tokens": 1280,
-    "avg_tps": 20.65
+    "avg_tps": 22.8,
+    "output_sha": "4059f7fd621f9875"
   },
   "gemma-4-E2B-it-int4-ov": {
-    "total_ms": 64612,
-    "total_tokens": 1127,
-    "avg_tps": 17.44
+    "total_ms": 55695,
+    "total_tokens": 1106,
+    "avg_tps": 19.86,
+    "output_sha": "57f4572417471f94"
   },
   "LFM3-1.7B-int4-ov": {
-    "total_ms": 55714,
+    "total_ms": 49813,
     "total_tokens": 1280,
-    "avg_tps": 22.97
+    "avg_tps": 25.7,
+    "output_sha": "6ebe1722f5060176"
   },
   "Qwen3.5-0.8B-int4-ov": {
-    "total_ms": 28970,
-    "total_tokens": 979,
-    "avg_tps": 33.79
+    "total_ms": 23618,
+    "total_tokens": 912,
+    "avg_tps": 38.61,
+    "output_sha": "2a1221eecc4decbf"
+  },
+  "Qwen3.5-0.8B-int4-ov (--no-enable-prefix-caching --speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":2})": {
+    "total_ms": 20051,
+    "total_tokens": 974,
+    "avg_tps": 48.58,
+    "output_sha": "d552c058b4ac519a"
   },
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov": {
-    "total_ms": 14925,
-    "total_tokens": 735,
-    "avg_tps": 49.25
+    "total_ms": 13280,
+    "total_tokens": 883,
+    "avg_tps": 66.49,
+    "output_sha": "f7989884cc273e19"
   }
 }

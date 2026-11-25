@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# smoke-test.sh — Performance regression smoke test
-# Runs every serving path (PagedAttention, Hybrid-PA) with 5 fixed questions and
-# a concurrent burst, tracks tok/s.
-# Compares against ./scripts/smoke-test-baseline.json if present.
+# smoke-test.sh — Regression smoke test
+# Checks the pure runner logic and the vLLM symbols the plugin imports, then
+# runs every serving path (PagedAttention, Hybrid-PA) with 5 fixed greedy
+# questions and a concurrent burst, tracking tok/s and a hash of the output.
+# Compares against ./scripts/smoke-test-baseline.json if present: a tok/s drop
+# fails, a changed output hash is reported for review (expected after an
+# OpenVINO, vLLM or IR change; otherwise a correctness regression).
 
 set -uo pipefail
 
@@ -31,6 +34,8 @@ MODELS=(
   "gemma-4-E2B-it-int4-ov"
   "LFM3-1.7B-int4-ov"
   "Qwen3.5-0.8B-int4-ov"
+  # Hybrid-PA without block checkpoints: per-request state slots, draft slots.
+  "Qwen3.5-0.8B-int4-ov --no-enable-prefix-caching --speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":2}"
   "Qwen2.5-Coder-0.5B-Instruct-int4-ov"
 )
 CONCURRENT_REQUESTS=4
@@ -48,6 +53,19 @@ MAX_TOKENS=256
 cleanup_container() {
   podman stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
   podman rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+}
+
+# Waits up to 5 minutes for the API, giving up as soon as the server exits.
+wait_ready() {
+  for _ in $(seq 1 60); do
+    curl -sf "$API_URL/v1/models" >/dev/null 2>&1 && return 0
+    [[ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" == true ]] || break
+    sleep 5
+  done
+  echo "  FAIL: server did not start"
+  podman logs "$CONTAINER_NAME" 2>&1 | grep -v "^\s*\^*$" | grep -B2 -A8 "Error" | tail -24
+  cleanup_container
+  return 1
 }
 
 run_model_perf() {
@@ -77,32 +95,17 @@ run_model_perf() {
     -p 8080:8080 --cpus=8 --memory=16g \
     -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino:Z" \
     -v "$model_dir:/models:Z" \
-    -e VLLM_OPENVINO_DEVICE=CPU \
-    -e TORCH_COMPILE_DISABLE=1 \
     "${SMOKE_ENV_ARGS[@]}" \
     "${env_args[@]}" \
     "$IMAGE" \
     --port=8080 --model /models --max-model-len 4096 "${serve_args[@]}" >/dev/null
 
-  local ready=false
-  for _ in $(seq 1 60); do
-    if curl -sf "$API_URL/v1/models" >/dev/null 2>&1; then
-      ready=true
-      break
-    fi
-    sleep 5
-  done
-
-  if [[ "$ready" != true ]]; then
-    echo "  FAIL: container startup timeout"
-    podman logs "$CONTAINER_NAME" 2>&1 | tail -10
-    cleanup_container
-    return 1
-  fi
+  wait_ready || return 1
 
   local total_ms=0
   local total_tokens=0
   local q_idx=0
+  local outputs=""
 
   for q in "${QUESTIONS[@]}"; do
     q_idx=$((q_idx + 1))
@@ -111,7 +114,7 @@ run_model_perf() {
     local resp
     resp=$(curl -sf "$API_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d "{\"model\":\"/models\",\"messages\":[{\"role\":\"user\",\"content\":\"$q\"}],\"max_tokens\":$MAX_TOKENS}" 2>/dev/null)
+      -d "{\"model\":\"/models\",\"messages\":[{\"role\":\"user\",\"content\":\"$q\"}],\"max_tokens\":$MAX_TOKENS,\"temperature\":0}" 2>/dev/null)
     local end
     end=$(date +%s%N)
     local ms=$(( (end - start) / 1000000 ))
@@ -125,6 +128,7 @@ run_model_perf() {
     local tokens
     tokens=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['usage']['completion_tokens'])" 2>/dev/null || echo 0)
 
+    outputs+=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message'])" 2>/dev/null)
     total_ms=$((total_ms + ms))
     total_tokens=$((total_tokens + tokens))
 
@@ -163,11 +167,15 @@ print(text[:160] + ('...' if len(text) > 160 else ''))
   avg_tps=$(python3 -c "print(f'{$total_tokens / ($total_ms/1000.0):.2f}')" 2>/dev/null || echo "0.00")
   echo "  Avg: ${avg_tps} tok/s (total ${total_ms}ms, ${total_tokens} tokens)"
 
+  local output_sha
+  output_sha=$(printf '%s' "$outputs" | sha256sum | cut -c1-16)
+  echo "  Output sha: $output_sha"
+
   cleanup_container
 
-  python3 - "$label" "$total_ms" "$total_tokens" "$avg_tps" <<'PYEOF'
+  python3 - "$label" "$total_ms" "$total_tokens" "$avg_tps" "$output_sha" <<'PYEOF'
 import json, os, sys
-model_name, total_ms, total_tokens, avg_tps = sys.argv[1:5]
+model_name, total_ms, total_tokens, avg_tps, output_sha = sys.argv[1:6]
 results_file = os.environ["RESULTS_FILE"]
 git_sha = os.environ.get("GIT_SHA", "unknown")
 existing = {}
@@ -182,10 +190,26 @@ existing[model_name] = {
     "total_ms": int(total_ms),
     "total_tokens": int(total_tokens),
     "avg_tps": float(avg_tps),
+    "output_sha": output_sha,
 }
 with open(results_file, "w") as f:
     json.dump(existing, f, indent=2)
 PYEOF
+}
+
+# Pure runner logic and the vLLM symbols the plugin imports, inside the image.
+run_static_checks() {
+  echo ""
+  echo "=== Static checks ==="
+  podman run --rm \
+    -v "$PROJECT_ROOT/vllm_openvino:/opt/app-root/vllm_openvino:Z" \
+    -v "$PROJECT_ROOT/scripts:/opt/app-root/scripts:Z" \
+    --entrypoint sh "$IMAGE" -c \
+    "python scripts/check-vllm-imports.py && python scripts/check-logic.py" 2>&1 \
+    | grep -v "torch/_\|^(MainProcess"
+  local rc=${PIPESTATUS[0]}
+  (( rc == 0 )) || echo "  FAIL: static checks"
+  return $rc
 }
 
 # Preempt-and-resume: a pool of about 2.4k tokens with 8 concurrent 400-token
@@ -203,17 +227,7 @@ run_preemption_check() {
     -e VLLM_OPENVINO_KVCACHE_SPACE=0.15 \
     "${SMOKE_ENV_ARGS[@]}" \
     "$IMAGE" --port=8080 --model /models --max-model-len 2048 >/dev/null
-  local ready=false
-  for _ in $(seq 1 60); do
-    curl -sf "$API_URL/v1/models" >/dev/null 2>&1 && { ready=true; break; }
-    sleep 5
-  done
-  if [[ "$ready" != true ]]; then
-    echo "  FAIL: container startup timeout"
-    podman logs "$CONTAINER_NAME" 2>&1 | tail -10
-    cleanup_container
-    return 1
-  fi
+  wait_ready || return 1
   python3 - "$API_URL" <<'PYEOF'
 import concurrent.futures as cf, json, re, sys, urllib.request
 url = sys.argv[1]
@@ -263,17 +277,7 @@ run_spec_prefix_check() {
     "${SMOKE_ENV_ARGS[@]}" \
     "$IMAGE" --port=8080 --model /models --max-model-len 4096 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":2}' >/dev/null
-  local ready=false
-  for _ in $(seq 1 60); do
-    curl -sf "$API_URL/v1/models" >/dev/null 2>&1 && { ready=true; break; }
-    sleep 5
-  done
-  if [[ "$ready" != true ]]; then
-    echo "  FAIL: container startup timeout"
-    podman logs "$CONTAINER_NAME" 2>&1 | tail -10
-    cleanup_container
-    return 1
-  fi
+  wait_ready || return 1
   python3 - "$API_URL" <<'PYEOF'
 import concurrent.futures as cf, json, re, sys, time, urllib.request
 url = sys.argv[1]
@@ -325,6 +329,7 @@ main() {
   export RESULTS_FILE GIT_SHA
 
   local any_failed=false
+  run_static_checks || any_failed=true
   for model in "${MODELS[@]}"; do
     if ! run_model_perf "$model"; then
       any_failed=true
@@ -358,6 +363,7 @@ base_sha = base.get('_meta', {}).get('git_sha', 'unknown')
 new_sha = new.get('_meta', {}).get('git_sha', 'unknown')
 print(f'  Baseline: {base_sha} -> Current: {new_sha}')
 regressed = False
+changed = []
 for model, new_data in new.items():
     if model.startswith('_'):
         continue
@@ -375,7 +381,14 @@ for model, new_data in new.items():
         regressed = True
     elif pct > threshold:
         status = 'IMPROVED'
+    base_out = base[model].get('output_sha')
+    if base_out and base_out != new_data.get('output_sha'):
+        status += ', OUTPUT CHANGED'
+        changed.append(model)
     print(f'  {model}: {base_tps:.2f} -> {new_tps:.2f} tok/s ({pct:+.1f}%) [{status}]')
+if changed:
+    print(f'REVIEW: greedy output changed for {len(changed)} model(s); expected '
+          'only after an OpenVINO, vLLM or IR change.')
 sys.exit(1 if regressed else 0)
 PYEOF
     local rc=$?

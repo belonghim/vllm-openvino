@@ -99,13 +99,6 @@ class OpenVINOAttentionMetadata:
     # Indices of sampled tokens, used in V1 vLLM API only.
     sampled_token_indices: ov.Tensor
 
-    # Optional per-group block indices (group 0 == attention).
-    # Used by hybrid cache-group models (e.g. attention + Mamba states).
-    block_indices_groups: list[ov.Tensor] | None = None
-
-    # Optional per-group block_indices_begins (group 0 == attention).
-    block_indices_begins_groups: list[ov.Tensor] | None = None
-
     # Linear-attention (conv-only hybrid PA) paged-state inputs, one physical
     # slot per running sequence. None for non-hybrid-PA models.
     la_block_indices: ov.Tensor | None = None

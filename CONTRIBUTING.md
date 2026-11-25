@@ -77,7 +77,6 @@ curl -s http://localhost:8080/v1/completions \
 **Test matrix** (recommended):
 - [ ] Single request (warm + cold)
 - [ ] Concurrent requests (5+ simultaneous)
-- [ ] Different device types (CPU, GPU if available)
 - [ ] Different models (if applicable)
 
 ### Regression Testing

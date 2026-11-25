@@ -29,14 +29,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 logger = init_logger(__name__)
 
 
-def make_model_runner_output(req_id_to_index: dict[str, int],
-                             **kwargs) -> ModelRunnerOutput:
-    # vllm#63373 drops req_id_to_index; the scheduler indexes by req_ids order.
-    if "req_id_to_index" in ModelRunnerOutput.__dataclass_fields__:
-        kwargs["req_id_to_index"] = req_id_to_index
-    return ModelRunnerOutput(**kwargs)
-
-
 def apply_grammar_bitmask(logits: torch.Tensor, req_ids: list[str],
                           spec_tokens: dict[str, list[int]],
                           grammar_output) -> None:
@@ -124,7 +116,6 @@ class OpenVINOModelRunnerV1:
         # V1 state management
         self.requests: dict[str, CachedRequestState] = {}
         self._execute_state: tuple[SchedulerOutput, torch.Tensor] | None = None
-        self.num_cache_groups = 1
         self.input_batch = InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.model_config.max_model_len,
@@ -275,34 +266,12 @@ class OpenVINOModelRunnerV1:
         max_blocks_per_seq = max(1, (self.model_config.max_model_len + block_size - 1) // block_size)
         self._max_block_indices = max_seqs * max_blocks_per_seq * self._kv_blocks_per_block
 
-        self._block_indices_group_tensors_base = [
-            ov.Tensor(ov.Type.i32, ov.Shape([self._max_block_indices]))
-            for _ in range(self.num_cache_groups)
-        ]
-        self._block_indices_group_data = [
-            tensor.data for tensor in self._block_indices_group_tensors_base
-        ]
-
-        self._block_idx_begins_group_tensors_base = []
-        self._block_idx_begins_group_data = []
-        self._block_idx_begins_group_bufs = []
-        for group_idx in range(self.num_cache_groups):
-            if group_idx == 0:
-                group_begins_buf = self._block_idx_begins_buf
-            else:
-                group_begins_buf = np.zeros(max_seqs + 1, dtype=np.int32)
-            tensor = ov.Tensor(group_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
-            self._block_idx_begins_group_bufs.append(group_begins_buf)
-            self._block_idx_begins_group_tensors_base.append(tensor)
-            self._block_idx_begins_group_data.append(tensor.data)
-
-        self._block_idx_group_offsets = np.zeros(self.num_cache_groups, dtype=np.int32)
-        self._empty_block_indices_group_tensors = [
-            ov.Tensor(np.empty(0, dtype=np.int32))
-            for _ in range(self.num_cache_groups)
-        ]
-        self._block_indices_group_tensors_out = [None] * self.num_cache_groups
-        self._block_indices_begins_group_tensors_out = [None] * self.num_cache_groups
+        self._block_indices_tensor_base = ov.Tensor(
+            ov.Type.i32, ov.Shape([self._max_block_indices]))
+        self._block_indices_data = self._block_indices_tensor_base.data
+        self._block_idx_begins_tensor_base = ov.Tensor(
+            self._block_idx_begins_buf, ov.Shape([max_seqs + 1]), ov.Type.i32)
+        self._empty_block_indices_tensor = ov.Tensor(np.empty(0, dtype=np.int32))
 
     @staticmethod
     def _slice_tensor(base_tensor: ov.Tensor, length: int) -> ov.Tensor:
@@ -320,10 +289,6 @@ class OpenVINOModelRunnerV1:
                 cache.data[slot] = 0
         return slot
 
-    def configure_cache_groups(self, num_cache_groups: int) -> None:
-        self.num_cache_groups = max(1, num_cache_groups)
-        self._init_block_index_tensors()
-
     def configure_la_prefix_cache(self, interval: int, kv_blocks_per_block: int) -> None:
         self._la_interval = interval
         self._kv_blocks_per_block = kv_blocks_per_block
@@ -335,7 +300,7 @@ class OpenVINOModelRunnerV1:
         self._la_block_indices_buf = np.zeros(max_la_indices, dtype=np.int32)
         self._la_block_indices_tensor_base = ov.Tensor(
             self._la_block_indices_buf, ov.Shape([max_la_indices]), ov.Type.i32)
-        self.configure_cache_groups(self.num_cache_groups)
+        self._init_block_index_tensors()
 
     def _la_dependency_waves(self, scheduler_output: SchedulerOutput) -> list[list[str]] | None:
         """vLLM caches a block when it allocates it, so a request can hit a
@@ -446,17 +411,13 @@ class OpenVINOModelRunnerV1:
             if slot is not None:
                 self._conv_slot_free.append(slot)
 
-        # Remove unscheduled requests from batch (but keep cached state)
-        # vLLM 0.33 sends resumed requests as cached requests listed in
-        # resumed_req_ids; after vllm#63373 they arrive in scheduled_new_reqs
-        # with prefill_token_ids (prompt + generated tokens).
+        # Remove unscheduled requests from batch (but keep cached state). A
+        # request resumed after preemption arrives in scheduled_new_reqs with
+        # prefill_token_ids (prompt + generated tokens) and is re-added below.
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
-        resumed_req_ids = getattr(
-            scheduler_output.scheduled_cached_reqs, "resumed_req_ids", ())
         new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
         for req_id in list(self.input_batch.req_id_to_index):
-            if (req_id not in scheduled_req_ids or req_id in resumed_req_ids
-                    or req_id in new_req_ids):
+            if req_id not in scheduled_req_ids or req_id in new_req_ids:
                 self.input_batch.remove_request(req_id)
 
         # Add new requests
@@ -503,13 +464,10 @@ class OpenVINOModelRunnerV1:
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             if new_block_ids is not None:
-                if req_id in resumed_req_ids:
-                    req_state.block_ids = new_block_ids
-                else:
-                    req_state.block_ids = tuple(
-                        existing + new
-                        for existing, new in zip(req_state.block_ids, new_block_ids)
-                    )
+                req_state.block_ids = tuple(
+                    existing + new
+                    for existing, new in zip(req_state.block_ids, new_block_ids)
+                )
             req_state.num_computed_tokens = num_computed_tokens
             if req_id not in self.input_batch.req_id_to_index:
                 self.input_batch.add_request(req_state)
@@ -576,42 +534,26 @@ class OpenVINOModelRunnerV1:
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         req_spans: dict[str, tuple[int, int, int]] = {}
         self._subseq_begins_buf[0] = 0
-        self._block_idx_group_offsets.fill(0)
-        for group_idx in range(self.num_cache_groups):
-            self._block_idx_begins_group_data[group_idx][0] = 0
+        block_offset = 0
+        self._block_idx_begins_buf[0] = 0
 
         for req_id in req_ids:
             req_index = self.input_batch.req_id_to_index[req_id]
             request = self.requests[req_id]
-            for group_idx in range(self.num_cache_groups):
-                if group_idx < len(request.block_ids):
-                    group_block_table = request.block_ids[group_idx]
-                elif request.block_ids:
-                    # Backward-compatible fallback for single-group block_ids.
-                    group_block_table = request.block_ids[0]
-                else:
-                    group_block_table = []
-                if self._kv_blocks_per_block > 1 and group_block_table:
-                    group_block_table = (
-                        np.asarray(group_block_table, dtype=np.int32)[:, None]
-                        * self._kv_blocks_per_block + self._kv_block_offsets).ravel()
-
-                num_group_blocks = len(group_block_table)
-                if num_group_blocks:
-                    group_offset = int(self._block_idx_group_offsets[group_idx])
-                    if group_offset + num_group_blocks > self._max_block_indices:
-                        raise RuntimeError(
-                            f"block_indices overflow: {group_offset + num_group_blocks} > {self._max_block_indices}")
-                    self._block_indices_group_data[group_idx][
-                        group_offset:group_offset + num_group_blocks
-                    ] = group_block_table
-                    self._block_idx_group_offsets[group_idx] = (
-                        group_offset + num_group_blocks
-                    )
-
-                self._block_idx_begins_group_data[group_idx][n_reqs + 1] = (
-                    self._block_idx_group_offsets[group_idx]
-                )
+            block_table = request.block_ids[0]
+            if self._kv_blocks_per_block > 1 and block_table:
+                block_table = (
+                    np.asarray(block_table, dtype=np.int32)[:, None]
+                    * self._kv_blocks_per_block + self._kv_block_offsets).ravel()
+            num_blocks = len(block_table)
+            if num_blocks:
+                if block_offset + num_blocks > self._max_block_indices:
+                    raise RuntimeError(
+                        f"block_indices overflow: {block_offset + num_blocks} > {self._max_block_indices}")
+                self._block_indices_data[
+                    block_offset:block_offset + num_blocks] = block_table
+                block_offset += num_blocks
+            self._block_idx_begins_buf[n_reqs + 1] = block_offset
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_computed = self.input_batch.num_computed_tokens_cpu[req_index]
@@ -771,24 +713,11 @@ class OpenVINOModelRunnerV1:
         sampled_token_indices_tensor = self._slice_tensor(self._sampled_idx_tensor_base, n_rows)
         past_lens_tensor = self._slice_tensor(self._past_lens_tensor_base, n_reqs)
         subsequence_begins_tensor = self._slice_tensor(self._subseq_begins_tensor_base, n_reqs + 1)
-        for group_idx in range(self.num_cache_groups):
-            num_blocks = int(self._block_idx_group_offsets[group_idx])
-            if num_blocks == 0:
-                self._block_indices_group_tensors_out[group_idx] = \
-                    self._empty_block_indices_group_tensors[group_idx]
-            else:
-                self._block_indices_group_tensors_out[group_idx] = \
-                    self._slice_tensor(
-                        self._block_indices_group_tensors_base[group_idx],
-                        num_blocks,
-                    )
-            self._block_indices_begins_group_tensors_out[group_idx] = \
-                self._slice_tensor(
-                    self._block_idx_begins_group_tensors_base[group_idx],
-                    n_reqs + 1,
-                )
-        block_indices_group_tensors = self._block_indices_group_tensors_out
-        block_indices_begins_group_tensors = self._block_indices_begins_group_tensors_out
+        block_indices_tensor = (
+            self._slice_tensor(self._block_indices_tensor_base, block_offset)
+            if block_offset else self._empty_block_indices_tensor)
+        block_indices_begins_tensor = self._slice_tensor(
+            self._block_idx_begins_tensor_base, n_reqs + 1)
         self._max_context_len_buf[()] = max_seq_len
         max_context_len_tensor = self._max_context_len_tensor_base
 
@@ -803,10 +732,8 @@ class OpenVINOModelRunnerV1:
         attn_metadata = OpenVINOAttentionMetadata(
             past_lens=past_lens_tensor,
             subsequence_begins=subsequence_begins_tensor,
-            block_indices=block_indices_group_tensors[0],
-            block_indices_groups=block_indices_group_tensors,
-            block_indices_begins=block_indices_begins_group_tensors[0],
-            block_indices_begins_groups=block_indices_begins_group_tensors,
+            block_indices=block_indices_tensor,
+            block_indices_begins=block_indices_begins_tensor,
             max_context_len=max_context_len_tensor,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
@@ -1171,8 +1098,7 @@ class OpenVINOModelRunnerV1:
         # Snapshot (not a live reference): with async scheduling, a later
         # step can mutate self.input_batch before the scheduler consumes
         # this step's output, corrupting it if it aliased the live dicts.
-        return make_model_runner_output(
-            dict(self.input_batch.req_id_to_index),
+        return ModelRunnerOutput(
             req_ids=list(self.input_batch.req_ids),
             sampled_token_ids=sampled_tokens,
             logprobs=logprobs_lists,
