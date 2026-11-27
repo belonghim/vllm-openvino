@@ -662,13 +662,22 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   | LFM2.5-8B-A1B, 32 | 508-514 / 502-513 | 0.032 | 169/192 | - |
   | LFM2.5-8B-A1B, 64 | 525 / 520 | 0.032 | 172/192 | -0.0000 [-0.0073, 0.0070] |
   | LFM2.5-8B-A1B, 128 | 525 / 536 | 0.047 | 174/192 | +0.014 [0.0008, 0.035] |
+  | gemma-4-E2B, 0 / 32 | 434 / 374 -> 517 / 443 | 0.0096 | 184/192 | - |
+  | Qwen3.6-35B-A3B (MoE, Hybrid-PA), 0 / 32 | 63 / 64 -> 72 / 72 | 0.0070 | 179/192 | - |
+  | gemma-4-26B-A4B (MoE), 0 / 32 | 202 / 197 -> 214-223 / 206-209 | 0.238 | 150/192 | - |
 
+  (The last three in 16 GiB / 32 GiB containers with `--language-model-only`.)
   On the dense model 64/128 give +25-40% prefill over 32 at a measurable but
-  small cost, below the `u8` KV cache's 0.007 nats. Hybrid-PA prefill does
-  not move (the matmuls are not its bottleneck), and on the MoE model 32
-  already costs 0.032 nats (0.056 on Korean) for +8% prefill, and 128 adds a
-  heavy tail (max 2.3 nats, Korean mean 0.10) for 2-4% more. Decode is
-  unchanged. The default stays at OpenVINO's 32.
+  small cost, below the `u8` KV cache's 0.007 nats. Hybrid-PA prefill barely
+  moves (the matmuls are not its bottleneck), and 128 adds a heavy tail on
+  LFM2.5-8B-A1B (max 2.3 nats, Korean mean 0.10) for 2-4% more prefill.
+  The cost of 32 itself is per model, not per architecture: 0.007-0.010
+  nats on Qwen3.6-35B-A3B and gemma-4-E2B, 0.032 on LFM2.5-8B-A1B, and 0.238
+  on gemma-4-26B-A4B, where a fifth of the argmax tokens flip (repeated runs
+  were identical), for +5-10% prefill. Next-token accuracy on the same text
+  did not drop with 32 on any of them (gemma-4-26B-A4B 82/192 both), so the
+  shift is not shown to be a loss. Decode is unchanged. The default stays at
+  OpenVINO's 32.
 - **Other CPU compile properties** (Qwen3-1.7B, concurrency 1/8) are best at
   OpenVINO's defaults: `INFERENCE_PRECISION` (already bf16), `ENABLE_CPU_PINNING`
   (already on). `ENABLE_HYPER_THREADING=false` cost 13% at concurrency 8 and
