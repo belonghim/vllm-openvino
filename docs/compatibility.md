@@ -641,23 +641,34 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   op's XAttention sparse prefill is not used: the CPU kernel applies it only
   to single-sequence steps and it approximates attention.
 - **Dynamic activation quantization** is the one prefill lever found.
-  `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` (unset = OpenVINO's 32);
-  56 first-token distributions per model, top-20 KL against `0`
-  (unquantized activations):
+  `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` (unset = OpenVINO's 32),
+  and it helps dense models only. 192 teacher-forced positions per model
+  (48 cuts of up to 3.6k tokens in English prose, Python and Korean), top-20
+  KL against `0` (unquantized activations); 95% paired-bootstrap interval of
+  the excess over 32. Runs are deterministic (a repeated run gave KL 0).
+  Prefill on a loaded host, compare within a model:
 
-  | | prefill 1k / 4k (tok/s) | mean KL (nats) | top-1 agreement |
-  |---|---|---|---|
-  | Qwen3-1.7B, 0 | 627 / 560 | - | - |
-  | Qwen3-1.7B, 32 (default) | 877 / 755 | 0.032 | 55/56 |
-  | Qwen3-1.7B, 64 | 1031 / 863 | 0.031 | 55/56 |
-  | Qwen3-1.7B, 128 | 1155 / 940 | 0.040 | 56/56 |
-  | Qwen2.5-Coder-0.5B, 0 | 2241 / 1918 | - | - |
-  | Qwen2.5-Coder-0.5B, 32 | 3124 / 2450 | 0.033 | 54/56 |
-  | Qwen2.5-Coder-0.5B, 64 | 3610 / 2767 | 0.051 | 55/56 |
-  | Qwen2.5-Coder-0.5B, 128 | 3857 / 2911 | 0.042 | 53/56 |
+  | | prefill 1k / 3.6k (tok/s) | mean KL (nats) | top-1 agreement | excess over 32 |
+  |---|---|---|---|---|
+  | Qwen3-1.7B, 0 | 595 / 530 | - | - | - |
+  | Qwen3-1.7B, 32 (default) | 718-734 / 619-650 | 0.0017 | 189/192 | - |
+  | Qwen3-1.7B, 64 | 913 / 781 | 0.0029 | 189/192 | +0.0012 [0.0005, 0.0022] |
+  | Qwen3-1.7B, 128 | 1023 / 836 | 0.0044 | 188/192 | +0.0027 [0.0019, 0.0035] |
+  | Qwen3.5-0.8B (Hybrid-PA), 0 | 282 / 269 | - | - | - |
+  | Qwen3.5-0.8B, 32 | 291 / 281 | 0.0015 | 185/192 | - |
+  | Qwen3.5-0.8B, 64 | 303 / 290 | 0.0020 | 188/192 | +0.0005 [0.0002, 0.0008] |
+  | Qwen3.5-0.8B, 128 | 292 / 276 | 0.0027 | 183/192 | +0.0012 [0.0009, 0.0015] |
+  | LFM2.5-8B-A1B (MoE), 0 | 474 / 470 | - | - | - |
+  | LFM2.5-8B-A1B, 32 | 508-514 / 502-513 | 0.032 | 169/192 | - |
+  | LFM2.5-8B-A1B, 64 | 525 / 520 | 0.032 | 172/192 | -0.0000 [-0.0073, 0.0070] |
+  | LFM2.5-8B-A1B, 128 | 525 / 536 | 0.047 | 174/192 | +0.014 [0.0008, 0.035] |
 
-  Decode is unchanged. The extra deviation of 64/128 is within this sample's
-  noise, but the default was kept because the cost could not be ruled out.
+  On the dense model 64/128 give +25-40% prefill over 32 at a measurable but
+  small cost, below the `u8` KV cache's 0.007 nats. Hybrid-PA prefill does
+  not move (the matmuls are not its bottleneck), and on the MoE model 32
+  already costs 0.032 nats (0.056 on Korean) for +8% prefill, and 128 adds a
+  heavy tail (max 2.3 nats, Korean mean 0.10) for 2-4% more. Decode is
+  unchanged. The default stays at OpenVINO's 32.
 - **Other CPU compile properties** (Qwen3-1.7B, concurrency 1/8) are best at
   OpenVINO's defaults: `INFERENCE_PRECISION` (already bf16), `ENABLE_CPU_PINNING`
   (already on). `ENABLE_HYPER_THREADING=false` cost 13% at concurrency 8 and

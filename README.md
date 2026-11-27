@@ -50,7 +50,7 @@ TORCH_COMPILE_DISABLE=1 OMP_WAIT_POLICY=PASSIVE vllm serve --model /models/<mode
 | `VLLM_OPENVINO_ENABLE_HYPER_THREADING` | `true`, `false`, `auto` | `auto` |
 | `VLLM_OPENVINO_INFERENCE_PRECISION` | `f32`, `f16`, `bf16`; unset = OpenVINO's default | unset |
 | `VLLM_OPENVINO_ENABLE_CPU_PINNING` | `true`, `false`, `auto` | `auto` |
-| `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` | Activation quantization group for compressed matmuls: `64`/`128` give +17% / +23-32% prefill at a small, unconfirmed accuracy cost; `0` disables it. Unset = OpenVINO's 32 | unset |
+| `VLLM_OPENVINO_DYNAMIC_QUANTIZATION_GROUP_SIZE` | Activation quantization group for compressed matmuls. On dense models `64`/`128` give +25-40% prefill for 0.001-0.003 nats (less than the `u8` KV cache); no gain on Hybrid-PA, and on MoE little gain with a larger accuracy cost. `0` disables it. Unset = OpenVINO's 32 | unset |
 | `VLLM_OPENVINO_SCHEDULING_CORE_TYPE` | Hybrid P/E-core CPUs: `PCORE_ONLY`, `ECORE_ONLY`, `ANY_CORE` | unset |
 | `VLLM_OPENVINO_LA_CACHE_INTERVAL_MULTIPLIER` | Hybrid-PA prefix caching block in 32-token KV blocks (8 = 256 tokens). `0` = OpenVINO GenAI's automatic rule. Smaller = finer prefix hits, more memory per token | `8` |
 | `VLLM_OPENVINO_MTP_DRAFT_VOCAB` | MTP draft lm_head covers token ids below this value; changes speed, not output. `0` = whole vocabulary | `32768` |
