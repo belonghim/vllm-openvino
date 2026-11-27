@@ -76,6 +76,15 @@ Tracked upstream:
   passed (preemption, prefix hit next to MTP drafts) at or above 0.34.0's
   throughput, and Qwen3.5-0.8B and Qwen3-1.7B planned the same blocks with
   identical greedy output, sequential and concurrent.
+- [#69814](https://github.com/vllm-project/vllm/pull/69814) (main, after
+  0.34.0) drops the ungrouped memory helpers (`estimate_max_model_len`,
+  `check_enough_kv_cache_memory`, `may_override_num_blocks`) and passes
+  `num_blocks` straight into config materialization; #69706 drops
+  `pcp_world_size` from the KV cache managers. The plugin uses none of them
+  and still reports bytes from `determine_available_memory()`. On main
+  `6beda2a3a` (needs `torchvision==0.29.2`) the smoke test passed on both
+  frontends with every output hash unchanged and throughput within 3% of
+  0.34.0.
 - [#53558](https://github.com/vllm-project/vllm/pull/53558) (in 0.33.0) lets a
   platform supply a `KVCacheConfigBuilder`. The plugin keeps the default:
   Hybrid-PA exposes only attention specs and allocates conv/SSM state itself.
