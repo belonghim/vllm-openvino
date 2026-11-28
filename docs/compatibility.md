@@ -675,8 +675,11 @@ decode. Where the time goes, so tuning effort is not spent in the wrong place:
   nats on Qwen3.6-35B-A3B and gemma-4-E2B, 0.032 on LFM2.5-8B-A1B, and 0.238
   on gemma-4-26B-A4B, where a fifth of the argmax tokens flip (repeated runs
   were identical), for +5-10% prefill. Next-token accuracy on the same text
-  did not drop with 32 on any of them (gemma-4-26B-A4B 82/192 both), so the
-  shift is not shown to be a loss. Decode is unchanged. The default stays at
+  did not drop with 32 on any of them (gemma-4-26B-A4B 82/192 both), and on
+  the first 300 GSM8K test questions (greedy chat, 768 tokens)
+  gemma-4-26B-A4B solved 289 with `0` and 288 with 32: only 86 answers were
+  identical, 2 were solved only with `0` and 1 only with 32. The shift
+  changes wording, not accuracy. Decode is unchanged. The default stays at
   OpenVINO's 32.
 - **Other CPU compile properties** (Qwen3-1.7B, concurrency 1/8) are best at
   OpenVINO's defaults: `INFERENCE_PRECISION` (already bf16), `ENABLE_CPU_PINNING`
